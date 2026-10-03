@@ -1,0 +1,3884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover"/>
+<meta name="theme-color" content="#0d0f14"/>
+<title>LocalLLM</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+/* ── TOKENS ───────────────────────────────────────────── */
+:root {
+  /* claude.ai light theme — cream background, dark readable text */
+  --bg:       #ffffff;
+  --bg2:      #f5f4ef;
+  --bg3:      #eeece2;
+  --border:   #e3e1d8;
+  --border2:  #d4d1c4;
+  --text:     #1f1e1c;
+  --text2:    #5a574e;
+  --text3:    #8a877d;
+  --accent:   #c15f3c;
+  --accentH:  #a84e2f;
+  --green:    #2e8b57;
+  --red:      #c0392b;
+  --yellow:   #b8860b;
+  --mono:     'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  --sans:     -apple-system, 'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
+  --sbw:      260px;
+  --ease:     .15s ease;
+}
+
+/* ── DARK THEME — applied when <html data-theme="dark"> ──────────── */
+html[data-theme="dark"] {
+  --bg:       #1a1c22;
+  --bg2:      #22252d;
+  --bg3:      #2b2f39;
+  --border:   #353a45;
+  --border2:  #424857;
+  --text:     #e8e6e0;
+  --text2:    #a8a59c;
+  --text3:    #6f6d66;
+  --accent:   #d4744f;
+  --accentH:  #e08862;
+  --green:    #4caf7d;
+  --red:      #e05545;
+  --yellow:   #d4a437;
+}
+
+/* ── RESET ────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;font-family:var(--sans);background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+button{cursor:pointer;border:none;background:none;font-family:inherit;color:inherit}
+input,textarea,select{font-family:inherit;outline:none;color:var(--text)}
+a{color:var(--accentH)}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+
+/* ── LAYOUT ───────────────────────────────────────────── */
+#app{display:flex;height:100vh;height:100dvh;overflow:hidden}
+
+/* ── SIDEBAR ──────────────────────────────────────────── */
+#sidebar{
+  width:var(--sbw);min-width:var(--sbw);flex-shrink:0;
+  background:var(--bg2);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;height:100vh;height:100dvh;
+  transition:transform .25s ease;z-index:200;
+}
+#sidebar.hidden{transform:translateX(-100%)}
+
+/* Claude-style collapsed rail: instead of vanishing, the sidebar shrinks to a
+   thin strip so a sliver stays visible and the freed width goes to content.
+   Desktop only — mobile keeps the full slide-away overlay behavior. */
+@media(min-width:681px){
+  #sidebar.rail{
+    width:56px;min-width:56px;transform:none;overflow:hidden;
+  }
+  /* in rail mode, hide everything except the header's icon buttons */
+  #sidebar.rail #tok-panel,
+  #sidebar.rail #chat-search,
+  #sidebar.rail #chatlist,
+  #sidebar.rail #sbfoot,
+  #sidebar.rail #logo{display:none!important}
+  #sidebar.rail #sbhead{
+    flex-direction:column;gap:10px;padding:12px 0;align-items:center;
+  }
+}
+
+/* sidebar header */
+#sbhead{
+  padding:13px 11px 10px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:7px;flex-shrink:0;
+}
+#logo{display:flex;align-items:center;gap:8px;flex:1;font-size:15px;font-weight:600}
+#logo .dot{
+  width:28px;height:28px;border-radius:8px;flex-shrink:0;
+  background:linear-gradient(135deg,var(--accent),var(--accentH));
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:700;color:#fff;
+}
+.hbtn{
+  width:30px;height:30px;border-radius:7px;
+  background:var(--bg3);border:1px solid var(--border2);
+  color:var(--text2);display:flex;align-items:center;justify-content:center;
+  font-size:16px;transition:all var(--ease);flex-shrink:0;
+}
+.hbtn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+/* token balance */
+#tok-panel{
+  padding:10px 10px 8px;border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+#tok-panel .label{
+  font-size:9px;font-weight:700;color:var(--text3);
+  text-transform:uppercase;letter-spacing:.8px;margin-bottom:7px;
+}
+#tok-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:5px}
+.tok-card{
+  background:var(--bg3);border-radius:9px;padding:9px 8px;text-align:center;
+}
+.tok-card.used{border:1px solid rgba(251,191,36,.2)}
+.tok-card.left{border:1px solid rgba(62,207,142,.2)}
+.tok-num{
+  font-size:15px;font-weight:700;font-family:var(--mono);line-height:1;margin-bottom:3px;
+}
+.tok-card.used .tok-num{color:var(--yellow)}
+.tok-card.left .tok-num{color:var(--green)}
+.tok-sub{font-size:9px;color:var(--text3)}
+#tok-note{font-size:9px;color:var(--text3);text-align:center}
+
+/* chat list */
+#chatlist{flex:1 1 auto;min-height:60px;overflow-y:auto;padding:6px 7px}
+.cl-section{
+  font-size:10px;font-weight:600;color:var(--text3);
+  text-transform:uppercase;letter-spacing:.8px;
+  padding:9px 8px 3px;
+}
+.cl-item{
+  padding:8px 9px;border-radius:8px;cursor:pointer;
+  display:flex;align-items:center;gap:7px;
+  transition:background var(--ease);margin-bottom:1px;
+  border:1px solid transparent;
+}
+.cl-item:hover{background:var(--bg3)}
+.cl-item.active{background:var(--bg3);border-color:var(--border2)}
+.cl-icon{font-size:12px;flex-shrink:0;opacity:.45}
+.cl-body{flex:1;min-width:0}
+.cl-title{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.cl-meta{font-size:10px;color:var(--text3);margin-top:1px}
+.cl-btns{display:flex;gap:2px;opacity:0;transition:opacity var(--ease)}
+.cl-item:hover .cl-btns{opacity:1}
+.cl-btn{
+  width:22px;height:22px;border-radius:5px;font-size:12px;color:var(--text3);
+  display:flex;align-items:center;justify-content:center;transition:all .1s;
+}
+.cl-btn:hover{background:var(--border2);color:var(--text)}
+.cl-btn.del:hover{background:var(--red);color:#fff}
+.cl-btn.move:hover{background:var(--accent);color:#fff}
+
+/* ── FOLDERS ──────────────────────────────────────────── */
+.cl-folder{margin:2px 0 4px}
+.cl-folder-hdr{
+  display:flex;align-items:center;gap:6px;
+  padding:7px 8px;border-radius:7px;cursor:pointer;
+  transition:background var(--ease);user-select:none;
+}
+.cl-folder-hdr:hover{background:var(--bg3)}
+.cl-folder-caret{
+  font-size:10px;color:var(--text3);flex-shrink:0;
+  transition:transform var(--ease);transform:rotate(90deg);
+}
+.cl-folder.collapsed .cl-folder-caret{transform:rotate(0deg)}
+.cl-folder-icon{font-size:13px;flex-shrink:0;opacity:.7}
+.cl-folder-name{
+  flex:1;min-width:0;font-size:12.5px;font-weight:600;color:var(--text2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  text-transform:uppercase;letter-spacing:.4px;
+}
+.cl-folder-count{
+  font-size:10px;color:var(--text3);background:var(--bg3);
+  border-radius:10px;padding:1px 7px;flex-shrink:0;
+}
+.cl-folder-hdr .fdel,
+.cl-folder-hdr .fadd{
+  width:20px;height:20px;border-radius:5px;font-size:13px;color:var(--text3);
+  display:none;align-items:center;justify-content:center;transition:all .1s;flex-shrink:0;
+}
+.cl-folder-hdr:hover .fdel,
+.cl-folder-hdr:hover .fadd{display:flex}
+.cl-folder-hdr .fdel:hover{background:var(--red);color:#fff}
+.cl-folder-hdr .fadd:hover{background:var(--accent);color:#fff}
+.cl-folder-body{padding-left:10px;border-left:1px solid var(--border);margin-left:13px}
+.cl-folder.collapsed .cl-folder-body{display:none}
+.cl-folder-empty{font-size:11px;color:var(--text3);padding:6px 8px;font-style:italic}
+
+/* Drag & drop visual feedback */
+.cl-item{cursor:grab}
+.cl-item.dragging{opacity:.45;cursor:grabbing}
+.cl-folder.drop-hot > .cl-folder-hdr{
+  background:var(--accent);color:#fff;
+  box-shadow:0 0 0 2px var(--accent) inset;border-radius:7px;
+}
+.cl-folder.drop-hot > .cl-folder-hdr .cl-folder-name,
+.cl-folder.drop-hot > .cl-folder-hdr .cl-folder-caret,
+.cl-folder.drop-hot > .cl-folder-hdr .cl-folder-icon{color:#fff}
+.cl-folder.drop-hot .cl-folder-body{background:rgba(217,119,87,.06);border-radius:6px}
+#unfiled-zone.drop-hot{
+  outline:2px dashed var(--accent);outline-offset:-2px;border-radius:8px;
+  background:rgba(217,119,87,.05);
+}
+#unfiled-zone{min-height:40px;transition:background .1s}
+
+/* sidebar footer */
+#sbfoot{padding:8px 7px;border-top:1px solid var(--border);flex-shrink:0;max-height:70vh;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.sb-btn{
+  width:100%;padding:8px 11px;border-radius:8px;
+  display:flex;align-items:center;gap:8px;
+  color:var(--text2);font-size:13px;transition:all var(--ease);
+}
+.sb-btn:hover{background:var(--bg3);color:var(--text)}
+.sb-btn svg{opacity:.6;flex-shrink:0}
+
+/* dropbox panel */
+#dbx-panel{display:none;padding:0 7px 8px}
+#dbx-panel.open{display:block}
+#dbx-zone{
+  border:2px dashed var(--border2);border-radius:9px;
+  padding:18px 10px;text-align:center;cursor:pointer;
+  transition:all var(--ease);margin-bottom:7px;background:var(--bg3);
+}
+#dbx-zone:hover,#dbx-zone.over{border-color:var(--green);background:rgba(62,207,142,.06)}
+#dbx-zone-icon{font-size:20px;margin-bottom:5px}
+#dbx-zone-txt{font-size:11px;color:var(--text2);line-height:1.5}
+#dbx-zone-txt span{color:var(--accentH);text-decoration:underline}
+#dbx-status{font-size:10px;color:var(--text3);text-align:center;margin-bottom:4px}
+#dbx-status.ok{color:var(--green)}
+#dbx-status.err{color:var(--red)}
+#dbx-list{display:none}
+.dbx-item{
+  display:flex;align-items:center;gap:6px;padding:5px 6px;
+  border-radius:6px;margin-bottom:2px;font-size:11px;
+  background:var(--bg3);border:1px solid var(--border);
+}
+.dbx-icon{font-size:13px;flex-shrink:0}
+.dbx-info{flex:1;min-width:0}
+.dbx-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.dbx-meta{font-size:10px;color:var(--text3);margin-top:1px}
+.dbx-del{
+  width:18px;height:18px;border-radius:3px;color:var(--text3);
+  font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.dbx-del:hover{background:var(--red);color:#fff}
+#dbx-path{font-size:9px;color:var(--text3);text-align:center;margin-top:4px;font-family:var(--mono);word-break:break-all}
+
+/* ── MAIN ─────────────────────────────────────────────── */
+#main{flex:1;display:flex;flex-direction:column;min-width:0;height:100vh;height:100dvh;overflow:hidden}
+
+/* topbar */
+#topbar{
+  padding:10px 16px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:10px;
+  background:var(--bg);flex-shrink:0;min-height:50px;
+}
+#btn-toggle{
+  display:none;
+  width:30px;height:30px;border-radius:7px;
+  background:var(--bg3);border:1px solid var(--border2);
+  color:var(--text2);font-size:16px;display:flex;align-items:center;justify-content:center;
+  transition:all var(--ease);flex-shrink:0;
+}
+#btn-toggle:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+#title-area{flex:1;min-width:0;display:flex;align-items:center;gap:6px}
+#chat-title{
+  font-size:14px;font-weight:500;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  cursor:pointer;padding:3px 6px;border-radius:5px;transition:background var(--ease);
+}
+#chat-title:hover{background:var(--bg3)}
+#title-edit{
+  font-size:14px;font-weight:500;flex:1;
+  background:var(--bg3);border:1px solid var(--accent);
+  border-radius:6px;padding:3px 9px;display:none;
+}
+#btn-close{
+  width:26px;height:26px;border-radius:6px;flex-shrink:0;
+  color:var(--text3);font-size:14px;
+  display:none;align-items:center;justify-content:center;
+  transition:all var(--ease);
+}
+#btn-close.show{display:flex}
+#btn-close:hover{background:var(--red);color:#fff}
+
+/* model pill */
+#model-pill{
+  display:flex;align-items:center;gap:5px;
+  padding:5px 10px;border-radius:8px;
+  background:var(--bg3);border:1px solid var(--border2);
+  cursor:pointer;transition:all var(--ease);flex-shrink:0;
+  max-width:130px;
+}
+#model-pill:hover{border-color:var(--accent)}
+#spend-pill{
+  display:flex;align-items:center;gap:5px;
+  padding:8px 12px;border-radius:8px;
+  background:var(--bg2);border:1px solid var(--border);
+  font-size:12px;font-weight:600;color:var(--green);
+  white-space:nowrap;flex-shrink:0;cursor:default;
+  font-variant-numeric:tabular-nums;
+}
+#spend-pill-lbl{color:var(--green)}
+#model-pill-lbl{
+  font-size:12px;color:var(--text2);font-weight:500;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+
+/* model dropdown */
+#model-drop{
+  position:fixed;top:52px;right:16px;width:300px;
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:12px;box-shadow:0 12px 48px rgba(0,0,0,.6);
+  z-index:1000;display:none;max-height:75vh;overflow-y:auto;
+}
+#model-drop.open{display:block}
+.md-group{
+  font-size:10px;font-weight:600;color:var(--text3);
+  text-transform:uppercase;letter-spacing:.9px;
+  padding:10px 14px 3px;
+  position:sticky;top:0;background:var(--bg2);
+}
+.md-item{
+  padding:10px 14px;display:flex;align-items:center;
+  justify-content:space-between;cursor:pointer;
+  transition:background .1s;
+}
+.md-item:hover{background:var(--bg3)}
+.md-item.active{background:rgba(92,110,245,.1)}
+.md-name{font-size:13px;font-weight:500;color:var(--text)}
+.md-free{
+  font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px;
+  background:rgba(62,207,142,.12);color:var(--green);
+  border:1px solid rgba(62,207,142,.2);flex-shrink:0;
+}
+
+/* ── MESSAGES ─────────────────────────────────────────── */
+#msgs-wrap{flex:1;overflow-y:auto;padding:16px 0;scroll-behavior:smooth}
+#msgs{max-width:960px;margin:0 auto;padding:0 18px;display:flex;flex-direction:column;gap:18px}
+
+/* When sidebar is collapsed, reclaim the freed width so less scrolling is
+   needed. Capped at 1400px so text lines don't get uncomfortably long on wide
+   monitors. Desktop only — the mobile @media block keeps its own 100% rule. */
+#app.sb-hidden #msgs{max-width:1600px}
+#app.sb-hidden #welcome{max-width:1600px}
+#app.sb-hidden #input-box{max-width:1600px}
+#app.sb-hidden .msg-body{max-width:100%}
+
+/* welcome */
+#welcome{
+  max-width:960px;margin:0 auto;padding:60px 18px 20px;
+  display:flex;flex-direction:column;align-items:center;text-align:center;
+}
+#welcome-logo{
+  width:54px;height:54px;border-radius:14px;
+  background:linear-gradient(135deg,var(--accent),var(--accentH));
+  display:flex;align-items:center;justify-content:center;
+  font-size:25px;font-weight:700;color:#fff;margin-bottom:16px;
+  box-shadow:0 8px 28px rgba(92,110,245,.3);
+}
+#welcome h1{font-size:21px;font-weight:600;margin-bottom:7px}
+#welcome p{font-size:13px;color:var(--text2);line-height:1.65}
+
+/* messages */
+.msg{display:flex;gap:10px;align-items:flex-start}
+.msg.user{flex-direction:row-reverse}
+.msg-av{
+  width:28px;height:28px;border-radius:7px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:700;
+}
+.msg.user .msg-av{background:var(--accent);color:#fff}
+.msg.assistant .msg-av{background:var(--bg3);color:var(--text2);border:1px solid var(--border2)}
+.msg-body{max-width:880px;min-width:0}
+.msg.user .msg-body{text-align:right}
+.msg-bub{
+  display:inline-block;padding:10px 14px;border-radius:12px;
+  font-size:14px;line-height:1.65;text-align:left;word-break:break-word;
+}
+.msg.user .msg-bub{background:var(--accent);color:#fff;border-radius:12px 12px 3px 12px}
+.msg.assistant .msg-bub{
+  background:var(--bg2);border:1px solid var(--border);
+  border-radius:12px 12px 12px 3px;color:var(--text);width:100%;
+}
+.msg-meta{font-size:10px;color:var(--text3);margin-top:3px;padding:0 3px}
+
+/* markdown */
+.msg-bub p{margin:0 0 9px}
+.msg-bub p:last-child{margin-bottom:0}
+.msg-bub h1{font-size:17px;font-weight:600;margin:12px 0 5px}
+.msg-bub h2{font-size:15px;font-weight:600;margin:10px 0 4px}
+.msg-bub h3{font-size:14px;font-weight:600;margin:8px 0 3px}
+.msg-bub ul,.msg-bub ol{padding-left:18px;margin:6px 0}
+.msg-bub li{margin:2px 0;font-size:14px}
+.msg-bub code{background:#eeece2!important;color:#a84e2f!important;font-family:var(--mono);font-size:12.5px;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;color:#c9d1ff}
+.msg-bub pre{background:#f5f4ef!important;border:1px solid #e3e1d8!important;color:#1f1e1c!important;background:#090b10;border:1px solid var(--border2);border-radius:8px;overflow-x:auto;margin:9px 0}
+.code-hdr{display:flex;align-items:center;justify-content:space-between;padding:5px 12px;border-bottom:1px solid var(--border);background:#0d1017;border-radius:8px 8px 0 0}
+.code-lang{font-size:10px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;font-weight:600}
+.copy-btn{font-size:11px;color:var(--text3);padding:2px 7px;border-radius:4px;border:1px solid var(--border2);transition:all .1s}
+.copy-btn:hover{background:var(--bg3);color:var(--text)}
+.copy-btn.done{color:var(--green);border-color:rgba(62,207,142,.3)}
+.msg-bub pre code{display:block;padding:12px 14px;background:transparent;font-size:12.5px;line-height:1.6;color:#c5cde8;white-space:pre}
+.msg-bub strong{color:var(--text);font-weight:600}
+.msg-bub em{color:var(--text2)}
+.msg-bub blockquote{border-left:3px solid var(--accent);padding:5px 11px;margin:7px 0;background:rgba(92,110,245,.07);border-radius:0 5px 5px 0;color:var(--text2)}
+.msg-bub table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px;overflow-x:auto;display:block}
+.msg-bub th,.msg-bub td{border:1px solid var(--border2);padding:7px 14px;text-align:left;white-space:nowrap}
+.msg-bub th{background:var(--bg3);font-weight:600;color:var(--text);border-bottom:2px solid var(--accent)}
+.msg-bub tr:nth-child(even){background:rgba(255,255,255,.02)}
+.msg-bub tr:hover td{background:rgba(92,110,245,.05)}
+.msg-bub hr{border:none;border-top:1px solid var(--border);margin:10px 0}
+
+/* thinking */
+.thinking{display:flex;gap:4px;align-items:center;padding:4px 0}
+.thinking span{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:think .9s infinite}
+.thinking span:nth-child(2){animation-delay:.2s}
+.thinking span:nth-child(3){animation-delay:.4s}
+@keyframes think{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
+
+/* ── INPUT ────────────────────────────────────────────── */
+#input-wrap{padding:10px 18px 12px;border-top:1px solid var(--border);flex-shrink:0;background:var(--bg)}
+#input-box{
+  max-width:960px;margin:0 auto;
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:12px;overflow:hidden;transition:border-color var(--ease);
+}
+#input-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px rgba(92,110,245,.08)}
+#attach-prev{padding:8px 11px 0;display:none;flex-wrap:wrap;gap:5px}
+#attach-prev.has{display:flex}
+.ach{
+  display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px;
+  background:var(--bg3);border:1px solid var(--border2);font-size:11px;color:var(--text2);
+}
+.ach button{color:var(--text3);font-size:12px;width:14px;height:14px;display:flex;align-items:center;justify-content:center}
+.ach button:hover{background:var(--red);color:#fff;border-radius:2px}
+#input-row{display:flex;align-items:flex-end;gap:5px;padding:8px 10px}
+#btn-attach{
+  width:30px;height:30px;border-radius:6px;flex-shrink:0;color:var(--text3);font-size:17px;
+  display:flex;align-items:center;justify-content:center;transition:all var(--ease);
+}
+#btn-attach:hover{background:var(--bg3);color:var(--text)}
+#file-in{display:none}
+#msg-in{
+  flex:1;background:transparent;border:none;color:var(--text);
+  font-size:14px;line-height:1.55;resize:none;
+  min-height:22px;max-height:180px;padding:3px 0;overflow-y:auto;
+}
+#msg-in::placeholder{color:var(--text3)}
+#btn-send{
+  width:32px;height:32px;border-radius:8px;flex-shrink:0;
+  background:var(--accent);color:#fff;font-size:14px;
+  display:flex;align-items:center;justify-content:center;
+  transition:all var(--ease);
+}
+#btn-send:hover:not(:disabled){background:var(--accentH);transform:scale(1.06)}
+#btn-send:disabled{opacity:.35;cursor:not-allowed;transform:none}
+#input-foot{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 12px 8px;font-size:10px;color:var(--text3);
+}
+
+/* ── MODALS ───────────────────────────────────────────── */
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);z-index:500;display:none}
+#overlay.open{display:block}
+#settings-modal{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:min(510px,94vw);background:var(--bg2);
+  border:1px solid var(--border2);border-radius:14px;
+  box-shadow:0 24px 80px rgba(0,0,0,.7);z-index:501;
+  display:none;max-height:90vh;overflow-y:auto;
+}
+#settings-modal.open{display:block}
+
+/* ── KB MANAGEMENT MODAL (June 13) — large, opened from Settings ───────── */
+#kb-modal{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:min(900px,90vw);height:80vh;background:var(--bg2);
+  border:1px solid var(--border2);border-radius:14px;
+  box-shadow:0 24px 80px rgba(0,0,0,.7);z-index:9999;
+  display:none;flex-direction:column;overflow:hidden;
+}
+#kb-modal.open{display:flex}
+#kb-modal .mhdr{flex-shrink:0}
+#kb-modal-body{flex:1 1 auto;overflow-y:auto;padding:14px 20px}
+#kb-modal-list{margin-top:10px}
+.kbm-item{border:1px solid var(--border2);border-radius:9px;padding:0;margin-bottom:6px;position:relative;overflow:hidden}
+.kbm-row-head{display:flex;align-items:center;gap:10px;padding:11px 13px;cursor:pointer}
+.kbm-row-head:hover{background:var(--bg3)}
+.kbm-num{color:var(--text3);font-size:12px;font-weight:600;min-width:26px}
+.kbm-caret{margin-left:auto;color:var(--text3);font-size:12px}
+.kbm-detail{padding:4px 13px 13px 49px;border-top:1px solid var(--border)}
+.kbm-d{font-size:12px;color:var(--text2);margin-top:7px;line-height:1.5}
+.kbm-d b{color:var(--text)}
+.kbm-item-del{background:none;border:1px solid #c0392b;color:#c0392b;cursor:pointer;font-size:12px;padding:4px 10px;border-radius:6px}
+.kbm-item-del:hover{color:#fff;background:#c0392b}
+.kbm-item-title{font-weight:600;font-size:13px;color:var(--text)}
+.kbm-item-meta{font-size:11px;color:var(--text3);margin-top:3px;line-height:1.4}
+.kbm-item-tags{font-size:10px;color:var(--accent);margin-top:8px}
+.mhdr{padding:16px 20px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.mhdr-title{font-size:15px;font-weight:600}
+.mhdr-close{width:27px;height:27px;border-radius:5px;color:var(--text3);font-size:16px;display:flex;align-items:center;justify-content:center;transition:all var(--ease)}
+.mhdr-close:hover{background:var(--bg3);color:var(--text)}
+.mbody{padding:18px 20px}
+.fg{margin-bottom:15px}
+.flabel{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:500;color:var(--text2);margin-bottom:6px}
+.fbadge{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600}
+.fbadge.paid{background:rgba(92,110,245,.15);color:var(--accentH)}
+.fbadge.free{background:rgba(62,207,142,.12);color:var(--green)}
+.finput{
+  width:100%;padding:9px 12px;border-radius:8px;
+  background:var(--bg3);border:1px solid var(--border2);
+  font-size:12.5px;font-family:var(--mono);transition:border-color var(--ease);
+}
+.finput:focus{border-color:var(--accent)}
+.fhint{font-size:11px;color:var(--text3);margin-top:4px;line-height:1.5}
+.fselect{width:100%;padding:9px 12px;border-radius:8px;background:var(--bg3);border:1px solid var(--border2);font-size:12.5px;cursor:pointer}
+.btn-save{width:100%;padding:11px;border-radius:8px;background:var(--accent);color:#fff;font-size:13px;font-weight:500;transition:all var(--ease)}
+.btn-save:hover{background:var(--accentH)}
+.div{height:1px;background:var(--border);margin:16px 0}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+.stat-card{background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:10px 7px;text-align:center}
+.stat-val{font-size:16px;font-weight:600;color:var(--accentH);font-family:var(--mono)}
+.stat-lbl{font-size:10px;color:var(--text3);margin-top:2px}
+
+/* ── MOBILE ───────────────────────────────────────────── */
+#mob-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:199;display:none}
+#mob-bg.show{display:block}
+#sb-tab{
+  position:fixed;left:0;top:50%;transform:translateY(-50%);
+  width:16px;height:48px;background:var(--bg2);
+  border:1px solid var(--border2);border-left:none;
+  border-radius:0 6px 6px 0;z-index:201;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  color:var(--text3);font-size:10px;transition:all var(--ease);
+  opacity:0;pointer-events:none;
+}
+#sb-tab.show{opacity:1;pointer-events:all}
+#sb-tab:hover{width:20px;background:var(--bg3);color:var(--text)}
+
+@media(max-width:680px){
+  /* Sidebar slides over content, full height */
+  #sidebar{position:fixed;left:0;top:0;bottom:0;height:100dvh;width:84vw;min-width:84vw;max-width:320px;z-index:300;padding-top:env(safe-area-inset-top)}
+  /* Stray side-tab arrow removed on mobile — hamburger button handles it */
+  #sb-tab{display:none!important}
+
+  /* Topbar — bigger tap targets + notch safe-area */
+  #topbar{padding:8px 10px;gap:8px;padding-top:calc(8px + env(safe-area-inset-top))}
+  #btn-toggle{display:flex!important;width:40px;height:40px;font-size:20px}
+  #chat-title{font-size:15px}
+  #model-pill{max-width:110px;padding:7px 10px}
+  #btn-research span{display:none}
+  #btn-research{padding:0 9px;height:34px}
+  #spend-pill{padding:7px 9px;font-size:11px}
+  #model-pill-lbl{font-size:12px}
+  #btn-discover{width:34px;height:34px}
+  #model-drop{right:8px;left:8px;width:auto;top:56px}
+
+  /* Messages — full width, readable */
+  #msgs{padding:0 12px;max-width:100%}
+  .msg-body{max-width:100%}
+  .msg-bub{font-size:15px;line-height:1.55}
+  .msg-bub pre{background:#f5f4ef!important;border:1px solid #e3e1d8!important;color:#1f1e1c!important;font-size:12.5px}
+  .msg-bub table{font-size:12px}
+
+  /* Welcome screen smaller + less dead space */
+  #welcome{padding:30px 16px 16px;justify-content:center;min-height:60%}
+  #welcome h1{font-size:24px}
+  #welcome p{font-size:13px}
+  /* iOS momentum scrolling */
+  #msgs-wrap{-webkit-overflow-scrolling:touch}
+
+  /* Input area — bigger, easier to tap */
+  #input-wrap{padding:8px 10px calc(10px + env(safe-area-inset-bottom))}
+  #input-box{padding:8px 10px}
+  #input-box textarea{font-size:16px}  /* 16px prevents iOS zoom on focus */
+  #btn-send{width:44px;height:44px}
+  #btn-mic{width:40px;height:40px}
+  #btn-attach{width:40px;height:40px}
+
+  /* Footer controls — bigger checkboxes and toggles */
+  #input-foot{font-size:12px;flex-wrap:wrap;gap:6px}
+  #input-foot > div{flex-wrap:wrap;gap:8px}
+  .mode-btn{padding:7px 14px;font-size:12px}
+  #ws-tog{transform:scale(1.3);margin-right:2px}
+  #ws-lbl{font-size:12px}
+
+  /* Stats grid 2-col */
+  .stat-grid{grid-template-columns:1fr 1fr}
+
+  /* Credit balance boxes bigger text */
+  .tok-num{font-size:16px}
+
+  /* Touch devices have no hover — always show chat + folder action buttons */
+  .cl-btns{opacity:1}
+  .cl-folder-hdr .fdel,
+  .cl-folder-hdr .fadd{display:flex}
+
+  /* File preview wraps */
+  #file-preview{padding:6px 10px 0}
+}
+
+@media(min-width:681px){
+  #mob-bg{display:none!important}
+  #btn-toggle{display:none}
+}
+
+/* ── TOAST ────────────────────────────────────────────── */
+#toast{
+  position:fixed;bottom:70px;left:50%;transform:translateX(-50%);
+  background:var(--bg3);border:1px solid var(--border2);color:var(--text);
+  padding:8px 18px;border-radius:20px;font-size:12.5px;
+  z-index:9999;opacity:0;transition:opacity .2s;pointer-events:none;white-space:nowrap;
+}
+#toast.show{opacity:1}
+
+/* ── CHAT STATUS DOTS ─────────────────────────────────────────── */
+.cl-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  margin-right: 1px;
+}
+.cl-dot.green  { background: var(--green);  box-shadow: 0 0 4px rgba(62,207,142,.5); }
+.cl-dot.red    { background: var(--red);    box-shadow: 0 0 4px rgba(248,113,113,.5); }
+.cl-dot.grey   { background: var(--text3);  }
+
+/* ── ORPHAN SECTION ───────────────────────────────────────────── */
+.cl-orphan-hdr {
+  font-size: 10px; font-weight: 600; color: var(--red);
+  text-transform: uppercase; letter-spacing: .8px;
+  padding: 9px 8px 3px; display: flex; align-items: center; gap: 5px;
+}
+.cl-orphan-item {
+  padding: 6px 9px; border-radius: 8px;
+  display: flex; align-items: center; gap: 7px;
+  margin-bottom: 1px; border: 1px solid rgba(248,113,113,.2);
+  background: rgba(248,113,113,.04);
+}
+.cl-orphan-name {
+  flex: 1; font-size: 11px; color: var(--text2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--mono);
+}
+.cl-orphan-hint { font-size: 10px; color: var(--text3); margin-top: 1px; }
+
+
+/* ══════════════════════════════════════════════════════════════════
+   TOKEN OPTIMISATION UI
+   - Response mode toggle (Concise / Detailed)
+   - Cache indicator in message meta
+   - Snapshot modal
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ── Response mode toggle pill ── */
+#mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.mode-btn {
+  padding: 3px 9px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  border-radius: 0;
+  transition: all .12s;
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-family: var(--sans);
+}
+.mode-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+.mode-btn:hover:not(.active) {
+  background: var(--border2);
+  color: var(--text);
+}
+#depth-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.depth-btn {
+  padding: 3px 9px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  border-radius: 0;
+  transition: all .12s;
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-family: var(--sans);
+  border-right: 1px solid var(--border2);
+}
+.depth-btn:last-child { border-right: none; }
+.depth-btn.active { background: var(--accent); color: #fff; }
+.depth-btn:hover:not(.active) { background: var(--border2); color: var(--text); }
+
+/* ── Cache hit indicator on message meta ── */
+.cache-hit {
+  color: var(--green);
+  font-size: 9px;
+  margin-left: 5px;
+  opacity: .7;
+}
+
+/* ── Snapshot modal ── */
+#snap-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.65);
+  backdrop-filter: blur(4px);
+  z-index: 600;
+  display: none;
+}
+#snap-overlay.open { display: block; }
+
+#snap-modal {
+  position: fixed;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(460px, 93vw);
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.7);
+  z-index: 601;
+  display: none;
+  padding: 20px;
+}
+#snap-modal.open { display: block; }
+
+#snap-modal h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 5px;
+  color: var(--text);
+}
+#snap-modal p {
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 14px;
+  line-height: 1.55;
+}
+#snap-label {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+#snap-label:focus { border-color: var(--accent); outline: none; }
+#snap-status {
+  font-size: 11px;
+  min-height: 16px;
+  margin-bottom: 10px;
+  color: var(--text3);
+}
+#snap-status.ok  { color: var(--green); }
+#snap-status.err { color: var(--red);   }
+.snap-btns { display: flex; gap: 8px; }
+#snap-save {
+  flex: 1; padding: 9px;
+  background: var(--accent); color: #fff;
+  border-radius: 8px; font-size: 13px; font-weight: 500;
+  border: none; cursor: pointer; transition: background .12s;
+}
+#snap-save:hover { background: var(--accentH); }
+#snap-cancel {
+  padding: 9px 14px;
+  background: var(--bg3); color: var(--text2);
+  border-radius: 8px; font-size: 13px;
+  border: 1px solid var(--border2); cursor: pointer;
+}
+/* ─────────────────────────────────────────────────────────────── */
+
+
+/* ══════════════════════════════════════════════════════════════════
+   VOICE INPUT — ChatGPT-style mic button + recording states
+   ══════════════════════════════════════════════════════════════════ */
+#btn-mic {
+  width: 30px; height: 30px; border-radius: 6px; flex-shrink: 0;
+  color: var(--text3); font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all var(--ease); position: relative;
+}
+#btn-mic:hover { background: var(--bg3); color: var(--text); }
+#btn-mic.recording {
+  color: var(--red); background: rgba(248,113,113,.12);
+}
+#btn-mic.recording::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 9px;
+  border: 2px solid var(--red);
+  animation: v-pulse 1.2s ease-in-out infinite;
+}
+@keyframes v-pulse {
+  0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.08)}
+}
+#btn-mic.transcribing {
+  color: var(--accent); background: rgba(92,110,245,.1); pointer-events: none;
+}
+#btn-mic.transcribing svg { animation: v-spin .9s linear infinite; }
+@keyframes v-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+#v-preview {
+  display: none; align-items: center; gap: 6px;
+  padding: 5px 11px;
+  background: rgba(92,110,245,.08);
+  border-top: 1px solid rgba(92,110,245,.15);
+  font-size: 11px; color: var(--text2); line-height: 1.45;
+}
+#v-preview.show { display: flex; }
+#v-preview-lbl { flex:1; font-style:italic; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#v-preview-lang { font-size:10px; color:var(--text3); flex-shrink:0; font-family:var(--mono); }
+
+
+/* ── Chat search ── */
+#chat-search{
+  padding:5px 7px;
+}
+#chat-search input{
+  width:100%;padding:6px 10px;border-radius:7px;
+  background:var(--bg3);border:1px solid var(--border2);
+  font-size:11px;color:var(--text);outline:none;
+  font-family:var(--sans);
+}
+#chat-search input:focus{border-color:var(--accent)}
+#chat-search input::placeholder{color:var(--text3)}
+
+/* ── Model discover ── */
+.discover-btn{
+  padding:8px 12px;border-radius:8px;font-size:12px;
+  background:var(--bg3);border:1px solid var(--border2);
+  color:var(--text2);cursor:pointer;width:100%;text-align:left;
+  transition:all .15s;margin-top:8px;
+}
+.discover-btn:hover{border-color:var(--accent);color:var(--text)}
+#discover-list{margin-top:6px;max-height:200px;overflow-y:auto}
+.disc-item{
+  display:flex;align-items:center;gap:8px;padding:5px 8px;
+  border-radius:6px;margin-bottom:2px;font-size:11px;
+}
+.disc-item:hover{background:var(--bg3)}
+.disc-item .disc-name{flex:1;color:var(--text)}
+.disc-item .disc-exists{color:var(--green);font-size:10px}
+.disc-item .disc-add{
+  padding:2px 8px;border-radius:4px;font-size:10px;
+  background:var(--accent);color:#fff;border:none;cursor:pointer;
+}
+.disc-item .disc-add:hover{background:var(--accentH)}
+#discover-status{font-size:10px;color:var(--text3);margin-top:4px}
+
+
+/* ── Model Discover Button + Modal ── */
+#btn-discover{
+  width:28px;height:28px;border-radius:6px;flex-shrink:0;
+  color:var(--text3);font-size:12px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;
+  transition:all .15s;cursor:pointer;border:1px solid var(--border2);
+  background:var(--bg3);font-family:var(--mono);
+}
+#btn-discover:hover{border-color:var(--accent);color:var(--accent);background:rgba(92,110,245,.1)}
+
+#disc-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.6);
+  backdrop-filter:blur(3px);z-index:700;display:none;
+}
+
+/* ── Research button + panel ── */
+#btn-research{
+  display:flex;align-items:center;gap:5px;flex-shrink:0;
+  height:28px;padding:0 11px;border-radius:14px;
+  font-size:11.5px;font-weight:600;cursor:pointer;
+  color:var(--text2);border:1px solid var(--border2);background:var(--bg3);
+  transition:all .15s;
+}
+#btn-research:hover{border-color:var(--accent);color:var(--accent);background:rgba(92,110,245,.1)}
+#btn-research.active{border-color:var(--accent);color:#fff;background:var(--accent)}
+
+#rsch-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.5);
+  backdrop-filter:blur(2px);z-index:800;display:none;
+}
+#rsch-overlay.open{display:block}
+#rsch-panel{
+  position:fixed;top:0;right:0;height:100vh;
+  width:min(460px,94vw);z-index:801;
+  background:var(--bg2);border-left:1px solid var(--border2);
+  box-shadow:-16px 0 60px rgba(0,0,0,.5);
+  display:none;flex-direction:column;
+  transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);
+}
+#rsch-panel.open{display:flex;transform:translateX(0)}
+#rsch-hdr{
+  display:flex;align-items:center;gap:9px;padding:14px 16px;
+  border-bottom:1px solid var(--border);flex-shrink:0;
+}
+#rsch-hdr .rsch-dot{
+  width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0;
+  box-shadow:0 0 8px var(--green);
+}
+#rsch-hdr h3{font-size:14px;font-weight:700;color:var(--text);flex:1;margin:0}
+#rsch-hdr .rsch-free{font-size:9px;font-weight:700;color:var(--green);border:1px solid var(--green);border-radius:4px;padding:1px 5px;letter-spacing:.3px}
+#rsch-hdr button{width:26px;height:26px;border-radius:6px;color:var(--text3);font-size:15px;cursor:pointer;flex-shrink:0;background:none;border:none;transition:all .12s}
+#rsch-hdr button:hover{background:var(--bg3);color:var(--text)}
+#rsch-note{
+  font-size:10px;color:var(--muted);padding:7px 16px;line-height:1.45;
+  border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0;
+}
+#rsch-note b{color:var(--text2)}
+#rsch-msgs{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.rsch-empty{color:var(--text3);font-size:12px;text-align:center;margin:auto;line-height:1.6;max-width:280px}
+.rsch-empty .rsch-egs{margin-top:10px;font-size:11px;color:var(--muted)}
+.rsch-egs .rsch-eg{display:block;padding:5px 9px;margin:5px 0;border:1px solid var(--border);border-radius:7px;cursor:pointer;transition:all .12s;color:var(--text2);text-align:left}
+.rsch-egs .rsch-eg:hover{border-color:var(--accent);color:var(--accent);background:rgba(92,110,245,.06)}
+.rsch-turn{display:flex;flex-direction:column;gap:3px;font-size:13px;line-height:1.55}
+.rsch-turn.user{align-items:flex-end}
+.rsch-turn.user .rsch-bubble{background:var(--accent);color:#fff;border-radius:13px 13px 3px 13px;padding:8px 12px;max-width:85%}
+.rsch-turn.model .rsch-bubble{background:var(--bg3);color:var(--text);border-radius:13px 13px 13px 3px;padding:9px 13px;max-width:97%;white-space:pre-wrap}
+.rsch-turn.model .rsch-bubble.err{border:1px solid #b4453a;color:#e08b82;background:rgba(180,69,58,.08)}
+.rsch-src{margin-top:7px;padding-top:7px;border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:5px}
+.rsch-src a{font-size:10px;color:var(--accent);border:1px solid var(--border2);border-radius:10px;padding:2px 8px;text-decoration:none;transition:all .12s;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rsch-src a:hover{background:rgba(92,110,245,.1);border-color:var(--accent)}
+.rsch-copy{align-self:flex-start;margin-top:2px;font-size:10px;color:var(--text3);background:none;border:1px solid var(--border);border-radius:6px;padding:3px 8px;cursor:pointer;transition:all .12s}
+.rsch-copy:hover{color:var(--accent);border-color:var(--accent)}
+#rsch-input-wrap{padding:11px 14px;border-top:1px solid var(--border);flex-shrink:0;display:flex;gap:8px;align-items:flex-end}
+#rsch-in{
+  flex:1;resize:none;max-height:120px;min-height:38px;
+  background:var(--bg3);border:1px solid var(--border2);border-radius:10px;
+  padding:9px 12px;font-size:13px;color:var(--text);font-family:inherit;line-height:1.4;
+}
+#rsch-in:focus{border-color:var(--accent);outline:none}
+#rsch-send{
+  width:38px;height:38px;border-radius:10px;flex-shrink:0;
+  background:var(--accent);color:#fff;border:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;transition:all .12s;
+}
+#rsch-send:hover{background:var(--accentH)}
+#rsch-send:disabled{opacity:.5;cursor:default}
+
+#disc-overlay.open{display:block}
+#disc-modal{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:min(500px,92vw);max-height:80vh;overflow-y:auto;
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:14px;box-shadow:0 24px 80px rgba(0,0,0,.7);
+  z-index:701;display:none;padding:20px;
+}
+#disc-modal.open{display:block}
+#disc-modal h3{font-size:14px;margin-bottom:12px;color:var(--text)}
+.disc-tabs{display:flex;gap:0;margin-bottom:12px;background:var(--bg3);border-radius:7px;overflow:hidden}
+.disc-tab{
+  flex:1;padding:7px;text-align:center;font-size:11px;font-weight:600;
+  cursor:pointer;color:var(--text3);transition:all .12s;border:none;background:none;
+}
+.disc-tab.active{background:var(--accent);color:#fff}
+.disc-tab:hover:not(.active){background:var(--border2);color:var(--text)}
+#disc-content{min-height:100px}
+.disc-row{
+  display:flex;align-items:center;gap:8px;padding:7px 8px;
+  border-radius:7px;margin-bottom:2px;
+}
+.disc-row:hover{background:var(--bg3)}
+.disc-name{flex:1;font-size:12px;color:var(--text)}
+.disc-id{font-size:9px;color:var(--text3);font-family:var(--mono)}
+.disc-badge{font-size:9px;color:var(--green);font-weight:600}
+.disc-btn-add{
+  padding:3px 10px;border-radius:5px;font-size:10px;font-weight:600;
+  background:var(--accent);color:#fff;border:none;cursor:pointer;
+}
+.disc-btn-add:hover{background:var(--accentH)}
+.disc-btn-del{
+  padding:3px 10px;border-radius:5px;font-size:10px;font-weight:600;
+  background:rgba(248,113,113,.15);color:var(--red);border:1px solid rgba(248,113,113,.3);cursor:pointer;
+}
+.disc-btn-del:hover{background:rgba(248,113,113,.25)}
+#disc-status{font-size:10px;color:var(--text3);margin-bottom:8px;min-height:14px}
+
+
+/* ── Paste/drop file preview ── */
+#file-preview{background:var(--bg3);border-radius:8px;margin:0 8px}
+.fp-item{display:flex;align-items:center;gap:5px;background:var(--bg2);
+  border:1px solid var(--border2);border-radius:6px;padding:3px 8px;
+  font-size:11px;color:var(--text2)}
+.fp-item button{background:none;border:none;color:var(--text3);
+  cursor:pointer;font-size:13px;padding:0 2px}
+.fp-item button:hover{color:var(--red)}
+
+
+/* Knowledge base panel */
+.kb-tab {
+  flex: 1;
+  padding: 5px 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text2);
+  cursor: pointer;
+  transition: all .12s;
+  font-family: var(--sans);
+}
+.kb-tab:hover { background: var(--border2); color: var(--text); }
+.kb-tab-active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.kb-form { display: flex; flex-direction: column; gap: 5px; }
+.kb-input, .kb-textarea {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+  color: var(--text);
+  font-family: var(--sans);
+  resize: vertical;
+}
+.kb-input:focus, .kb-textarea:focus { outline: none; border-color: var(--accent); }
+.kb-save-btn {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 7px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+}
+.kb-save-btn:hover { filter: brightness(1.1); }
+.kb-item {
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 5px;
+  font-size: 11px;
+}
+.kb-item-title { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.kb-item-meta { color: var(--text3); font-size: 10px; }
+.kb-item-del {
+  float: right;
+  background: none;
+  color: var(--text3);
+  font-size: 11px;
+  cursor: pointer;
+  border: none;
+  padding: 0 4px;
+}
+.kb-item-del:hover { color: #ff6b6b; }
+
+</style>
+</head>
+<body>
+
+<div id="mob-bg" onclick="sbClose()"></div>
+<div id="sb-tab" onclick="sbOpen()">&#9654;</div>
+<div id="overlay" onclick="settingsClose()"></div>
+
+<div id="app">
+
+  <!-- ══ SIDEBAR ══════════════════════════════════════ -->
+  <div id="sidebar">
+
+    <!-- header -->
+    <div id="sbhead">
+      <div id="logo"><div class="dot">L</div>LocalLLM</div>
+      <button class="hbtn" onclick="newChat()" title="New chat">+</button>
+      <button class="hbtn" onclick="folderCreate()" title="New folder">&#128193;</button>
+      <button class="hbtn" onclick="sbToggle()" title="Collapse">&#8592;</button>
+    </div>
+
+    <!-- token balance -->
+    <div id="tok-panel">
+      <div class="label">Credit Balance</div>
+      <div id="tok-grid">
+        <div class="tok-card left" style="grid-column:1/-1">
+          <div class="tok-num" id="tok-left" style="font-size:26px">—</div>
+          <div class="tok-sub">Claude Remaining Credit</div>
+        </div>
+      </div>
+      <div id="openai-spend-row" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:12px;color:var(--text2)">
+        <span style="color:var(--text3)">&#9410; OpenAI spent:</span>
+        <span id="openai-today" style="color:var(--text);font-weight:600">$0.00</span>
+        <span style="color:var(--text3)">today &middot;</span>
+        <span id="openai-total" style="color:var(--text);font-weight:600">$0.00</span>
+        <span style="color:var(--text3)">total</span>
+      </div>
+      <div id="tok-note">updates after each reply &middot; <a href="https://console.anthropic.com/settings/billing" target="_blank" style="color:var(--accent)">Anthropic Console</a></div>
+    </div>
+
+    <!-- chat list -->
+    <div id="chat-search">
+      <input type="text" id="chat-search-input" placeholder="&#128269; Search chats..." oninput="filterChats(this.value)"/>
+    </div>
+    <div id="chatlist"></div>
+
+    <!-- footer -->
+    <div id="sbfoot">
+
+      <!-- dropbox -->
+      <button class="sb-btn" id="dbx-toggle" onclick="dbxToggle()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        LLM Dropbox
+      </button>
+
+      <div id="dbx-panel">
+        <div id="dbx-zone"
+          ondragover="dbxOver(event)" ondragleave="dbxLeave(event)"
+          ondrop="dbxDrop(event)" onclick="document.getElementById('dbx-in').click()">
+          <div id="dbx-zone-icon">&#128228;</div>
+          <div id="dbx-zone-txt">Drop any file here<br/><span>or tap to browse</span></div>
+        </div>
+        <input type="file" id="dbx-in" multiple onchange="dbxFiles(event)"/>
+        <div id="dbx-status"></div>
+        <div id="dbx-list"></div>
+        <div id="dbx-path"></div>
+      </div>
+
+      <!-- memory -->
+      <button class="sb-btn" id="mem-toggle" onclick="memToggle()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2a10 10 0 0110 10c0 5.52-4.48 10-10 10S2 17.52 2 12 6.48 2 12 2z"/>
+          <path d="M12 6v6l4 2"/>
+        </svg>
+        Memory
+      </button>
+
+      <div id="mem-panel" style="display:none;padding:0 7px 8px">
+        <div style="display:flex;gap:5px;margin-bottom:7px">
+          <input id="mem-input" type="text" placeholder="Save something to remember..."
+            style="flex:1;background:var(--bg3);border:1px solid var(--border2);border-radius:7px;padding:6px 9px;font-size:12px;color:var(--text)"
+            onkeydown="if(event.key==='Enter')memSave()"/>
+          <button onclick="memSave()"
+            style="background:var(--accent);color:#fff;border-radius:7px;padding:6px 10px;font-size:12px;white-space:nowrap">
+            Save
+          </button>
+        </div>
+        <div id="mem-list"></div>
+      </div>
+
+      <!-- Knowledge Base (the blueprint's retrieval layer) -->
+      <button class="sb-btn" id="kb-toggle" onclick="kbToggle()" title="Past tickets, runbooks, and docs the tool searches on every question">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2zM22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/>
+        </svg>
+        Knowledge <span id="kb-count" style="opacity:.55;font-size:10px"></span>
+      </button>
+
+      <div id="kb-panel" style="display:none;padding:0 7px 8px">
+        <!-- Unified Add-to-Knowledge-Base form -->
+        <div style="background:var(--bg3);border:1px solid var(--border2);border-radius:7px;padding:9px">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:7px;font-weight:600">&#128218; Add to Knowledge Base</div>
+          <input id="kbe-topic" placeholder="Topic name — e.g. Nexus 3.94 deployment" class="kb-input" style="margin-bottom:6px"/>
+          <input id="kbe-id" placeholder="Knowledge Base ID to version onto — blank = new entry" class="kb-input" style="margin-bottom:6px"/>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <input type="file" id="kbe-folder" webkitdirectory directory multiple style="display:none" onchange="kbeAddFolder()"/>
+            <button onclick="document.getElementById('kbe-folder').click()" class="kb-save-btn" style="flex:1" id="kbe-folder-btn">&#128193; Upload folder</button>
+            <button onclick="kbePasteToggle()" class="kb-save-btn" style="flex:1;background:var(--bg2);color:var(--text2)" id="kbe-paste-btn">&#9998; Paste text</button>
+          </div>
+          <div id="kbe-paste-wrap" style="display:none">
+            <textarea id="kbe-content" placeholder="Paste any length of text (10,000+ words fine)…" class="kb-textarea" rows="6" style="margin-bottom:6px"></textarea>
+            <button onclick="kbeAddPaste()" class="kb-save-btn" style="width:100%">Save pasted text</button>
+          </div>
+          <div id="kbe-status" style="font-size:10px;color:var(--text3);margin-top:6px;line-height:1.5">Blank ID makes a new numbered entry. An ID adds a new <b>current</b> version on top — old kept as history. 100% local &amp; free.</div>
+        </div>
+
+        <!-- unified numbered list preview removed — sidebar is just the Add form -->
+
+        <!-- view/manage link -->
+        <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+          <div style="font-size:10px;color:var(--text3);text-align:center;line-height:1.5">
+            Full list &amp; delete in<br/>
+            <a href="#" onclick="kbModalOpen();return false;" style="color:var(--accent)">Open Knowledge Base</a>
+          </div>
+        </div>
+      </div>
+      <div id="kb-panel-OLD" style="display:none">
+        <!-- subnav -->
+        <div style="display:flex;gap:4px;margin-bottom:8px">
+          <button class="kb-tab kb-tab-active" onclick="kbTab('incidents')" id="kb-tab-incidents">Incidents</button>
+          <button class="kb-tab" onclick="kbTab('runbooks')" id="kb-tab-runbooks">Runbooks</button>
+          <button class="kb-tab" onclick="kbTab('docs')" id="kb-tab-docs">Docs</button>
+          <button class="kb-tab" onclick="kbTab('topics')" id="kb-tab-topics" title="Version-aware timelines — drop a whole folder, keeps the full history">Topics</button>
+        </div>
+
+        <!-- Incidents form -->
+        <div id="kb-incidents-form" class="kb-form">
+          <input id="inc-title" placeholder="Title — short summary" class="kb-input"/>
+          <textarea id="inc-symptoms" placeholder="Symptoms — what the user observed" class="kb-textarea" rows="2"></textarea>
+          <textarea id="inc-root" placeholder="Root cause — what was actually wrong" class="kb-textarea" rows="2"></textarea>
+          <textarea id="inc-fix" placeholder="Fix — concrete commands that resolved it" class="kb-textarea" rows="3"></textarea>
+          <textarea id="inc-validation" placeholder="Validation — how to verify the fix worked (optional)" class="kb-textarea" rows="2"></textarea>
+          <input id="inc-tags" placeholder="Tags — comma-separated (e.g. kafka,strimzi,mtls)" class="kb-input"/>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button onclick="incSave()" class="kb-save-btn">Save Incident</button>
+            <button onclick="incFromChat()" class="kb-save-btn" style="background:var(--bg3);color:var(--text)" title="Use Haiku to distill the current chat into an incident">⚡ From current chat</button>
+          </div>
+        </div>
+
+        <!-- Runbooks form -->
+        <div id="kb-runbooks-form" class="kb-form" style="display:none">
+          <input id="rb-title" placeholder="Title — e.g. 'Kafka TLS certificate rotation'" class="kb-input"/>
+          <textarea id="rb-scenario" placeholder="Scenario — when do you use this runbook?" class="kb-textarea" rows="2"></textarea>
+          <textarea id="rb-steps" placeholder="Steps — numbered procedure with commands" class="kb-textarea" rows="6"></textarea>
+          <input id="rb-tags" placeholder="Tags — comma-separated" class="kb-input"/>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button onclick="rbSave()" class="kb-save-btn">Save Runbook</button>
+          </div>
+        </div>
+
+        <!-- Docs form -->
+        <div id="kb-docs-form" class="kb-form" style="display:none">
+          <div style="background:var(--bg3);border:1px solid var(--border2);border-radius:7px;padding:8px;margin-bottom:6px">
+            <div style="font-size:11px;color:var(--text2);margin-bottom:6px;font-weight:600">📄 Upload a file (PDF, TXT, MD, DOCX, LOG, YAML)</div>
+            <input id="doc-upload-tags" placeholder="Tags — comma-separated (e.g. maint,dns,cluster)" class="kb-input" style="margin-bottom:6px"/>
+            <input type="file" id="doc-upload-file" accept=".pdf,.txt,.md,.docx,.log,.yaml,.yml,.json,.conf,.ini,.csv,.sh,.xml,.toml,.properties" style="display:none" onchange="docUpload()"/>
+            <button onclick="document.getElementById('doc-upload-file').click()" class="kb-save-btn" style="width:100%" id="doc-upload-btn">⬆ Choose file to upload</button>
+            <div style="font-size:10px;color:var(--text3);margin-top:5px">Past-incident PDFs become searchable knowledge. Stays 100% local.</div>
+          </div>
+          <div style="font-size:10px;color:var(--text3);text-align:center;margin:2px 0 4px">— or paste text manually —</div>
+          <input id="doc-source" placeholder="Source — e.g. 'Strimzi docs 0.45'" class="kb-input"/>
+          <input id="doc-title" placeholder="Title — e.g. 'KafkaUser CR reference'" class="kb-input"/>
+          <textarea id="doc-content" placeholder="Paste the documentation text (any length — will be chunked automatically)" class="kb-textarea" rows="8"></textarea>
+          <input id="doc-tags" placeholder="Tags — comma-separated" class="kb-input"/>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button onclick="docSave()" class="kb-save-btn">Save Doc</button>
+          </div>
+        </div>
+
+        <!-- Topics form (version-aware folder timeline) -->
+        <div id="kb-topics-form" class="kb-form" style="display:none">
+          <div style="background:var(--bg3);border:1px solid var(--border2);border-radius:7px;padding:9px;margin-bottom:8px">
+            <div style="font-size:11px;color:var(--text2);margin-bottom:7px;font-weight:600">&#128193; Import a whole folder (all subfolders, any depth)</div>
+            <input id="topic-name" placeholder="Topic — e.g. Nexus  (reuse the same name to add a newer version)" class="kb-input" style="margin-bottom:6px"/>
+            <input id="topic-label" placeholder="This version's label — e.g. Nexus 3.94 (optional)" class="kb-input" style="margin-bottom:6px"/>
+            <input type="file" id="topic-folder" webkitdirectory directory multiple style="display:none" onchange="topicIngest()"/>
+            <button onclick="document.getElementById('topic-folder').click()" class="kb-save-btn" style="width:100%" id="topic-import-btn">&#11014; Choose folder to import</button>
+            <div id="topic-import-status" style="font-size:10px;color:var(--text3);margin-top:6px;line-height:1.5">Newest import becomes <b>current</b>; older stays as history — the full story is kept. 100% local &amp; free.</div>
+          </div>
+          <div id="topic-list" style="display:flex;flex-direction:column;gap:6px"></div>
+        </div>
+
+        <!-- search/test -->
+        <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+          <div style="font-size:10px;color:var(--text3);text-align:center;line-height:1.5">
+            View, search, or delete saved items in<br/>
+            <a href="#" onclick="settingsOpen();return false;" style="color:var(--accent)">Settings &rarr; Knowledge Base</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- settings -->
+      <button class="sb-btn" onclick="settingsOpen()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+        Settings &amp; API Keys
+      </button>
+
+    </div>
+  </div>
+
+  <!-- ══ MAIN ═════════════════════════════════════════ -->
+  <div id="main">
+
+    <!-- topbar -->
+    <div id="topbar">
+      <button id="btn-toggle" onclick="sbToggle()">&#9776;</button>
+      <div id="title-area">
+        <div id="chat-title" onclick="titleEdit()">Select or start a chat</div>
+        <input id="title-edit" type="text" onblur="titleSave()" onkeydown="titleKey(event)"/>
+        <button id="btn-snapshot" onclick="snapOpen()" title="Save context snapshot to memory"
+        style="display:none;width:26px;height:26px;border-radius:6px;flex-shrink:0;color:var(--text3);font-size:13px;align-items:center;justify-content:center;transition:all var(--ease)"
+        onmouseover="this.style.background='rgba(92,110,245,.15)';this.style.color='var(--accent)'"
+        onmouseout="this.style.background='';this.style.color='var(--text3)'">
+        &#128190;
+      </button>
+      <button id="btn-close" onclick="chatClose()" title="Close chat">&#10005;</button>
+      </div>
+      <button id="btn-research" onclick="rschOpen()" title="Research — free live web search (Gemini). Public lookups only; copy facts into your chat.">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="flex-shrink:0">
+          <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <span>Research</span>
+      </button>
+      <div id="model-pill" onclick="modelToggle()">
+        <span id="model-pill-lbl">Sonnet 4.6</span>
+        <span style="color:var(--text3);font-size:10px;flex-shrink:0">&#9660;</span>
+      </div>
+      <div id="spend-pill" title="Today's API spend, split by provider (resets at local midnight). ◆ = Claude, Ⓞ = OpenAI.">
+        <span id="spend-pill-lbl">◆ $0.00</span>
+        <span id="spend-pill-openai" style="margin-left:6px;color:var(--text3)">Ⓞ $0.00</span>
+      </div>
+      <button id="btn-discover" onclick="discOpen()" title="Manage models — discover new (e.g. Opus 4.8), remove old">D</button>
+    </div>
+
+    <!-- model dropdown -->
+    <div id="model-drop"><div id="model-list"></div></div>
+
+    <!-- messages -->
+    <div id="msgs-wrap">
+      <div id="welcome">
+        <div id="welcome-logo">L</div>
+        <h1>LocalLLM &mdash; Your Private AI</h1>
+        <p>Your private Claude AI — Sonnet · Haiku · Opus</p>
+      </div>
+      <div id="msgs" style="display:none"></div>
+    </div>
+
+    <!-- input -->
+    <div id="file-preview" style="display:none;flex-wrap:wrap;gap:6px;padding:6px 14px 0;"></div>
+    <div id="input-wrap">
+      <div id="input-box">
+        <div id="attach-prev"></div>
+        <!-- ── Voice transcript preview ─────────────────────────── -->
+        <div id="v-preview">
+          <span style="font-size:10px;color:var(--accent);flex-shrink:0">&#127908;</span>
+          <span id="v-preview-lbl"></span>
+          <span id="v-preview-lang"></span>
+        </div>
+        <div id="input-row">
+          <button id="btn-attach" onclick="document.getElementById('file-in').click()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+          </button>
+          <input type="file" id="file-in" multiple onchange="attachFiles(event)"/>
+          <!-- ── Voice mic button (ChatGPT-style) ────────────────── -->
+          <button id="btn-mic" onclick="voiceToggle()" title="Voice input — click to speak">
+            <svg id="mic-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/>
+              <line x1="8"  y1="23" x2="16" y2="23"/>
+            </svg>
+          </button>
+          <textarea id="msg-in" rows="1"
+            placeholder="Ask anything — K8s, Bash, Java, Logs, Keycloak, LDAP…"
+            oninput="autoResize(this)" onkeydown="handleKey(event)"></textarea>
+          <button id="btn-send" onclick="sendMsg()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </button>
+        </div>
+        <div id="input-foot">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span>Shift+Enter new line &middot; Enter send</span>
+            <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:10px;color:var(--tx3)" title="Web search — uses more tokens">
+              <input type="checkbox" id="ws-tog" style="cursor:pointer" onchange="toggleWS(this)">
+              <span id="ws-lbl">&#127760; Web</span>
+            </label>
+            <!-- ── Depth selector: YOU choose how deep. Calibrated from real usage. ── -->
+            <div id="depth-toggle" title="You pick the answer depth. Calibrated from your real work (Nexus avg 913, all-time max 4,756 tokens).">
+              <button class="depth-btn" id="depth-normal" onclick="setDepth('normal')" title="~1,500 tokens — quick facts, syntax, one-liners (what port, which flag)">Normal</button>
+              <button class="depth-btn active" id="depth-average" onclick="setDepth('average')" title="~4,500 tokens — your daily driver: troubleshooting, concept + why + command. Covers ~93% of your work.">Average</button>
+              <button class="depth-btn" id="depth-deep" onclick="setDepth('deep')" title="~10,000 tokens — full breakdowns, ticket work, when Average gets cut. Well above your all-time max.">Deep</button>
+              <button class="depth-btn" id="depth-super" onclick="setDepth('super')" title="~64,000 tokens — broken production, massive RCA. Never truncates. Use rarely.">Super</button>
+            </div>
+          </div>
+          <span id="model-foot"></span>
+          <button id="btn-save-kb" onclick="saveSolutionToKB()" title="Save this solved ticket to your Knowledge Base so the tool remembers it next time"
+            style="background:none;border:1px solid var(--border2);color:var(--text2);border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer;margin-left:8px">
+            &#128190; Save to KB
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══ SETTINGS MODAL ══════════════════════════════════ -->
+<div id="settings-modal">
+  <div class="mhdr">
+    <span class="mhdr-title">&#9881; Settings &amp; API Keys</span>
+    <button class="mhdr-close" onclick="settingsClose()">&#10005;</button>
+  </div>
+  <div class="mbody">
+
+    <div class="fg">
+      <label class="flabel">Claude API Key <span class="fbadge paid">PAID</span></label>
+      <input type="password" class="finput" id="s-claude" placeholder="sk-ant-api03-…"/>
+      <div class="fhint" id="h-claude">console.anthropic.com &#8594; API Keys</div>
+    </div>
+
+    <div class="fg" style="border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--bg2)">
+      <label class="flabel">Backup Claude Key <span class="fbadge" style="background:#2d6a4f;color:#fff">FALLBACK</span> <span style="font-size:10px;color:var(--muted)">use when primary credit runs out</span></label>
+      <input type="password" class="finput" id="s-claude2" placeholder="sk-ant-api03-… (second key)"/>
+      <div class="fhint" id="h-claude2">Saved separately. Your primary key stays active until you flip the switch below.</div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;cursor:pointer;font-size:13px">
+        <input type="checkbox" id="s-use-backup" style="width:auto;cursor:pointer" onchange="backupToggleChanged()"/>
+        <span>Use backup key now <span id="backup-state" style="color:var(--muted);font-size:11px"></span></span>
+      </label>
+      <div id="backup-credit-row" style="display:none;margin-top:8px">
+        <label class="flabel" style="font-size:11px">Backup key starting credit (USD)</label>
+        <input type="number" class="finput" id="s-backup-credit" placeholder="100" step="0.01" style="max-width:120px"/>
+        <div class="fhint">Set to the amount loaded on the backup key so the balance counter is accurate.</div>
+      </div>
+    </div>
+
+    <div class="fg">
+      <label class="flabel">OpenAI API Key <span class="fbadge paid">PAID</span> <span style="font-size:10px;color:var(--muted)">optional — for GPT / o-series</span></label>
+      <input type="password" class="finput" id="s-openai" placeholder="sk-proj-…"/>
+      <div class="fhint" id="h-openai">platform.openai.com &#8594; API Keys</div>
+    </div>
+
+    <div class="fg">
+      <label class="flabel">Research Key (Gemini) <span class="fbadge" style="background:#1b7a43;color:#fff">FREE</span> <span style="font-size:10px;color:var(--muted)">powers the Research tab — live web search</span></label>
+      <input type="password" class="finput" id="s-gemini" placeholder="AIza…"/>
+      <div class="fhint" id="h-gemini">aistudio.google.com &#8594; Get API key (no card, ~5,000 searches/mo free)</div>
+    </div>
+
+    <div class="fg">
+      <label class="flabel">Default Model</label>
+      <select class="fselect" id="s-model"></select>
+    </div>
+
+    <button class="btn-save" onclick="settingsSave()">Save Settings</button>
+
+    <div class="div"></div>
+
+    <div style="font-size:12px;font-weight:500;color:var(--text2);margin-bottom:9px">Answer Quality</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+      Two switches that control how much your tool acts like claude.ai:
+    </div>
+
+    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;cursor:pointer">
+      <input type="checkbox" id="s-kb-enabled" style="margin-top:3px"/>
+      <span>
+        <span style="font-size:12px;color:var(--text);font-weight:600">Knowledge Base Retrieval</span>
+        <span style="display:block;font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4">
+          Search your incidents + runbooks + docs on every question, inject relevant
+          matches into the prompt. Free. (Default: on.)
+        </span>
+      </span>
+    </label>
+
+    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="s-reviewer-enabled" style="margin-top:3px"/>
+      <span>
+        <span style="font-size:12px;color:var(--text);font-weight:600">Haiku Reviewer Pass</span>
+        <span style="display:block;font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4">
+          After Sonnet answers, Haiku 4.5 checks for missing dependencies, unsafe
+          commands, skipped validation. Adds ~0.1¢/question, catches the
+          "add this empty block and try" failure mode. (Default: off.)
+        </span>
+      </span>
+    </label>
+
+    <button class="btn-save" onclick="qualityTogglesSave()">Save Quality Settings</button>
+
+    <div class="div"></div>
+
+    <div style="font-size:12px;font-weight:500;color:var(--text2);margin-bottom:9px">Appearance</div>
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button id="theme-light-btn" class="btn-save" style="flex:1;background:none;border:1px solid var(--border);color:var(--text2)" onclick="setTheme('light')">&#9728;&#65039; Light</button>
+      <button id="theme-dark-btn" class="btn-save" style="flex:1;background:none;border:1px solid var(--border);color:var(--text2)" onclick="setTheme('dark')">&#127769; Dark</button>
+    </div>
+
+    <div class="div"></div>
+
+    <div style="font-size:12px;font-weight:500;color:var(--text2);margin-bottom:9px">Deleted Chats (Trash)</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+      Chats you delete are hidden here, not erased. Restore them anytime, or
+      delete forever. Even after "Delete Forever", the full conversation text
+      still lives in your DB folder on disk as your private record.
+    </div>
+    <button class="btn-save" style="background:none;border:1px solid var(--border);color:var(--text2)" onclick="openTrash()">&#128465; Open Trash</button>
+
+    <div class="div"></div>
+
+    <div style="font-size:12px;font-weight:500;color:var(--text2);margin-bottom:9px">Knowledge Base</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:9px;line-height:1.4">
+      View, search, and manage all saved incidents, runbooks, and docs in one place.
+      Every delete requires confirmation -- your KB is safe from accidental taps.
+    </div>
+    <button class="btn-save" style="background:none;border:1px solid var(--border);color:var(--text2)" onclick="kbModalOpen()">&#128218; Open Knowledge Base</button>
+
+  </div>
+</div>
+
+
+<!-- ══ SNAPSHOT MODAL ═══════════════════════════════════════════ -->
+<div id="snap-overlay" onclick="snapClose()"></div>
+<div id="snap-modal">
+  <h3>&#128190; Save Project Snapshot</h3>
+  <p>
+    Generates a dense technical summary of this entire chat and saves it to
+    <strong>Memory</strong>. In any future chat, Jarvis will automatically
+    know exactly where you left off — commands, paths, decisions, pending steps.
+    <br/><br/>
+    <strong>Cost: ~$0.00005</strong> (one Haiku call). Saves thousands of tokens later.
+  </p>
+  <input id="snap-label" type="text" placeholder="e.g. Nexus K8s migration — Phase 3 done"/>
+  <div id="snap-status"></div>
+  <div class="snap-btns">
+    <button id="snap-save" onclick="snapSave()">&#128190; Save Snapshot</button>
+    <button id="snap-cancel" onclick="snapClose()">Cancel</button>
+  </div>
+</div>
+
+
+<!-- ══ MODEL DISCOVER MODAL ════════════════════════════════════════ -->
+<div id="disc-overlay" onclick="discClose()"></div>
+
+<!-- ── Research panel (free Gemini grounded search — isolated from chat) ── -->
+<div id="rsch-overlay" onclick="rschClose()"></div>
+<div id="rsch-panel">
+  <div id="rsch-hdr">
+    <span class="rsch-dot"></span>
+    <h3>Research</h3>
+    <span class="rsch-free">FREE · LIVE WEB</span>
+    <button onclick="rschClose()" title="Close">&#10005;</button>
+  </div>
+  <div id="rsch-note">
+    Live Google-grounded search. <b>Public lookups only</b> — versions, release notes, CVEs, upgrade guides. Never paste internal configs/hostnames here. Nothing is saved; copy the useful lines into your chat.
+  </div>
+  <div id="rsch-msgs"></div>
+  <div id="rsch-input-wrap">
+    <textarea id="rsch-in" rows="1" placeholder="e.g. Nexus 3.70 → 3.93 breaking changes…"
+      oninput="rschResize(this)" onkeydown="rschKey(event)"></textarea>
+    <button id="rsch-send" onclick="rschSend()" title="Search">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+      </svg>
+    </button>
+  </div>
+</div>
+<div id="disc-modal">
+  <h3>&#129302; Model Manager</h3>
+  <div class="disc-tabs">
+    <button class="disc-tab active" id="disc-tab-current" onclick="discTab('current')">My Models</button>
+    <button class="disc-tab" id="disc-tab-discover" onclick="discTab('discover')">Discover New</button>
+  </div>
+  <div id="disc-status"></div>
+  <div id="disc-content"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+// ── STATE ─────────────────────────────────────────────────────────────────
+var S = {
+  chatId:      null,
+  model:       "claude-sonnet-4-6",
+  models:      [],
+  files:       [],
+  streaming:   false,
+  lastActivity: Date.now(),   // for cache keep-warm: only ping while recently active
+  sbOpen:      true,
+  msgN:        0,
+  bufs:        {},
+  dbxOpen:     false,
+  folders:     [],
+  collapsedFolders: {},
+  pendingFolder: null,
+  dragChatId:  null,
+  PURCHASED:   1000000,
+  OFFSET:      72015,   // tokens used before this app (from console.anthropic.com)
+};
+
+// ── BOOT ──────────────────────────────────────────────────────────────────
+async function boot() {
+  await loadModels();
+  await loadChats();
+  await loadSettingsPreview();
+  await refreshStats();
+  await refreshSpend();
+  await loadWSState();
+  await loadDepthState();  // Load Normal/Average/Deep/Super depth choice
+  kbStats();               // Load knowledge base item count
+  await loadTheme();       // Apply saved light/dark theme
+  startCacheKeepWarm();    // keep prompt cache hot while working (saves the 9¢ cold-start)
+}
+
+// Cache keep-warm (June 14): the expensive ~9¢ re-payment happens when Naveen
+// steps away to his terminal, the cache TTL lapses, and the next question pays
+// the full system-prompt cache WRITE again. This pings a cheap (~0.0003¢)
+// endpoint every 10 min — but ONLY when a chat is open AND he was recently
+// active (within 45 min) AND not mid-stream. Keeps the cache hot during a real
+// working session without pinging all night.
+function startCacheKeepWarm() {
+  setInterval(function() {
+    if (!S.chatId || S.streaming) return;
+    var idleMs = Date.now() - (S.lastActivity || 0);
+    if (idleMs > 45 * 60 * 1000) return;   // stopped working — let cache lapse
+    fetch("/api/cache/keepwarm", { method: "POST" }).catch(function(){});
+  }, 10 * 60 * 1000);   // every 10 minutes
+}
+
+// ── MODELS ────────────────────────────────────────────────────────────────
+async function loadModels() {
+  var r = await fetch("/api/models");
+  S.models = await r.json();
+  renderModelDrop();
+  renderModelSelect();
+}
+
+function renderModelDrop() {
+  var el = document.getElementById("model-list");
+  var groups = {};
+  S.models.forEach(function(m) {
+    if (!groups[m.group]) groups[m.group] = [];
+    groups[m.group].push(m);
+  });
+  var html = "";
+  Object.keys(groups).forEach(function(g) {
+    html += '<div class="md-group">' + esc(g) + "</div>";
+    groups[g].forEach(function(m) {
+      var active = m.id === S.model ? " active" : "";
+      var frTag  = m.free ? '<span class="md-free">FREE</span>' : "";
+      html += '<div class="md-item' + active + '" onclick="modelSelect(\'' + m.id + '\')">';
+      html += '<span class="md-name">' + esc(m.name) + "</span>" + frTag + "</div>";
+    });
+  });
+  el.innerHTML = html;
+  var sel = S.models.find(function(m) { return m.id === S.model; });
+  if (sel) {
+    document.getElementById("model-pill-lbl").textContent = sel.name;
+    document.getElementById("model-foot").textContent = sel.free ? sel.name + " (FREE)" : sel.name;
+  }
+}
+
+function renderModelSelect() {
+  var sel = document.getElementById("s-model");
+  sel.innerHTML = S.models.map(function(m) {
+    return '<option value="' + m.id + '">' + m.name + (m.free ? " (FREE)" : "") + "</option>";
+  }).join("");
+}
+
+function modelToggle() {
+  document.getElementById("model-drop").classList.toggle("open");
+}
+
+document.addEventListener("click", function(e) {
+  var dd = document.getElementById("model-drop");
+  var pp = document.getElementById("model-pill");
+  if (!dd.contains(e.target) && !pp.contains(e.target)) dd.classList.remove("open");
+});
+
+async function modelSelect(id) {
+  S.model = id;
+  document.getElementById("model-drop").classList.remove("open");
+  renderModelDrop();
+  if (S.chatId) {
+    await api("/api/chats/" + S.chatId, "PATCH", {model: id});
+  }
+  toast(S.models.find(function(m){return m.id===id;})?.name || id);
+}
+
+// ── SIDEBAR ───────────────────────────────────────────────────────────────
+function sbToggle() { S.sbOpen ? sbHide() : sbShow(); }
+function sbShow() {
+  S.sbOpen = true;
+  var sb = document.getElementById("sidebar");
+  sb.classList.remove("hidden");
+  sb.classList.remove("rail");
+  document.getElementById("sb-tab").classList.remove("show");
+  document.getElementById("app").classList.remove("sb-hidden");
+  if (window.innerWidth <= 680) document.getElementById("mob-bg").classList.add("show");
+}
+function sbHide() {
+  S.sbOpen = false;
+  var sb = document.getElementById("sidebar");
+  document.getElementById("app").classList.add("sb-hidden");
+  if (window.innerWidth <= 680) {
+    // mobile: full slide-away overlay + show the re-open arrow
+    sb.classList.add("hidden");
+    sb.classList.remove("rail");
+    document.getElementById("sb-tab").classList.add("show");
+  } else {
+    // desktop: Claude-style thin rail stays visible, no floating arrow needed
+    sb.classList.add("rail");
+    sb.classList.remove("hidden");
+    document.getElementById("sb-tab").classList.remove("show");
+  }
+  document.getElementById("mob-bg").classList.remove("show");
+}
+function sbOpen() { sbShow(); }
+function sbClose() { sbHide(); }
+
+// ── CHAT LIST ─────────────────────────────────────────────────────────────
+// Render a single chat row (unchanged markup — reused for folders + unfiled)
+function _chatItemHtml(c, statusMap) {
+  var active    = c.id === S.chatId ? " active" : "";
+  var hasFolder = statusMap.hasOwnProperty(c.id) ? statusMap[c.id] : true;
+  var dotClass  = hasFolder ? "green" : "grey";
+  var dotTitle  = hasFolder ? "Active — folder exists on disk" : "No folder found on disk";
+  var h = '<div class="cl-item' + active + '" draggable="true"' +
+          ' ondragstart="chatDragStart(event,\'' + c.id + '\')"' +
+          ' ondragend="chatDragEnd(event)"' +
+          ' onclick="chatOpen(\'' + c.id + '\')" id="ci-' + c.id + '">';
+  h += '<span class="cl-dot ' + dotClass + '" title="' + dotTitle + '"></span>';
+  h += '<div class="cl-body"><div class="cl-title">' + esc(c.title) + "</div></div>";
+  h += '<div class="cl-btns">';
+  h += '<button class="cl-btn move" onclick="chatMovePrompt(event,\'' + c.id + '\')" title="Move to folder">&#128193;</button>';
+  h += '<button class="cl-btn del" onclick="chatDel(event,\'' + c.id + '\')" title="Delete">&#10005;</button>';
+  h += "</div></div>";
+  return h;
+}
+
+async function loadChats() {
+  var r    = await fetch("/api/chats");
+  var list = await r.json();
+  var el   = document.getElementById("chatlist");
+
+  // Load folders (additive — empty list means behave exactly as before)
+  try {
+    var fr = await fetch("/api/folders");
+    S.folders = await fr.json();
+  } catch(e) { S.folders = []; }
+
+  if (!list.length && !(S.folders && S.folders.length)) {
+    el.innerHTML = '<div class="cl-section">No chats yet</div>';
+    return;
+  }
+
+  // Fetch folder status for green/grey dots and orphan info
+  var statusMap = {};
+  var orphans   = [];
+  try {
+    var sr   = await fetch("/api/chats/status");
+    var sd   = await sr.json();
+    (sd.chats || []).forEach(function(cs) { statusMap[cs.chat_id] = cs.has_folder; });
+    orphans = sd.orphan_folders || [];
+  } catch(e) { /* status dots optional — don't break chat list */ }
+
+  var html = "";
+
+  // ── FOLDERS (rendered on top, collapsible) ──────────────────────────────
+  if (S.folders && S.folders.length) {
+    S.folders.forEach(function(f) {
+      var fchats = list.filter(function(c){ return c.folder_id === f.id; });
+      // Default COLLAPSED: a folder is open ONLY if explicitly toggled open (=== false)
+      var collapsed = (S.collapsedFolders[f.id] === false) ? "" : " collapsed";
+      html += '<div class="cl-folder' + collapsed + '" id="clf-' + f.id + '">';
+      html += '<div class="cl-folder-hdr" onclick="folderToggle(\'' + f.id + '\')"' +
+              ' ondragover="folderDragOver(event,\'' + f.id + '\')"' +
+              ' ondragleave="folderDragLeave(event,\'' + f.id + '\')"' +
+              ' ondrop="folderDrop(event,\'' + f.id + '\')">';
+      html += '<span class="cl-folder-caret">&#9656;</span>';
+      html += '<span class="cl-folder-icon">&#128193;</span>';
+      html += '<span class="cl-folder-name">' + esc(f.name) + '</span>';
+      html += '<span class="cl-folder-count">' + fchats.length + '</span>';
+      html += '<button class="cl-btn fadd" onclick="newChatInFolder(event,\'' + f.id + '\')" title="New chat in this folder">+</button>';
+      html += '<button class="cl-btn fdel" onclick="folderDel(event,\'' + f.id + '\')" title="Delete folder (chats become unfiled)">&#10005;</button>';
+      html += '</div>';
+      html += '<div class="cl-folder-body"' +
+              ' ondragover="folderDragOver(event,\'' + f.id + '\')"' +
+              ' ondragleave="folderDragLeave(event,\'' + f.id + '\')"' +
+              ' ondrop="folderDrop(event,\'' + f.id + '\')">';
+      if (fchats.length) {
+        fchats.forEach(function(c){ html += _chatItemHtml(c, statusMap); });
+      } else {
+        html += '<div class="cl-folder-empty">Empty — drag a chat here</div>';
+      }
+      html += '</div></div>';
+    });
+  }
+
+  // ── UNFILED CHATS (exact same time-grouping as before) ──────────────────
+  var unfiled = list.filter(function(c){ return !c.folder_id; });
+  var today   = new Date().toDateString();
+  var weekAgo = new Date(Date.now() - 6 * 86400000);
+  var groups  = {Today: [], "This Week": [], Older: []};
+  unfiled.forEach(function(c) {
+    var d = new Date(c.updated_at);
+    if (d.toDateString() === today) groups.Today.push(c);
+    else if (d > weekAgo)           groups["This Week"].push(c);
+    else                            groups.Older.push(c);
+  });
+  // Unfiled drop-zone wrapper (drag a chat here to remove it from a folder)
+  html += '<div id="unfiled-zone" ondragover="unfiledDragOver(event)" ondragleave="unfiledDragLeave(event)" ondrop="unfiledDrop(event)">';
+  Object.keys(groups).forEach(function(lbl) {
+    if (!groups[lbl].length) return;
+    html += '<div class="cl-section">' + lbl + "</div>";
+    groups[lbl].forEach(function(c){ html += _chatItemHtml(c, statusMap); });
+  });
+  html += '</div>';  // /unfiled-zone
+
+  // Orphan folders panel removed (June 13): deleted chats now move into a
+  // <parent>/_Trash_/ subfolder on disk, so there are no stray root folders to
+  // warn about. The folder structure stays a clean 1:1 mirror of the UI.
+
+  el.innerHTML = html;
+  var si = document.getElementById("chat-search-input");
+  if (si && si.value) filterChats(si.value);
+}
+
+// ── FOLDER UI ACTIONS ──────────────────────────────────────────────────────
+function folderToggle(fid) {
+  // Semantics: collapsedFolders[fid] === false => OPEN; anything else => COLLAPSED.
+  var isOpen = (S.collapsedFolders[fid] === false);
+  S.collapsedFolders[fid] = isOpen ? true : false;  // flip open<->collapsed
+  loadChats();  // re-render keeps DOM in lockstep with state
+}
+
+async function folderCreate() {
+  var name = prompt("New folder name:");
+  if (!name || !name.trim()) return;
+  await api("/api/folders", "POST", {name: name.trim()});
+  await loadChats();
+  toast("Folder created");
+}
+
+async function folderDel(ev, fid) {
+  ev.stopPropagation();
+  if (!confirm("Delete this folder? Its chats are kept and become unfiled.")) return;
+  await api("/api/folders/" + fid, "DELETE");
+  await loadChats();
+  toast("Folder deleted — chats kept");
+}
+
+async function chatMovePrompt(ev, chatId) {
+  ev.stopPropagation();
+  var opts = ["0 — (Unfiled / remove from folder)"];
+  (S.folders || []).forEach(function(f, i){ opts.push((i+1) + " — " + f.name); });
+  var pick = prompt("Move chat to which folder?\n\n" + opts.join("\n") + "\n\nEnter the number:");
+  if (pick === null) return;
+  var idx = parseInt(pick.trim(), 10);
+  var folder_id = null;
+  if (idx >= 1 && idx <= (S.folders||[]).length) folder_id = S.folders[idx-1].id;
+  await api("/api/chats/" + chatId + "/folder", "PATCH", {folder_id: folder_id});
+  await loadChats();
+  toast(folder_id ? "Moved to folder" : "Removed from folder");
+}
+
+// ── DRAG & DROP — move chats into folders ──────────────────────────────────
+function chatDragStart(ev, chatId) {
+  S.dragChatId = chatId;
+  ev.dataTransfer.effectAllowed = "move";
+  try { ev.dataTransfer.setData("text/plain", chatId); } catch(e){}
+  var el = document.getElementById("ci-" + chatId);
+  if (el) el.classList.add("dragging");
+}
+function chatDragEnd(ev) {
+  S.dragChatId = null;
+  document.querySelectorAll(".cl-item.dragging").forEach(function(el){ el.classList.remove("dragging"); });
+  document.querySelectorAll(".cl-folder.drop-hot").forEach(function(el){ el.classList.remove("drop-hot"); });
+}
+function folderDragOver(ev, fid) {
+  ev.preventDefault();              // required to allow drop
+  ev.dataTransfer.dropEffect = "move";
+  var f = document.getElementById("clf-" + fid);
+  if (f) f.classList.add("drop-hot");
+}
+function folderDragLeave(ev, fid) {
+  // Only clear when actually leaving the folder box (not moving between children)
+  var f = document.getElementById("clf-" + fid);
+  if (f && !f.contains(ev.relatedTarget)) f.classList.remove("drop-hot");
+}
+async function folderDrop(ev, fid) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  var f = document.getElementById("clf-" + fid);
+  if (f) f.classList.remove("drop-hot");
+  var chatId = S.dragChatId || (ev.dataTransfer && ev.dataTransfer.getData("text/plain"));
+  S.dragChatId = null;
+  if (!chatId) return;
+  S.collapsedFolders[fid] = false;   // false = OPEN (expand to show moved chat)
+  await api("/api/chats/" + chatId + "/folder", "PATCH", {folder_id: fid});
+  await loadChats();
+  toast("Moved to folder");
+}
+// Drop onto the "unfiled" area to pull a chat back out of a folder
+function unfiledDragOver(ev) {
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = "move";
+  var z = document.getElementById("unfiled-zone");
+  if (z) z.classList.add("drop-hot");
+}
+function unfiledDragLeave(ev) {
+  var z = document.getElementById("unfiled-zone");
+  if (z && !z.contains(ev.relatedTarget)) z.classList.remove("drop-hot");
+}
+async function unfiledDrop(ev) {
+  ev.preventDefault();
+  var z = document.getElementById("unfiled-zone");
+  if (z) z.classList.remove("drop-hot");
+  var chatId = S.dragChatId || (ev.dataTransfer && ev.dataTransfer.getData("text/plain"));
+  S.dragChatId = null;
+  if (!chatId) return;
+  await api("/api/chats/" + chatId + "/folder", "PATCH", {folder_id: null});
+  await loadChats();
+  toast("Removed from folder");
+}
+
+async function chatOpen(id) {
+  S.chatId = id;
+  var r    = await fetch("/api/chats/" + id);
+  var chat = await r.json();
+  S.model = chat.model || S.model;
+  renderModelDrop();
+  document.getElementById("chat-title").textContent = chat.title || "Chat";
+  document.getElementById("btn-close").classList.add("show");
+  document.getElementById("welcome").style.display  = "none";
+  var el = document.getElementById("msgs");
+  el.style.display = "flex";
+  el.innerHTML     = "";
+  (chat.messages || []).forEach(function(m) {
+    renderMsg(m.role, m.content, m.tokens_in, m.tokens_out);
+  });
+  scrollBottom();
+  loadChats();
+  if (window.innerWidth <= 680) sbHide();
+}
+
+async function newChat() {
+  S.chatId = null;
+  S.pendingFolder = null;
+  document.getElementById("chat-title").textContent = "New Chat";
+  document.getElementById("btn-close").classList.remove("show");
+  document.getElementById("welcome").style.display  = "flex";
+  document.getElementById("msgs").style.display     = "none";
+  document.getElementById("msgs").innerHTML         = "";
+  if (window.innerWidth <= 680) sbHide();
+  document.getElementById("msg-in").focus();
+}
+
+// Start a brand-new chat that will be created INSIDE a folder on first send.
+async function newChatInFolder(ev, fid) {
+  if (ev) ev.stopPropagation();
+  S.chatId = null;
+  S.pendingFolder = fid;
+  // Open the target folder (false = open) so the new chat is visible after send
+  S.collapsedFolders[fid] = false;
+  document.getElementById("chat-title").textContent = "New Chat";
+  document.getElementById("btn-close").classList.remove("show");
+  document.getElementById("welcome").style.display  = "flex";
+  document.getElementById("msgs").style.display     = "none";
+  document.getElementById("msgs").innerHTML         = "";
+  if (window.innerWidth <= 680) sbHide();
+  document.getElementById("msg-in").focus();
+  var f = (S.folders || []).find(function(x){ return x.id === fid; });
+  toast(f ? ("New chat in " + f.name) : "New chat in folder");
+}
+
+function chatClose() {
+  S.chatId = null;
+  document.getElementById("chat-title").textContent = "Select or start a chat";
+  document.getElementById("btn-close").classList.remove("show");
+  document.getElementById("welcome").style.display  = "flex";
+  document.getElementById("msgs").style.display     = "none";
+  document.getElementById("msgs").innerHTML         = "";
+  loadChats();
+}
+
+async function chatDel(e, id) {
+  e.stopPropagation();
+  if (!confirm("Move to Trash? Chat stays in your DB until you permanently delete it.")) return;
+  await api("/api/chats/" + id, "DELETE");
+  if (S.chatId === id) chatClose();
+  loadChats();
+  refreshStats();
+}
+
+async function openTrash() {
+  var r = await fetch("/api/chats/trash");
+  var chats = await r.json();
+  var modal = document.getElementById("trash-modal");
+  var list  = document.getElementById("trash-list");
+  list.innerHTML = "";
+  if (chats.length === 0) {
+    list.innerHTML = "<p style=\"color:var(--muted);text-align:center;padding:24px\">Trash is empty</p>";
+  } else {
+    chats.forEach(function(c) {
+      var d = document.createElement("div");
+      d.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)";
+      d.innerHTML =
+        "<span style=\"flex:1;font-size:13px\">" + esc(c.title) + "</span>" +
+        "<span style=\"font-size:11px;color:var(--muted)\">" + (c.deleted_at||"").slice(0,10) + "</span>" +
+        "<button onclick=\"trashRestore('" + c.id + "');\" style=\"padding:3px 10px;border-radius:6px;border:1px solid var(--accent);background:none;color:var(--accent);cursor:pointer;font-size:12px\">Restore</button>" +
+        "<button onclick=\"trashHardDelete('" + c.id + "');\" style=\"padding:3px 10px;border-radius:6px;border:1px solid #c0392b;background:none;color:#c0392b;cursor:pointer;font-size:12px\">Delete Forever</button>";
+      list.appendChild(d);
+    });
+  }
+  modal.style.display = "flex";
+}
+
+async function trashRestore(id) {
+  await api("/api/chats/" + id + "/restore", "POST");
+  loadChats();
+  openTrash();
+}
+
+async function trashHardDelete(id) {
+  if (!confirm("Permanently delete? This CANNOT be undone.\n(The chat file is kept on disk in the _Orphan folder for your reference.)")) return;
+  try {
+    await fetch("/api/chats/" + id + "/hard-delete", { method: "DELETE" });
+  } catch (e) {
+    // even if the response is odd, the delete has happened server-side — proceed
+    console.warn("hard-delete response issue (ignored):", e);
+  }
+  openTrash();      // refresh the trash list
+  if (typeof loadChats === "function") loadChats();   // refresh sidebar
+}
+
+function closeTrash() {
+  document.getElementById("trash-modal").style.display = "none";
+}
+
+// ── TITLE EDIT ────────────────────────────────────────────────────────────
+function titleEdit() {
+  if (!S.chatId) return;
+  var tEl = document.getElementById("chat-title");
+  var iEl = document.getElementById("title-edit");
+  iEl.value = tEl.textContent;
+  tEl.style.display = "none";
+  iEl.style.display = "block";
+  iEl.focus(); iEl.select();
+}
+async function titleSave() {
+  var tEl = document.getElementById("chat-title");
+  var iEl = document.getElementById("title-edit");
+  var val = (iEl.value || "").trim() || tEl.textContent;
+  tEl.textContent   = val;
+  tEl.style.display = "";
+  iEl.style.display = "none";
+  if (S.chatId) { await api("/api/chats/" + S.chatId, "PATCH", {title: val}); loadChats(); }
+}
+function titleKey(e) {
+  if (e.key === "Enter")  { e.preventDefault(); titleSave(); }
+  if (e.key === "Escape") {
+    document.getElementById("title-edit").style.display = "none";
+    document.getElementById("chat-title").style.display = "";
+  }
+}
+
+// ── SEND MESSAGE ──────────────────────────────────────────────────────────
+async function sendMsg() {
+  if (S.streaming) return;
+  S.lastActivity = Date.now();   // session is alive — keep cache warm
+  var inEl = document.getElementById("msg-in");
+  var text = inEl.value.trim();
+  var pendingCount = (window._pendingFiles && window._pendingFiles.length) || 0;
+  // Count pasted/dropped files too — they live in _pendingFiles, not S.files
+  if (!text && !S.files.length && !pendingCount) return;
+
+  // Create chat if none
+  if (!S.chatId) {
+    var r = await api("/api/chats", "POST", {model: S.model, folder_id: S.pendingFolder});
+    S.pendingFolder = null;
+    S.chatId = r.id;
+    document.getElementById("welcome").style.display = "none";
+    document.getElementById("msgs").style.display    = "flex";
+    document.getElementById("btn-close").classList.add("show");
+    document.getElementById("chat-title").textContent = "New Chat";
+  }
+
+  renderMsg("user", text || "[files attached]");
+  scrollBottom();
+  inEl.value = ""; autoResize(inEl);
+  var files = S.files.slice(); clearAttach();
+  // Add pasted/dropped files
+  if (window._pendingFiles && window._pendingFiles.length) {
+    files = files.concat(window._pendingFiles);
+    window._pendingFiles = [];
+    updateFilePreview();
+  }
+
+  S.streaming = true;
+  document.getElementById("btn-send").disabled = true;
+  var thinkId = renderThink();
+
+  try {
+    var fd;
+    if (files.length) {
+      fd = new FormData();
+      fd.append("message", text);
+      fd.append("depth", S_DEPTH);            // manual depth tier (form field)
+      files.forEach(function(f) { fd.append("files", f); });
+    }
+    var resp = await fetch("/api/chats/" + S.chatId + "/messages", {
+      method: "POST",
+      ...(fd ? {body: fd} : {headers: {"Content-Type": "application/json"}, body: JSON.stringify({message: text, depth: S_DEPTH})})
+    });
+    if (!resp.ok) {
+      var err = {};
+      try { err = await resp.json(); } catch(e) {}
+      removeEl(thinkId);
+      renderMsg("assistant", "error: " + (err.error || ("HTTP " + resp.status)));
+      loadChats();   // keep sidebar in sync — never let a chat silently disappear
+      return;
+    }
+
+    var reader  = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var aId     = null;
+    var buf     = "";
+
+    removeEl(thinkId);
+
+    while (true) {
+      var chunk = await reader.read();
+      if (chunk.done) break;
+      buf += decoder.decode(chunk.value, {stream: true});
+      var lines = buf.split("\n");
+      buf = lines.pop();
+      lines.forEach(function(line) {
+        if (!line.startsWith("data:")) return;
+        var raw = line.slice(5).trim();
+        if (!raw) return;
+        try {
+          var evt = JSON.parse(raw);
+          if (evt.type === "text") {
+            if (!aId) {
+              aId = renderMsg("assistant", "", 0, 0, true);
+              streamAppend(aId, evt.text);   // include first chunk — was lost before
+            } else {
+              streamAppend(aId, evt.text);
+            }
+          } else if (evt.type === "memory_saved") {
+            toast("💾 Saved to memory: " + (evt.preview || "").substring(0, 60) + "...");
+          } else if (evt.type === "preference_saved") {
+            toast("🧠 Learned preference: " + (evt.preview || "").substring(0, 70));
+          } else if (evt.type === "done") {
+            refreshStats();
+            refreshSpend();
+            loadChats();
+            if (evt.cache_read) showCacheHit(evt.cache_read);
+          } else if (evt.type === "error") {
+            if (!aId) renderMsg("assistant", "error: " + evt.text);
+          }
+        } catch(e) {}
+      });
+    }
+    if (aId) streamFinal(aId);
+
+  } catch(err) {
+    removeEl(thinkId);
+    renderMsg("assistant", "error: " + err.message);
+    loadChats();   // keep sidebar in sync on network/stream errors too
+  } finally {
+    S.streaming = false;
+    document.getElementById("btn-send").disabled = false;
+    document.getElementById("msg-in").focus();
+  }
+}
+
+// ── RENDER ────────────────────────────────────────────────────────────────
+function renderMsg(role, content, tin, tout, streaming) {
+  var id  = "m" + (++S.msgN);
+  var el  = document.createElement("div");
+  el.className = "msg " + role;
+  el.id        = id;
+  var av  = role === "user" ? "N" : "L";
+  var bub;
+  if (role === "assistant") {
+    var txt = typeof content === "string" ? content :
+      (Array.isArray(content) ? content.map(function(b){return b.text||"";}).join("") : String(content));
+    bub = renderMD(txt);
+  } else {
+    bub = esc(typeof content === "string" ? content : String(content));
+  }
+  var meta = (tin || tout) ? '<div class="msg-meta">' + tin + " in &middot; " + tout + " out</div>" : "";
+  el.innerHTML = '<div class="msg-av">' + av + '</div><div class="msg-body"><div class="msg-bub" id="b' + id + '">' + bub + "</div>" + meta + "</div>";
+  document.getElementById("msgs").appendChild(el);
+  if (!streaming) bindCopy(el);
+  scrollBottom();
+  return id;
+}
+
+function renderThink() {
+  var id = "t" + (++S.msgN);
+  var el = document.createElement("div");
+  el.className = "msg assistant"; el.id = id;
+  el.innerHTML = '<div class="msg-av">L</div><div class="msg-body"><div class="msg-bub"><div class="thinking"><span></span><span></span><span></span></div></div></div>';
+  document.getElementById("msgs").appendChild(el);
+  scrollBottom();
+  return id;
+}
+
+function streamAppend(id, text) {
+  S.bufs[id] = (S.bufs[id] || "") + text;
+  var el = document.getElementById("b" + id);
+  if (el) { el.innerHTML = renderMD(S.bufs[id]) + '<span style="opacity:.4">|</span>'; scrollBottom(); }
+}
+
+function streamFinal(id) {
+  var el = document.getElementById("b" + id);
+  if (el && S.bufs[id]) {
+    el.innerHTML = renderMD(S.bufs[id]);
+    delete S.bufs[id];
+    bindCopy(el);
+  }
+}
+
+function bindCopy(container) {
+  container.querySelectorAll(".copy-btn").forEach(function(btn) {
+    btn.onclick = function() {
+      navigator.clipboard.writeText(btn.closest("pre").querySelector("code").textContent).then(function() {
+        btn.textContent = "Copied!"; btn.classList.add("done");
+        setTimeout(function() { btn.textContent = "Copy"; btn.classList.remove("done"); }, 2000);
+      });
+    };
+  });
+}
+
+function removeEl(id) { var el = document.getElementById(id); if (el) el.remove(); }
+
+// ── MARKDOWN ──────────────────────────────────────────────────────────────
+function renderMD(raw) {
+  if (!raw) return "";
+  var blocks = [];
+
+  // 1. Fenced code blocks — extract before any other processing
+  var text = raw.replace(/```(\w*)\n?([\s\S]*?)```/g, function(_, lang, code) {
+    var l = lang || "text";
+    var h = "<pre>" +
+      '<div class="code-hdr"><span class="code-lang">' + l + "</span>" +
+      '<button class="copy-btn" type="button">Copy</button></div>' +
+      "<code>" + esc(code.replace(/\n$/, "")) + "</code></pre>";
+    blocks.push(h); return "\x00" + (blocks.length-1) + "\x00";
+  });
+
+  // 2. Tables — must run BEFORE paragraph processing
+  // Detects: line starts with |, has separator row (|---|), renders as <table>
+  text = text.replace(
+    /((?:^\|.+\|\s*\n)+)/gm,
+    function(block) {
+      var rows = block.trim().split("\n");
+      if (rows.length < 2) return block;
+      // Check for separator row (|---|---|)
+      var sepIdx = -1;
+      for (var i = 0; i < rows.length; i++) {
+        if (/^\|[-:\s|]+\|\s*$/.test(rows[i])) { sepIdx = i; break; }
+      }
+      if (sepIdx === -1) return block;
+
+      var html = '<div style="overflow-x:auto;margin:10px 0"><table>';
+
+      // Header rows (before separator)
+      if (sepIdx > 0) {
+        html += "<thead>";
+        for (var r = 0; r < sepIdx; r++) {
+          var cells = rows[r].replace(/^\|/, "").replace(/\|$/, "").split("|");
+          html += "<tr>";
+          cells.forEach(function(c) { html += "<th>" + c.trim() + "</th>"; });
+          html += "</tr>";
+        }
+        html += "</thead>";
+      }
+
+      // Body rows (after separator)
+      html += "<tbody>";
+      for (var r2 = sepIdx + 1; r2 < rows.length; r2++) {
+        if (!rows[r2].trim()) continue;
+        var cells2 = rows[r2].replace(/^\|/, "").replace(/\|$/, "").split("|");
+        html += "<tr>";
+        cells2.forEach(function(c2) {
+          // Apply bold/inline-code within cells
+          var cell = c2.trim()
+            .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+            .replace(/`([^`]+)`/g, "<code>$1</code>");
+          html += "<td>" + cell + "</td>";
+        });
+        html += "</tr>";
+      }
+      html += "</tbody></table></div>";
+      blocks.push(html);
+      return "\x00" + (blocks.length-1) + "\x00";
+    }
+  );
+
+  // 3. Inline code
+  text = text.replace(/`([^`\n]+)`/g, function(_, c) { return "<code>" + esc(c) + "</code>"; });
+
+  // 4. Headers
+  text = text.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+  text = text.replace(/^## (.+)$/gm,  "<h2>$1</h2>");
+  text = text.replace(/^# (.+)$/gm,   "<h1>$1</h1>");
+
+  // 5. Bold / italic
+  text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  text = text.replace(/\*(.+?)\*/g,       "<em>$1</em>");
+
+  // 6. Blockquote
+  text = text.replace(/^> (.+)$/gm, "<blockquote>$1</blockquote>");
+
+  // 7. HR
+  text = text.replace(/^---+$/gm, "<hr/>");
+
+  // 8. Lists
+  text = text.replace(/^[ \t]*[-*] (.+)$/gm, "<li>$1</li>");
+  text = text.replace(/^[ \t]*\d+\. (.+)$/gm, "<li>$1</li>");
+  text = text.replace(/(<li>.*?<\/li>\n?)+/g, function(m) { return "<ul>" + m + "</ul>"; });
+
+  // 9. Paragraphs
+  var lines = text.split("\n"), out = "", inP = false;
+  var BLOCK = /^(<h[1-6]|<ul|<ol|<pre|<hr|<blockquote|\x00)/;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (BLOCK.test(line)) {
+      if (inP) { out += "</p>"; inP = false; }
+      out += line + "\n";
+    } else if (!line.trim()) {
+      if (inP) { out += "</p>"; inP = false; }
+    } else {
+      if (!inP) { out += "<p>"; inP = true; } else out += " ";
+      out += line;
+    }
+  }
+  if (inP) out += "</p>";
+
+  // 10. Restore code blocks and tables
+  out = out.replace(/\x00(\d+)\x00/g, function(_, i) { return blocks[parseInt(i)]; });
+  return out;
+}
+
+function esc(s) {
+  if (typeof s !== "string") return "";
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// ── FILE ATTACH ───────────────────────────────────────────────────────────
+function attachFiles(e) {
+  Array.from(e.target.files).forEach(function(f) {
+    if (!S.files.find(function(x){return x.name===f.name;})) S.files.push(f);
+  });
+  renderAttach();
+  e.target.value = "";
+}
+function renderAttach() {
+  var el = document.getElementById("attach-prev");
+  if (!S.files.length) { el.innerHTML=""; el.className=""; return; }
+  el.className = "has";
+  el.innerHTML = S.files.map(function(f,i) {
+    return '<div class="ach">&#128206; ' + esc(f.name) + '<button onclick="removeAttach(' + i + ')">&#10005;</button></div>';
+  }).join("");
+}
+function removeAttach(i) { S.files.splice(i,1); renderAttach(); }
+function clearAttach() { S.files=[]; renderAttach(); }
+
+// ── UI UTILS ──────────────────────────────────────────────────────────────
+function scrollBottom() {
+  var w = document.getElementById("msgs-wrap");
+  requestAnimationFrame(function() { w.scrollTop = w.scrollHeight; });
+}
+function autoResize(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 180) + "px";
+}
+function handleKey(e) {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+}
+function toast(msg) {
+  var el = document.getElementById("toast");
+  el.textContent = msg; el.classList.add("show");
+  clearTimeout(el._t);
+  el._t = setTimeout(function() { el.classList.remove("show"); }, 2200);
+}
+
+// ── TOKEN STATS ───────────────────────────────────────────────────────────
+async function refreshStats() {
+  try {
+    var r = await fetch("/api/stats");
+    var s = await r.json();
+    var spent   = parseFloat(s.total_cost_usd || 0);
+    var credit  = parseFloat(s.starting_credit || 5.98);
+    var left    = Math.max(0, credit - spent);
+    document.getElementById("tok-left").textContent = "$" + left.toFixed(2);
+    // settings modal
+  } catch(e) { console.warn("refreshStats:", e); }
+}
+
+async function refreshSpend() {
+  try {
+    var r = await fetch("/api/spend/today");
+    var d = await r.json();
+    var lbl = document.getElementById("spend-pill-lbl");
+    var lblO = document.getElementById("spend-pill-openai");
+    if (lbl)  lbl.textContent  = "\u25c6 $" + (d.today_claude || 0).toFixed(2);
+    if (lblO) lblO.textContent = "\u24c4 $" + (d.today_openai || 0).toFixed(2);
+    var oaToday = document.getElementById("openai-today");
+    var oaTotal = document.getElementById("openai-total");
+    if (oaToday) oaToday.textContent = "$" + (d.today_openai || 0).toFixed(2);
+    if (oaTotal) oaTotal.textContent = "$" + (d.openai_total || 0).toFixed(2);
+  } catch(e) { /* non-critical — leave last value */ }
+}
+
+// ── THEME (light / dark) ────────────────────────────────────────────────────
+function applyThemeButtons(theme) {
+  var lt = document.getElementById("theme-light-btn");
+  var dk = document.getElementById("theme-dark-btn");
+  if (!lt || !dk) return;
+  // reset both
+  lt.style.background = "none"; lt.style.color = "var(--text2)"; lt.style.borderColor = "var(--border)";
+  dk.style.background = "none"; dk.style.color = "var(--text2)"; dk.style.borderColor = "var(--border)";
+  // highlight active
+  var active = (theme === "dark") ? dk : lt;
+  active.style.background = "var(--accent)";
+  active.style.color = "#fff";
+  active.style.borderColor = "var(--accent)";
+}
+
+async function setTheme(theme) {
+  if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark");
+  else document.documentElement.removeAttribute("data-theme");
+  var meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", theme === "dark" ? "#1a1c22" : "#ffffff");
+  applyThemeButtons(theme);
+  try { await api("/api/settings", "POST", {theme: theme}); } catch(e) {}
+}
+
+async function loadTheme() {
+  try {
+    var r = await fetch("/api/settings");
+    var s = await r.json();
+    var theme = s.theme || "light";
+    if (theme === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    else document.documentElement.removeAttribute("data-theme");
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", theme === "dark" ? "#1a1c22" : "#ffffff");
+    applyThemeButtons(theme);
+  } catch(e) {}
+}
+
+// ── SETTINGS ─────────────────────────────────────────────────────────────
+async function loadSettingsPreview() {
+  var r = await fetch("/api/settings");
+  var s = await r.json();
+  if (s.claude_preview) document.getElementById("h-claude").textContent = "Saved: " + s.claude_preview;
+  if (s.default_model)  { S.model = s.default_model; renderModelDrop(); }
+  if (!s.has_claude_key) setTimeout(settingsOpen, 700);
+}
+
+async function qualityTogglesSave() {
+  var kb = document.getElementById("s-kb-enabled").checked;
+  var rev = document.getElementById("s-reviewer-enabled").checked;
+  try {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({kb_enabled: kb, reviewer_enabled: rev}),
+    });
+    toast("✓ Quality settings saved");
+  } catch(e) { toast("Save failed"); }
+}
+
+async function settingsOpen() {
+  document.getElementById("settings-modal").classList.add("open");
+  document.getElementById("overlay").classList.add("open");
+  var r = await fetch("/api/settings");
+  var s = await r.json();
+  if (s.claude_preview) document.getElementById("h-claude").textContent = "Saved: " + s.claude_preview;
+  if (s.openai_preview) document.getElementById("h-openai").textContent = "Saved: " + s.openai_preview;
+  if (s.gemini_preview) document.getElementById("h-gemini").textContent = "Saved: " + s.gemini_preview + " — free web search active.";
+  if (s.backup_preview) document.getElementById("h-claude2").textContent = "Saved: " + s.backup_preview + " — your primary stays active until you flip the switch.";
+  var ub = document.getElementById("s-use-backup");
+  var bcRow = document.getElementById("backup-credit-row");
+  if (ub) {
+    ub.checked = !!s.use_backup_key;
+    if (bcRow) bcRow.style.display = s.use_backup_key ? "block" : "none";
+    var bc = document.getElementById("s-backup-credit");
+    if (bc && s.backup_starting_credit) bc.value = s.backup_starting_credit;
+    var bs = document.getElementById("backup-state");
+    if (bs) bs.textContent = s.use_backup_key ? "\u2705 ACTIVE \u2014 using backup ($" + (s.backup_starting_credit||100) + " credit)" : (s.has_backup_key ? "(ready, not active)" : "(no backup key saved yet)");
+  }
+  document.getElementById("s-model").value = s.default_model || "claude-sonnet-4-6";
+  // FIX (June 13): these two were never populated from saved state — every
+  // open showed unchecked regardless of the DB value, and a stray Save could
+  // silently flip a true setting back to false. Backend default for kb_enabled
+  // is "true" if unset; reviewer_enabled defaults "false". Read the ACTUAL
+  // saved value so the checkbox always reflects reality.
+  document.getElementById("s-kb-enabled").checked = (s.kb_enabled !== "false");
+  document.getElementById("s-reviewer-enabled").checked = (s.reviewer_enabled === "true");
+  applyThemeButtons(s.theme || "light");
+  await refreshStats();
+}
+function settingsClose() {
+  document.getElementById("settings-modal").classList.remove("open");
+  document.getElementById("overlay").classList.remove("open");
+}
+function backupToggleChanged() {
+  var ub = document.getElementById("s-use-backup");
+  var bcRow = document.getElementById("backup-credit-row");
+  if (bcRow) bcRow.style.display = ub && ub.checked ? "block" : "none";
+}
+
+async function settingsSave() {
+  var body = {};
+  var ck = document.getElementById("s-claude").value.trim();
+  var ok = document.getElementById("s-openai").value.trim();
+  var gk = document.getElementById("s-gemini").value.trim();
+  var ck2 = document.getElementById("s-claude2").value.trim();
+  var useBackup = document.getElementById("s-use-backup").checked;
+  var backupCredit = document.getElementById("s-backup-credit").value.trim();
+  var md = document.getElementById("s-model").value;
+  if (ck) body.api_key = ck;
+  if (ok) body.openai_key = ok;
+  if (gk) body.gemini_key = gk;
+  if (ck2) body.api_key_2 = ck2;
+  body.use_backup_key = useBackup;
+  if (backupCredit) body.backup_starting_credit = parseFloat(backupCredit);
+  if (md) { body.default_model = md; S.model = md; }
+  var r = await api("/api/settings", "POST", body);
+  if (r.error) { toast("Error: " + r.error); return; }
+  document.getElementById("s-claude").value = "";
+  document.getElementById("s-openai").value = "";
+  document.getElementById("s-gemini").value = "";
+  document.getElementById("s-claude2").value = "";
+  renderModelDrop();
+  toast("Settings saved");
+  settingsClose();
+}
+
+// ── DROPBOX ───────────────────────────────────────────────────────────────
+function dbxToggle() {
+  S.dbxOpen = !S.dbxOpen;
+  document.getElementById("dbx-panel").classList.toggle("open", S.dbxOpen);
+  document.getElementById("dbx-toggle").style.color = S.dbxOpen ? "var(--green)" : "";
+  if (S.dbxOpen) dbxLoad();
+}
+function dbxOver(e) { e.preventDefault(); document.getElementById("dbx-zone").classList.add("over"); }
+function dbxLeave(e) { document.getElementById("dbx-zone").classList.remove("over"); }
+function dbxDrop(e) {
+  e.preventDefault();
+  document.getElementById("dbx-zone").classList.remove("over");
+  var files = Array.from(e.dataTransfer.files);
+  if (files.length) dbxUpload(files);
+}
+function dbxFiles(e) {
+  var files = Array.from(e.target.files);
+  if (files.length) dbxUpload(files);
+  e.target.value = "";
+}
+async function dbxUpload(files) {
+  var st = document.getElementById("dbx-status");
+  st.textContent = "Uploading " + files.length + " file(s)…"; st.className = "";
+  var fd = new FormData();
+  files.forEach(function(f) { fd.append("files", f); });
+  try {
+    var r = await fetch("/api/dropbox/upload", {method: "POST", body: fd});
+    var d = await r.json();
+    if (d.saved && d.saved.length) {
+      st.textContent = "Saved " + d.saved.length + " file(s) to Mac ✓"; st.className = "ok";
+      if (d.drop_dir) document.getElementById("dbx-path").textContent = d.drop_dir;
+      dbxLoad();
+    }
+    if (d.errors && d.errors.length) { st.textContent = "Error: " + d.errors[0].error; st.className = "err"; }
+  } catch(e) { st.textContent = "Upload failed"; st.className = "err"; }
+}
+async function dbxLoad() {
+  // Upload-only mode: no file list shown in UI
+  // Files are saved to local-llm-dropbox/ — manage via Finder
+  var el = document.getElementById("dbx-list");
+  if (el) el.innerHTML = "";
+}
+async function dbxDel(name) {
+  if (!confirm("Delete " + name + "?")) return;
+  await fetch("/api/dropbox/files/" + encodeURIComponent(name), {method: "DELETE"});
+  dbxLoad();
+}
+
+// ── API HELPER ────────────────────────────────────────────────────────────
+async function api(url, method, body) {
+  var opts = {method: method || "GET", headers: {"Content-Type": "application/json"}};
+  if (body) opts.body = JSON.stringify(body);
+  return (await fetch(url, opts)).json();
+}
+
+
+// ── MEMORY ────────────────────────────────────────────────────────────────
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  KNOWLEDGE BASE — Incidents, Runbooks, Docs, Search
+// ═════════════════════════════════════════════════════════════════════════════
+var kbOpen = false;
+var kbCurrentTab = "incidents";
+
+function kbToggle() {
+  kbOpen = !kbOpen;
+  document.getElementById("kb-panel").style.display = kbOpen ? "block" : "none";
+  document.getElementById("kb-toggle").style.color = kbOpen ? "var(--green)" : "";
+  if (kbOpen) {
+    kbStats();
+  }
+}
+
+// ── UNIFIED KB (one numbered list, versions on top) ──
+function kbePasteToggle() {
+  var w = document.getElementById("kbe-paste-wrap");
+  w.style.display = (w.style.display === "none") ? "block" : "none";
+}
+async function kbeAddFolder() {
+  var inp = document.getElementById("kbe-folder");
+  var files = inp.files;
+  if (!files || !files.length) return;
+  var fd = new FormData();
+  fd.append("topic", document.getElementById("kbe-topic").value.trim());
+  fd.append("kb_id", document.getElementById("kbe-id").value.trim());
+  var paths = [];
+  for (var i=0;i<files.length;i++){ var rel=files[i].webkitRelativePath||files[i].name; paths.push(rel); fd.append("files",files[i],files[i].name); }
+  fd.append("paths", JSON.stringify(paths));
+  await kbeSubmit(fd, files.length + " files");
+  inp.value = "";
+}
+async function kbeAddPaste() {
+  var txt = document.getElementById("kbe-content").value.trim();
+  if (!txt) { kbeStatus("Paste some text first.", true); return; }
+  var fd = new FormData();
+  fd.append("topic", document.getElementById("kbe-topic").value.trim());
+  fd.append("kb_id", document.getElementById("kbe-id").value.trim());
+  fd.append("content", txt);
+  await kbeSubmit(fd, "pasted text");
+}
+function kbeStatus(msg, err) {
+  var s = document.getElementById("kbe-status");
+  s.innerHTML = err ? '<span style="color:#e08b82">'+escapeHtml(msg)+'</span>'
+                    : '<span style="color:var(--green)">&#10003; '+escapeHtml(msg)+'</span>';
+}
+async function kbeSubmit(fd, what) {
+  if (!fd.get("topic")) { kbeStatus("Enter a topic name first.", true); return; }
+  var fbtn = document.getElementById("kbe-folder-btn"); fbtn.disabled=true;
+  kbeStatus("Uploading "+what+"…", false);
+  try {
+    var r = await fetch("/api/kb/entries/add", {method:"POST", body:fd});
+    var d = await r.json();
+    if (d.error) { kbeStatus(d.error, true); }
+    else {
+      kbeStatus(d.message, false);
+      document.getElementById("kbe-topic").value="";
+      document.getElementById("kbe-id").value="";
+      document.getElementById("kbe-content").value="";
+      document.getElementById("kbe-paste-wrap").style.display="none";
+      kbeListLoad(); kbStats();
+    }
+  } catch(e){ kbeStatus("Upload failed: "+String(e), true); }
+  fbtn.disabled=false;
+}
+async function kbeListLoad() {
+  var box = document.getElementById("kbe-list");
+  if (!box) return;
+  try {
+    var entries = await (await fetch("/api/kb/entries")).json();
+    if (!entries.length){ box.innerHTML='<div style="font-size:10px;color:var(--text3);text-align:center;padding:6px">No entries yet.</div>'; return; }
+    var html = "";
+    entries.forEach(function(e){
+      html += '<div style="border:1px solid var(--border2);border-radius:6px;padding:6px 8px;background:var(--bg3);font-size:11px">'
+        + '<div style="display:flex;align-items:center;gap:6px">'
+        + '<span style="font-weight:700;color:var(--accent);min-width:18px">'+e.number+'.</span>'
+        + '<span style="color:var(--text);flex:1">'+escapeHtml(e.current_label)+'</span>';
+      if (e.version_count>1) html += '<span style="font-size:8px;font-weight:700;color:#fff;background:var(--green);border-radius:3px;padding:1px 5px">v'+e.version_count+'</span>';
+      html += '</div>';
+      if (e.versions && e.versions.length){
+        e.versions.forEach(function(v){
+          html += '<div style="font-size:9px;color:var(--text3);padding-left:24px">'
+               + (v.is_current?'&#9679; current: ':'&#9675; v'+v.version_no+': ')
+               + escapeHtml(v.label)+'</div>';
+        });
+        html += '<div style="font-size:9px;color:var(--text3);padding-left:24px">&#9675; v1: '+escapeHtml(e.title)+' (origin)</div>';
+      }
+      html += '</div>';
+    });
+    box.innerHTML = html;
+  } catch(e){ box.innerHTML='<div style="font-size:10px;color:#e08b82">Could not load entries.</div>'; }
+}
+
+function kbTab(tab) {
+  kbCurrentTab = tab;
+  ["incidents","runbooks","docs","topics"].forEach(function(t) {
+    var btn = document.getElementById("kb-tab-" + t);
+    var form = document.getElementById("kb-" + t + "-form");
+    if (btn) btn.classList.toggle("kb-tab-active", t === tab);
+    if (form) form.style.display = (t === tab) ? "flex" : "none";
+  });
+  if (tab === "topics") topicListLoad();
+  kbLoad();
+}
+
+// ── TOPICS (version-aware folder timeline) ──
+async function topicIngest() {
+  var inp = document.getElementById("topic-folder");
+  var files = inp.files;
+  var topic = document.getElementById("topic-name").value.trim();
+  var label = document.getElementById("topic-label").value.trim();
+  var status = document.getElementById("topic-import-status");
+  if (!topic) { status.innerHTML = '<span style="color:#e08b82">Enter a topic name first (e.g. Nexus), then choose the folder.</span>'; inp.value=""; return; }
+  if (!files || !files.length) { return; }
+
+  var btn = document.getElementById("topic-import-btn");
+  btn.disabled = true; btn.textContent = "Reading folder…";
+  status.textContent = "Found " + files.length + " files, filtering & uploading…";
+
+  var fd = new FormData();
+  fd.append("topic", topic);
+  fd.append("label", label);
+  var paths = [];
+  for (var i = 0; i < files.length; i++) {
+    // webkitRelativePath keeps the full nested path inside the chosen folder
+    var rel = files[i].webkitRelativePath || files[i].name;
+    paths.push(rel);
+    fd.append("files", files[i], files[i].name);
+  }
+  fd.append("paths", JSON.stringify(paths));
+
+  try {
+    var r = await fetch("/api/kb/topics/ingest", {method:"POST", body:fd});
+    var d = await r.json();
+    if (d.error) {
+      status.innerHTML = '<span style="color:#e08b82">' + escapeHtml(d.error) + '</span>';
+    } else {
+      status.innerHTML = '<span style="color:var(--green)">&#10003; Imported ' + d.files_ingested +
+        ' files into <b>' + escapeHtml(d.topic) + '</b> (' + escapeHtml(d.label) + ') — now current.</span>';
+      document.getElementById("topic-name").value = "";
+      document.getElementById("topic-label").value = "";
+      topicListLoad();
+      kbStats();
+    }
+  } catch(e) {
+    status.innerHTML = '<span style="color:#e08b82">Upload failed: ' + escapeHtml(String(e)) + '</span>';
+  }
+  inp.value = "";
+  btn.disabled = false; btn.innerHTML = "&#11014; Choose folder to import";
+}
+
+async function topicListLoad() {
+  var box = document.getElementById("topic-list");
+  if (!box) return;
+  try {
+    var r = await fetch("/api/kb/topics");
+    var topics = await r.json();
+    if (!topics.length) { box.innerHTML = '<div style="font-size:10px;color:var(--text3);text-align:center;padding:6px">No topics yet. Import a folder above.</div>'; return; }
+    var html = "";
+    topics.forEach(function(t) {
+      html += '<div style="border:1px solid var(--border2);border-radius:7px;padding:8px;background:var(--bg3)">';
+      html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">';
+      html += '<b style="font-size:12px;color:var(--text)">' + escapeHtml(t.name) + '</b>';
+      html += '<span style="font-size:9px;color:var(--text3)">' + t.layers.length + ' version' + (t.layers.length>1?'s':'') + '</span>';
+      html += '<span style="flex:1"></span>';
+      html += '<button onclick="topicDelete(\'' + t.id + '\',\'' + escapeHtml(t.name) + '\')" style="font-size:10px;color:var(--text3);background:none;border:none;cursor:pointer" title="Delete whole topic">&#128465;</button>';
+      html += '</div>';
+      t.layers.forEach(function(L) {
+        var tag = L.is_current
+          ? '<span style="font-size:8px;font-weight:700;color:#fff;background:var(--green);border-radius:3px;padding:1px 5px">CURRENT</span>'
+          : '<span style="font-size:8px;color:var(--text3);border:1px solid var(--border);border-radius:3px;padding:1px 5px">history</span>';
+        html += '<div style="display:flex;align-items:center;gap:6px;font-size:11px;padding:2px 0;color:var(--text2)">'
+             + tag + '<span>' + escapeHtml(L.label) + '</span>'
+             + '<span style="font-size:9px;color:var(--text3)">· ' + L.file_count + ' files</span></div>';
+      });
+      html += '</div>';
+    });
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = '<div style="font-size:10px;color:#e08b82">Could not load topics.</div>';
+  }
+}
+
+async function topicDelete(id, name) {
+  if (!confirm("Delete the entire '" + name + "' topic and all its version history? This cannot be undone.")) return;
+  await fetch("/api/kb/topics/" + id, {method:"DELETE"});
+  topicListLoad(); kbStats();
+}
+
+async function kbStats() {
+  try {
+    var r = await fetch("/api/kb/stats");
+    var d = await r.json();
+    var total = (d.incidents||0) + (d.runbooks||0) + (d.docs||0);
+    var c = document.getElementById("kb-count");
+    if (c) c.textContent = total > 0 ? "(" + total + ")" : "";
+  } catch(e) {}
+}
+
+function kbLoad() {
+  // The sidebar list (#kb-list) was removed (June 13) -- KB items are now
+  // viewed/managed in the full Settings -> Knowledge Base modal for safety.
+  if (document.getElementById("kb-modal") && document.getElementById("kb-modal").classList.contains("open")) {
+    kbmTab(kbCurrentTab);
+  }
+}
+
+function escapeHtml(s) {
+  if (!s) return "";
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+
+async function incSave() {
+  var body = {
+    title: document.getElementById("inc-title").value.trim(),
+    symptoms: document.getElementById("inc-symptoms").value.trim(),
+    root_cause: document.getElementById("inc-root").value.trim(),
+    fix: document.getElementById("inc-fix").value.trim(),
+    validation: document.getElementById("inc-validation").value.trim(),
+    tags: document.getElementById("inc-tags").value.trim(),
+  };
+  if (!body.title || !body.symptoms || !body.root_cause || !body.fix) {
+    toast("Title, Symptoms, Root cause, and Fix are required");
+    return;
+  }
+  try {
+    var r = await fetch("/api/kb/incidents", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    var d = await r.json();
+    if (d.error) { toast("Error: " + d.error); return; }
+    toast("✓ Incident saved");
+    ["inc-title","inc-symptoms","inc-root","inc-fix","inc-validation","inc-tags"].forEach(function(id) {
+      document.getElementById(id).value = "";
+    });
+    kbLoad();
+    kbStats();
+  } catch(e) { toast("Save failed: " + e.message); }
+}
+
+async function rbSave() {
+  var body = {
+    title: document.getElementById("rb-title").value.trim(),
+    scenario: document.getElementById("rb-scenario").value.trim(),
+    steps: document.getElementById("rb-steps").value.trim(),
+    tags: document.getElementById("rb-tags").value.trim(),
+  };
+  if (!body.title || !body.scenario || !body.steps) {
+    toast("Title, Scenario, and Steps are required");
+    return;
+  }
+  try {
+    var r = await fetch("/api/kb/runbooks", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    var d = await r.json();
+    if (d.error) { toast("Error: " + d.error); return; }
+    toast("✓ Runbook saved");
+    ["rb-title","rb-scenario","rb-steps","rb-tags"].forEach(function(id) {
+      document.getElementById(id).value = "";
+    });
+    kbLoad();
+    kbStats();
+  } catch(e) { toast("Save failed: " + e.message); }
+}
+
+async function docSave() {
+  var body = {
+    source: document.getElementById("doc-source").value.trim(),
+    title: document.getElementById("doc-title").value.trim(),
+    content: document.getElementById("doc-content").value.trim(),
+    tags: document.getElementById("doc-tags").value.trim(),
+  };
+  if (!body.source || !body.title || !body.content) {
+    toast("Source, Title, and Content are required");
+    return;
+  }
+  try {
+    var r = await fetch("/api/kb/docs", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    var d = await r.json();
+    if (d.error) { toast("Error: " + d.error); return; }
+    toast("✓ Doc saved (" + (d.chunks || 1) + " chunks)");
+    ["doc-source","doc-title","doc-content","doc-tags"].forEach(function(id) {
+      document.getElementById(id).value = "";
+    });
+    kbLoad();
+    kbStats();
+  } catch(e) { toast("Save failed: " + e.message); }
+}
+
+async function docUpload() {
+  var fileInput = document.getElementById("doc-upload-file");
+  var btn = document.getElementById("doc-upload-btn");
+  if (!fileInput.files || !fileInput.files.length) return;
+  var file = fileInput.files[0];
+  var origLabel = btn.textContent;
+  btn.textContent = "\u23f3 Uploading...";
+  btn.disabled = true;
+  try {
+    var fd = new FormData();
+    fd.append("file", file);
+    fd.append("title", file.name.replace(/\.[^.]+$/, ""));
+    fd.append("source", file.name);
+    fd.append("tags", document.getElementById("doc-upload-tags").value.trim());
+    var r = await fetch("/api/kb/upload", { method: "POST", body: fd });
+    var d = await r.json();
+    if (d.error) { toast("Error: " + d.error); }
+    else { toast("\u2713 " + d.title + " added (" + d.chunks + " chunks)"); }
+    document.getElementById("doc-upload-tags").value = "";
+    kbLoad();
+    kbStats();
+  } catch(e) {
+    toast("Upload failed: " + e.message);
+  } finally {
+    fileInput.value = "";
+    btn.textContent = origLabel;
+    btn.disabled = false;
+  }
+}
+
+async function kbDelete(id) {
+  // Sidebar delete button removed (June 13) -- safe alias to the double-confirm version.
+  await kbmDelete(id, kbCurrentTab);
+}
+
+// === KB MANAGEMENT MODAL (June 13) ========================================
+var kbmTabName = "incidents";
+
+function kbModalOpen() {
+  document.getElementById("kb-modal").classList.add("open");
+  document.getElementById("kb-modal-overlay").style.display = "block";
+  kbmLoadUnified();
+}
+
+function kbModalClose() {
+  document.getElementById("kb-modal").classList.remove("open");
+  document.getElementById("kb-modal-overlay").style.display = "none";
+}
+
+function kbmTab(tab) {   // legacy no-op kept so any old caller can't crash
+  kbmLoadUnified();
+}
+
+async function kbmLoadUnified() {
+  var listEl = document.getElementById("kb-modal-list");
+  if (!listEl) return;
+  listEl.innerHTML = "Loading...";
+  try {
+    var entries = await (await fetch("/api/kb/entries")).json();
+    if (!entries.length) {
+      listEl.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">Knowledge Base is empty.</div>';
+      return;
+    }
+    var html = '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">' + entries.length + ' entries</div>';
+    entries.forEach(function(e){
+      html += '<div class="kbm-item" style="padding:0">';
+      html += '<div onclick="kbmToggleEntry(' + e.number + ')" style="padding:10px 12px;cursor:pointer;display:flex;align-items:center;gap:8px">';
+      html += '<span style="font-weight:700;color:var(--accent)">' + e.number + '.</span>';
+      html += '<span style="font-weight:600;flex:1">' + escapeHtml(e.current_label) + '</span>';
+      if (e.version_count > 1) html += '<span style="font-size:9px;font-weight:700;color:#fff;background:var(--green);border-radius:3px;padding:2px 6px">v' + e.version_count + ' &middot; current</span>';
+      html += '<span id="kbm-caret-' + e.number + '" style="color:var(--text3);font-size:11px">&#9656;</span>';
+      html += '</div>';
+      html += '<div id="kbm-detail-' + e.number + '" style="display:none;padding:0 12px 12px"></div>';
+      html += '</div>';
+    });
+    listEl.innerHTML = html;
+  } catch(e) { listEl.innerHTML = '<div style="color:#ff6b6b;padding:12px">Load failed: ' + e.message + '</div>'; }
+}
+
+async function kbmToggleEntry(num) {
+  var d = document.getElementById("kbm-detail-" + num);
+  var caret = document.getElementById("kbm-caret-" + num);
+  if (!d) return;
+  if (d.style.display === "block") { d.style.display = "none"; if(caret) caret.innerHTML="&#9656;"; return; }
+  d.style.display = "block"; if(caret) caret.innerHTML="&#9662;";
+  d.innerHTML = '<div style="font-size:11px;color:var(--text3);padding:6px 0">Loading…</div>';
+  try {
+    var det = await (await fetch("/api/kb/entries/" + num + "/detail")).json();
+    var html = "";
+    // newest versions first
+    if (det.versions && det.versions.length) {
+      det.versions.slice().reverse().forEach(function(v){
+        html += '<div style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg3)">'
+          + '<div style="font-size:10px;font-weight:700;margin-bottom:4px;color:' + (v.is_current?'var(--green)':'var(--text3)') + '">'
+          + (v.is_current ? '● CURRENT — ' : '○ v'+v.version_no+' — ') + escapeHtml(v.label)
+          + ' <button onclick="kbmVersionDelete(\''+num+'\',\''+v.version_no+'\')" style="font-size:9px;color:var(--text3);background:none;border:none;cursor:pointer;float:right">✕ delete</button></div>'
+          + '<pre style="white-space:pre-wrap;font-size:11px;color:var(--text2);margin:0;max-height:260px;overflow:auto">' + escapeHtml(v.content) + '</pre></div>';
+      });
+    }
+    html += '<div style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2)">'
+      + '<div style="font-size:10px;font-weight:700;margin-bottom:4px;color:var(--text3)">○ v1 — ' + escapeHtml(det.title) + ' (origin)</div>'
+      + '<pre style="white-space:pre-wrap;font-size:11px;color:var(--text2);margin:0;max-height:260px;overflow:auto">' + escapeHtml(det.origin || "(no content)") + '</pre></div>';
+    d.innerHTML = html;
+  } catch(e) { d.innerHTML = '<div style="font-size:11px;color:#e08b82">Could not load content.</div>'; }
+}
+
+async function kbmVersionDelete(num, vno) {
+  if (!confirm("Delete version v" + vno + "? The entry and its other versions stay.")) return;
+  var det = await (await fetch("/api/kb/entries/" + num + "/detail")).json();
+  var v = (det.versions||[]).find(function(x){ return x.version_no == vno; });
+  if (v && v.id) { await fetch("/api/kb/entries/version/" + v.id, {method:"DELETE"}); }
+  kbmLoadUnified();
+}
+
+async function kbmLoad() {
+  var listEl = document.getElementById("kb-modal-list");
+  listEl.innerHTML = "Loading...";
+  try {
+    var r = await fetch("/api/kb/" + kbmTabName);
+    var items = await r.json();
+    if (!items.length) {
+      listEl.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">No ' + kbmTabName + ' saved yet.</div>';
+      return;
+    }
+    listEl.innerHTML = '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">' + items.length + ' ' + kbmTabName + '</div>'
+      + items.map(function(it, i){ return kbmRenderItem(it, i+1); }).join("");
+  } catch(e) { listEl.innerHTML = '<div style="color:#ff6b6b;padding:12px">Load failed: ' + e.message + '</div>'; }
+}
+
+function kbmRenderItem(it, num) {
+  var title = it.title || it.source || "(untitled)";
+  // Build the full detail body (shown only when expanded).
+  var detail = "";
+  if (kbmTabName === "incidents") {
+    if (it.symptoms)   detail += '<div class="kbm-d"><b>Symptoms:</b> ' + escapeHtml(it.symptoms) + '</div>';
+    if (it.root_cause) detail += '<div class="kbm-d"><b>Root cause:</b> ' + escapeHtml(it.root_cause) + '</div>';
+    if (it.fix)        detail += '<div class="kbm-d"><b>Fix:</b> ' + escapeHtml(it.fix) + '</div>';
+    if (it.validation) detail += '<div class="kbm-d"><b>Validation:</b> ' + escapeHtml(it.validation) + '</div>';
+  } else if (kbmTabName === "runbooks") {
+    if (it.scenario) detail += '<div class="kbm-d"><b>Scenario:</b> ' + escapeHtml(it.scenario) + '</div>';
+    if (it.steps)    detail += '<div class="kbm-d"><b>Steps:</b><br/>' + escapeHtml(it.steps).replace(/\n/g,"<br/>") + '</div>';
+  } else {
+    if (it.source) detail += '<div class="kbm-d"><b>Source:</b> ' + escapeHtml(it.source) + '</div>';
+    detail += '<div class="kbm-d">' + escapeHtml(it.snippet || it.content || "") + '</div>';
+  }
+  var tags = it.tags ? '<div class="kbm-item-tags">#' + escapeHtml(it.tags).replace(/,\s*/g, " #") + '</div>' : "";
+  var safeTitle = escapeHtml(title).replace(/'/g,"&#39;");
+  return '<div class="kbm-item" id="kbm-row-' + it.id + '">'
+    + '<div class="kbm-row-head" onclick="kbmToggle(\'' + it.id + '\')">'
+    +   '<span class="kbm-num">' + num + '.</span>'
+    +   '<span class="kbm-item-title">' + escapeHtml(title) + '</span>'
+    +   '<span class="kbm-caret" id="kbm-caret-' + it.id + '">&#9656;</span>'
+    + '</div>'
+    + '<div class="kbm-detail" id="kbm-detail-' + it.id + '" style="display:none">'
+    +   detail + tags
+    +   '<div style="margin-top:8px"><button class="kbm-item-del" style="position:static" onclick="kbmDelete(\'' + it.id + '\',\'' + safeTitle + '\')">&#10005; Delete this ' + kbmTabName.replace(/s$/,"") + '</button></div>'
+    + '</div>'
+    + '</div>';
+}
+
+function kbmToggle(id) {
+  var d = document.getElementById("kbm-detail-" + id);
+  var c = document.getElementById("kbm-caret-" + id);
+  if (!d) return;
+  var open = d.style.display !== "none";
+  d.style.display = open ? "none" : "block";
+  if (c) c.innerHTML = open ? "&#9656;" : "&#9662;";   // ▸ collapsed / ▾ expanded
+}
+
+async function kbmSearch() {
+  var q = document.getElementById("kbm-search").value.trim();
+  var listEl = document.getElementById("kb-modal-list");
+  if (!q) { kbmLoad(); return; }
+  listEl.innerHTML = "Searching...";
+  try {
+    var r = await fetch("/api/kb/search?q=" + encodeURIComponent(q));
+    var d = await r.json();
+    var items = d[kbmTabName] || [];
+    if (!items.length) {
+      listEl.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">No matches in ' + kbmTabName + ' for "' + escapeHtml(q) + '".</div>';
+      return;
+    }
+    listEl.innerHTML = '<div style="font-size:11px;color:var(--text3);margin-bottom:6px">' + items.length + ' match(es)</div>'
+      + items.map(function(it, i){ return kbmRenderItem(it, i+1); }).join("");
+  } catch(e) { listEl.innerHTML = '<div style="color:#ff6b6b;padding:12px">Search failed</div>'; }
+}
+
+// DOUBLE-CONFIRM delete -- safety net per Naveen's request (June 13). Two
+// separate confirm() dialogs, second one names the exact item, so an
+// accidental tap can never delete a KB entry.
+async function kbmDelete(id, title) {
+  if (!confirm('Delete "' + title + '" from your Knowledge Base?\n\nThis cannot be undone.')) return;
+  if (!confirm('Are you SURE? This will permanently remove:\n\n"' + title + '"\n\nfrom ' + kbmTabName + '.')) return;
+  try {
+    await fetch("/api/kb/" + kbmTabName + "/" + id, {method:"DELETE"});
+    toast("Deleted");
+    kbmLoad();
+    kbStats();
+  } catch(e) { toast("Delete failed"); }
+}
+
+// kbSearch (sidebar) removed June 13 -- replaced by kbmSearch() in the KB modal.
+
+// Prominent one-tap "Save this solved ticket to KB" (June 14). Distills the
+// current chat via the existing Haiku endpoint, then shows a preview so Naveen
+// can confirm/fix before it's saved — this is how the tool actually LEARNS
+// (kubeconfig quirks, maint=production, service names) instead of forgetting.
+async function saveSolutionToKB() {
+  if (!S.chatId) { toast("Open a chat first"); return; }
+  toast("Distilling this ticket into a KB incident...");
+  try {
+    var r = await fetch("/api/kb/from_chat/" + S.chatId, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({preview: true})
+    });
+    var d = await r.json();
+    if (d.error) { toast("Failed: " + d.error); return; }
+    // Show editable preview so the saved fact is accurate
+    var title = prompt("TITLE — short summary of this incident:", d.title || "");
+    if (title === null) { toast("Save cancelled"); return; }
+    var tags = prompt("TAGS — comma-separated (IMPORTANT: include cluster like 'maint' or 'dev', plus topic):", d.tags || "");
+    if (tags === null) { toast("Save cancelled"); return; }
+    var save = await fetch("/api/kb/from_chat/" + S.chatId, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        title: title,
+        symptoms: d.symptoms || "(see chat)",
+        root_cause: d.root_cause || "(see chat)",
+        fix: d.fix || "(see chat)",
+        validation: d.validation || "",
+        tags: tags
+      })
+    });
+    var sd = await save.json();
+    if (sd.error) { toast("Save failed: " + sd.error); return; }
+    toast("\u2713 Saved to KB — the tool will remember this next time");
+    if (typeof kbStats === "function") kbStats();
+  } catch(e) { toast("Failed: " + e.message); }
+}
+
+async function incFromChat() {
+  if (!S.chatId) { toast("Open a chat first"); return; }
+  if (!confirm("Distill the current chat into an incident using Haiku?\n(Costs ~0.1 cents.)")) return;
+  toast("Distilling chat into incident...");
+  try {
+    var r = await fetch("/api/kb/from_chat/" + S.chatId, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({})
+    });
+    var d = await r.json();
+    if (d.error) { toast("Failed: " + d.error); return; }
+    toast("✓ Incident saved from chat");
+    kbLoad(); kbStats();
+  } catch(e) { toast("Failed: " + e.message); }
+}
+
+var memOpen = false;
+function memToggle() {
+  memOpen = !memOpen;
+  document.getElementById("mem-panel").style.display = memOpen ? "block" : "none";
+  document.getElementById("mem-toggle").style.color = memOpen ? "var(--green)" : "";
+  if (memOpen) memLoad();
+}
+async function memSave() {
+  var inp = document.getElementById("mem-input");
+  var val = inp.value.trim();
+  if (!val) return;
+  await fetch("/api/memory", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({content:val})});
+  inp.value = "";
+  memLoad();
+  toast("Memory saved");
+}
+async function memLoad() {
+  var r = await fetch("/api/memory");
+  var list = await r.json();
+  var el = document.getElementById("mem-list");
+  if (!list.length) {
+    el.innerHTML = '<div style="font-size:10px;color:var(--text3);text-align:center;padding:8px">No memories yet</div>';
+    return;
+  }
+  el.innerHTML = "";
+  list.forEach(function(m) {
+    var row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:5px;padding:5px 4px;border-radius:6px;margin-bottom:2px;background:var(--bg3);border:1px solid var(--border)";
+    var tx = document.createElement("div");
+    tx.style.cssText = "flex:1;font-size:11px;color:var(--text);line-height:1.4";
+    tx.textContent = m.content;
+    var btn = document.createElement("button");
+    btn.innerHTML = "&#10005;";
+    btn.style.cssText = "color:var(--text3);font-size:12px;cursor:pointer;background:none;border:none;flex-shrink:0";
+    btn.addEventListener("click", function() { memDelete(m.id); });
+    row.appendChild(tx);
+    row.appendChild(btn);
+    el.appendChild(row);
+  });
+}
+async function memDelete(id) {
+  await fetch("/api/memory/" + id, {method:"DELETE"});
+  memLoad();
+}
+
+// ── WEB SEARCH ────────────────────────────────────────────────────────────
+async function toggleWS(cb) {
+  var enabled = cb.checked ? "true" : "false";
+  await fetch("/api/settings", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({web_search_enabled: enabled})});
+  var lbl = document.getElementById("ws-lbl");
+  if (lbl) lbl.style.color = cb.checked ? "var(--gr)" : "";
+  toast(cb.checked ? "Web search ON — uses more tokens" : "Web search OFF");
+}
+
+async function loadWSState() {
+  try {
+    var r = await fetch("/api/settings");
+    var s = await r.json();
+    var cb = document.getElementById("ws-tog");
+    if (cb) {
+      cb.checked = (s.web_search_enabled === "true" || s.web_search_enabled === true);
+      var lbl = document.getElementById("ws-lbl");
+      if (lbl) lbl.style.color = cb.checked ? "var(--gr)" : "";
+    }
+  } catch(e) {}
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  TOKEN OPTIMISATION MODULE
+//
+//  1. Response Mode toggle (Concise / Detailed)
+//     Concise = max 600 output tokens — quick answers use far fewer tokens
+//     Detailed = max 4096 output tokens — full deep answers (default)
+//
+//  2. Project Snapshot
+//     Saves a dense technical summary of ANY chat to Memory.
+//     In a new chat, the snapshot is auto-injected into context.
+//     Use for long projects (Nexus, Keycloak, K8s) that span multiple chats.
+//
+//  3. Cache hit indicator
+//     When the server returns cache_read > 0, the message shows a green
+//     ⚡ cache hit label so you know tokens were saved on that turn.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Response Mode ──────────────────────────────────────────────────────────
+// Current depth choice — sent with every message. Default: average.
+var S_DEPTH = "average";
+var DEPTH_TIERS = ["normal", "average", "deep", "super"];
+var DEPTH_LABELS = {
+  normal:  "Normal — ~1,500 tokens (quick facts, syntax, one-liners)",
+  average: "Average — ~4,500 tokens (your daily driver: troubleshooting, concept + why). Covers ~93% of your work.",
+  deep:    "Deep — ~10,000 tokens (full breakdowns, ticket work, well above your all-time max)",
+  super:   "Super — ~64,000 tokens (broken production, massive RCA. Never truncates.)"
+};
+
+function paintDepth() {
+  DEPTH_TIERS.forEach(function(t) {
+    var el = document.getElementById("depth-" + t);
+    if (el) el.classList.toggle("active", t === S_DEPTH);
+  });
+}
+
+async function setDepth(tier) {
+  if (DEPTH_TIERS.indexOf(tier) === -1) return;
+  S_DEPTH = tier;          // stays here until you change it (no reset per message)
+  paintDepth();
+  try {
+    await fetch("/api/settings", {
+      method:  "POST",
+      headers: {"Content-Type": "application/json"},
+      body:    JSON.stringify({depth_choice: tier}),
+    });
+  } catch(e) {}
+  toast(DEPTH_LABELS[tier]);
+}
+
+async function loadDepthState() {
+  try {
+    var r = await fetch("/api/settings");
+    var s = await r.json();
+    S_DEPTH = s.depth_choice || "average";
+  } catch(e) { S_DEPTH = "average"; }
+  paintDepth();
+}
+
+// ── Snapshot modal ──────────────────────────────────────────────────────────
+function snapOpen() {
+  if (!S.chatId) { toast("Open a chat first"); return; }
+  document.getElementById("snap-label").value  = "";
+  document.getElementById("snap-status").textContent = "";
+  document.getElementById("snap-status").className   = "";
+  document.getElementById("snap-modal").classList.add("open");
+  document.getElementById("snap-overlay").classList.add("open");
+  setTimeout(function() { document.getElementById("snap-label").focus(); }, 100);
+}
+
+function snapClose() {
+  document.getElementById("snap-modal").classList.remove("open");
+  document.getElementById("snap-overlay").classList.remove("open");
+}
+
+async function snapSave() {
+  var label = document.getElementById("snap-label").value.trim();
+  if (!label) {
+    document.getElementById("snap-status").textContent = "Please enter a label first";
+    document.getElementById("snap-status").className   = "err";
+    return;
+  }
+
+  var statusEl = document.getElementById("snap-status");
+  statusEl.textContent = "Generating snapshot…";
+  statusEl.className   = "";
+  document.getElementById("snap-save").disabled = true;
+
+  try {
+    var r = await fetch("/api/chats/" + S.chatId + "/snapshot", {
+      method:  "POST",
+      headers: {"Content-Type": "application/json"},
+      body:    JSON.stringify({label: label}),
+    });
+    var d = await r.json();
+
+    if (d.error) {
+      statusEl.textContent = "Error: " + d.error;
+      statusEl.className   = "err";
+      return;
+    }
+
+    statusEl.textContent = "✓ Saved to Memory — " + d.chars + " chars. Available in all future chats.";
+    statusEl.className   = "ok";
+
+    // Refresh memory panel if open
+    if (typeof memLoad === "function") memLoad();
+
+    // Auto-close after 2.5s
+    setTimeout(function() {
+      snapClose();
+      toast("Snapshot saved: " + label);
+    }, 2500);
+
+  } catch(err) {
+    statusEl.textContent = "Failed: " + err.message;
+    statusEl.className   = "err";
+  } finally {
+    document.getElementById("snap-save").disabled = false;
+  }
+}
+
+// Allow Enter key in snapshot label field
+document.addEventListener("DOMContentLoaded", function() {
+  var inp = document.getElementById("snap-label");
+  if (inp) inp.addEventListener("keydown", function(e) {
+    if (e.key === "Enter") snapSave();
+    if (e.key === "Escape") snapClose();
+  });
+});
+
+// ── Show snapshot button when a chat is active ──────────────────────────────
+// Patch chatOpen and chatClose to show/hide it
+var _origChatOpen  = chatOpen;
+var _origChatClose = chatClose;
+
+chatOpen = async function(id) {
+  await _origChatOpen(id);
+  var btn = document.getElementById("btn-snapshot");
+  if (btn) btn.style.display = "flex";
+};
+
+chatClose = function() {
+  _origChatClose();
+  var btn = document.getElementById("btn-snapshot");
+  if (btn) btn.style.display = "none";
+};
+
+// ── Cache hit indicator ─────────────────────────────────────────────────────
+// Patches the "done" SSE event handler to show ⚡ when cache_read > 0.
+// This tells you the history cache saved tokens on that request.
+var _origStreamDone = null;  // handled inline in sendMsg patch below
+
+// Patch sendMsg to display cache indicator
+var _origSendMsg = sendMsg;
+sendMsg = async function() {
+  // We override the "done" event processing to show cache info.
+  // This is done by wrapping the internal SSE loop — see inline patch marker below.
+  await _origSendMsg.apply(this, arguments);
+};
+
+// The cache_read field arrives in the SSE "done" event.
+// We inject it into the last assistant message's meta line.
+var _lastAssistantMsgId = null;
+
+// Patch streamFinal to record the last msg id
+var _origStreamFinal = streamFinal;
+streamFinal = function(id) {
+  _lastAssistantMsgId = id;
+  _origStreamFinal(id);
+};
+
+// Hook into the SSE "done" handler — cache indicator
+function showCacheHit(cacheRead) {
+  if (!cacheRead || cacheRead === 0) return;
+  if (!_lastAssistantMsgId) return;
+  var el = document.getElementById(_lastAssistantMsgId);
+  if (!el) return;
+  var meta = el.querySelector(".msg-meta");
+  if (!meta) {
+    // Add meta if missing
+    var body = el.querySelector(".msg-body");
+    if (body) {
+      var m = document.createElement("div");
+      m.className = "msg-meta";
+      body.appendChild(m);
+      meta = m;
+    }
+  }
+  if (meta) {
+    meta.innerHTML = (meta.innerHTML || "") +
+      '<span class="cache-hit" title="' + cacheRead.toLocaleString() + ' tokens read from cache (90% discount)">&#9889; cached</span>';
+  }
+}
+
+// ── End Token Optimisation Module ──────────────────────────────────────────
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  VOICE INPUT MODULE
+//  Press mic → speak → release → see transcript → press send
+//  Token cost: ZERO — transcription runs locally via faster-whisper on M4
+// ══════════════════════════════════════════════════════════════════════════════
+var Voice = (function () {
+  var _recorder = null, _chunks = [], _stream = null;
+  var _isRecording = false, _isTranscribing = false;
+
+  function _btn()      { return document.getElementById("btn-mic"); }
+  function _micIcon()  { return document.getElementById("mic-icon"); }
+  function _preview()  { return document.getElementById("v-preview"); }
+  function _prevLbl()  { return document.getElementById("v-preview-lbl"); }
+  function _prevLang() { return document.getElementById("v-preview-lang"); }
+  function _textarea() { return document.getElementById("msg-in"); }
+
+  var ICON_MIC = [
+    '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>',
+    '<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>',
+    '<line x1="12" y1="19" x2="12" y2="23"/>',
+    '<line x1="8"  y1="23" x2="16" y2="23"/>',
+  ].join("");
+  var ICON_STOP = '<rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>';
+  var ICON_SPIN = [
+    '<path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83"/>',
+    '<path d="M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>',
+  ].join("");
+
+  function _setIcon(p) { var ic = _micIcon(); if (ic) ic.innerHTML = p; }
+
+  function _setState(state) {
+    var btn = _btn(); if (!btn) return;
+    btn.classList.remove("recording", "transcribing");
+    if (state === "idle")         { _setIcon(ICON_MIC);  btn.title = "Voice input — click to speak"; }
+    else if (state === "recording")    { btn.classList.add("recording");    _setIcon(ICON_STOP); btn.title = "Recording… click to stop"; }
+    else if (state === "transcribing") { btn.classList.add("transcribing"); _setIcon(ICON_SPIN); btn.title = "Transcribing…"; }
+  }
+
+  function _showPreview(text, lang) {
+    var p = _preview(), l = _prevLbl(), g = _prevLang();
+    if (!p || !l || !g) return;
+    if (text) { l.textContent = text; g.textContent = lang ? "(" + lang + ")" : ""; p.classList.add("show"); }
+    else       { p.classList.remove("show"); l.textContent = ""; g.textContent = ""; }
+  }
+
+  async function _startRecording() {
+    try {
+      _stream = await navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 16000, channelCount: 1,
+                 echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+    } catch(err) {
+      toast(err.name === "NotAllowedError" ? "Mic permission denied — allow in browser settings" : "Mic error: " + err.message);
+      return false;
+    }
+    _chunks = []; _isRecording = true;
+    var mime = "audio/webm;codecs=opus";
+    if (!MediaRecorder.isTypeSupported(mime)) mime = "audio/webm";
+    if (!MediaRecorder.isTypeSupported(mime)) mime = "";
+    _recorder = new MediaRecorder(_stream, mime ? {mimeType: mime} : {});
+    _recorder.ondataavailable = function(e) { if (e.data && e.data.size > 0) _chunks.push(e.data); };
+    _recorder.onstop = function() { _isRecording = false; _transcribe(); };
+    _recorder.start(100);
+    _setState("recording");
+    return true;
+  }
+
+  function _stopRecording() {
+    if (_recorder && _recorder.state !== "inactive") _recorder.stop();
+    if (_stream) { _stream.getTracks().forEach(function(t){t.stop();}); _stream = null; }
+    _setState("transcribing");
+  }
+
+  async function _transcribe() {
+    if (!_chunks.length) { _setState("idle"); toast("No audio captured"); return; }
+    _isTranscribing = true;
+    var mime = (_recorder && _recorder.mimeType) ? _recorder.mimeType : "audio/webm";
+    var blob = new Blob(_chunks, {type: mime}); _chunks = [];
+    if (blob.size < 1000) { _setState("idle"); _isTranscribing = false; toast("Too short — speak for at least 1 second"); return; }
+    try {
+      var fd = new FormData(); fd.append("audio", blob, "recording.webm");
+      var resp = await fetch("/api/voice/transcribe", {method: "POST", body: fd});
+      var data = await resp.json();
+      if (data.error) { toast("Transcription error: " + data.error); _setState("idle"); return; }
+      var text = (data.text || "").trim();
+      if (!text) { toast("No speech detected — try again"); _setState("idle"); return; }
+      var ta = _textarea();
+      if (ta) {
+        var existing = ta.value.trim();
+        ta.value = existing ? existing + " " + text : text;
+        autoResize(ta); ta.focus();
+        ta.selectionStart = ta.selectionEnd = ta.value.length;
+      }
+      _showPreview(text, data.language);
+      var hideTimer = setTimeout(function(){ _showPreview("",""); }, 4000);
+      if (ta) ta.addEventListener("input", function onI(){ clearTimeout(hideTimer); _showPreview("",""); ta.removeEventListener("input",onI); });
+    } catch(err) {
+      toast("Voice failed: " + err.message);
+    } finally {
+      _isTranscribing = false;
+      _setState("idle");
+    }
+  }
+
+  async function toggle() {
+    if (_isTranscribing) return;
+    if (_isRecording) _stopRecording(); else await _startRecording();
+  }
+
+  return { toggle: toggle };
+})();
+
+function voiceToggle() { Voice.toggle(); }
+// ── End Voice Input Module ─────────────────────────────────────────────────
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  CHAT SEARCH — filters chat list by title as you type
+// ══════════════════════════════════════════════════════════════════════════════
+function filterChats(query) {
+  var q     = (query || "").toLowerCase().trim();
+  var items = document.querySelectorAll(".cl-item");
+  var sects = document.querySelectorAll(".cl-section");
+
+  if (!q) {
+    // Show everything
+    items.forEach(function(el) { el.style.display = ""; });
+    sects.forEach(function(el) { el.style.display = ""; });
+    return;
+  }
+
+  // Hide non-matching items
+  items.forEach(function(el) {
+    var title = (el.querySelector(".cl-title") || {}).textContent || "";
+    el.style.display = title.toLowerCase().includes(q) ? "" : "none";
+  });
+
+  // Hide section headers if all items in that section are hidden
+  sects.forEach(function(sect) {
+    var next = sect.nextElementSibling;
+    var anyVisible = false;
+    while (next && !next.classList.contains("cl-section")) {
+      if (next.classList.contains("cl-item") && next.style.display !== "none") {
+        anyVisible = true;
+      }
+      next = next.nextElementSibling;
+    }
+    sect.style.display = anyVisible ? "" : "none";
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  MODEL MANAGER — discover new models + remove old ones via D button
+// ══════════════════════════════════════════════════════════════════════════════
+var _discTab = "current";
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  RESEARCH PANEL — free Gemini grounded web search
+//  Completely isolated: its own turn list in memory only, no chat/DB/cost impact.
+//  Cleared when the panel closes. Public lookups only.
+// ═════════════════════════════════════════════════════════════════════════════
+var _rschTurns = [];   // [{role:'user'|'model', text, sources?}]  — memory only
+var _rschBusy  = false;
+
+function rschOpen() {
+  document.getElementById("rsch-overlay").classList.add("open");
+  document.getElementById("rsch-panel").classList.add("open");
+  document.getElementById("btn-research").classList.add("active");
+  rschRender();
+  setTimeout(function(){ document.getElementById("rsch-in").focus(); }, 220);
+}
+function rschClose() {
+  document.getElementById("rsch-overlay").classList.remove("open");
+  document.getElementById("rsch-panel").classList.remove("open");
+  document.getElementById("btn-research").classList.remove("active");
+}
+function rschResize(el) { el.style.height="auto"; el.style.height=Math.min(el.scrollHeight,120)+"px"; }
+function rschKey(e) {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); rschSend(); }
+}
+function rschEg(text) {
+  document.getElementById("rsch-in").value = text;
+  rschSend();
+}
+function rschEsc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function rschRender() {
+  var box = document.getElementById("rsch-msgs");
+  if (!_rschTurns.length) {
+    box.innerHTML =
+      '<div class="rsch-empty">Ask anything you\u2019d normally Google \u2014 you get one clear answer with sources, not twenty links.'
+      + '<div class="rsch-egs">'
+      + '<span class="rsch-eg" onclick="rschEg(\'Latest stable Sonatype Nexus Repository 3 version and its release date\')">Latest stable Nexus 3 version?</span>'
+      + '<span class="rsch-eg" onclick="rschEg(\'Keycloak 26.6.4 known issues or breaking changes vs 26.3\')">Keycloak 26.6.4 known issues?</span>'
+      + '<span class="rsch-eg" onclick="rschEg(\'OpenTelemetry operator helm chart breaking changes between 0.92 and 0.117\')">OTel operator 0.92 \u2192 0.117 breaking changes?</span>'
+      + '</div></div>';
+    return;
+  }
+  var html = "";
+  _rschTurns.forEach(function(t, i) {
+    if (t.role === "user") {
+      html += '<div class="rsch-turn user"><div class="rsch-bubble">' + rschEsc(t.text) + '</div></div>';
+    } else {
+      var cls = t.error ? "rsch-bubble err" : "rsch-bubble";
+      html += '<div class="rsch-turn model"><div class="' + cls + '" id="rsch-ans-' + i + '">' + rschEsc(t.text) + '</div>';
+      if (t.sources && t.sources.length) {
+        html += '<div class="rsch-src">';
+        t.sources.forEach(function(s) {
+          html += '<a href="' + rschEsc(s.uri) + '" target="_blank" rel="noopener">' + rschEsc(s.title || "source") + '</a>';
+        });
+        html += '</div>';
+      }
+      if (!t.error) {
+        html += '<button class="rsch-copy" onclick="rschCopy(' + i + ')">\u29C9 Copy answer</button>';
+      }
+      html += '</div>';
+    }
+  });
+  box.innerHTML = html;
+  box.scrollTop = box.scrollHeight;
+}
+function rschCopy(i) {
+  var t = _rschTurns[i];
+  if (!t) return;
+  navigator.clipboard.writeText(t.text).then(function(){ toast("Answer copied \u2014 paste into your chat"); });
+}
+async function rschSend() {
+  if (_rschBusy) return;
+  var el = document.getElementById("rsch-in");
+  var q = el.value.trim();
+  if (!q) return;
+  el.value = ""; rschResize(el);
+  _rschTurns.push({role:"user", text:q});
+  _rschTurns.push({role:"model", text:"Searching\u2026", pending:true});
+  rschRender();
+  _rschBusy = true;
+  document.getElementById("rsch-send").disabled = true;
+
+  // Send only the real turns (strip the pending placeholder) as {role,text}
+  var payloadTurns = _rschTurns
+    .filter(function(t){ return !t.pending; })
+    .map(function(t){ return {role:t.role, text:t.text}; });
+
+  try {
+    var r = await api("/api/research", "POST", {turns: payloadTurns});
+    _rschTurns.pop(); // remove placeholder
+    if (r.error) {
+      _rschTurns.push({role:"model", text:r.error, error:true});
+    } else {
+      _rschTurns.push({role:"model", text:r.answer || "(no answer)", sources:r.sources || []});
+    }
+  } catch (e) {
+    _rschTurns.pop();
+    _rschTurns.push({role:"model", text:"Request failed. Check your connection and that a Gemini key is saved in Settings.", error:true});
+  }
+  _rschBusy = false;
+  document.getElementById("rsch-send").disabled = false;
+  rschRender();
+  document.getElementById("rsch-in").focus();
+}
+
+function discOpen()  {
+  document.getElementById("disc-overlay").classList.add("open");
+  document.getElementById("disc-modal").classList.add("open");
+  discTab(_discTab);
+}
+function discClose() {
+  document.getElementById("disc-overlay").classList.remove("open");
+  document.getElementById("disc-modal").classList.remove("open");
+}
+
+function discTab(tab) {
+  _discTab = tab;
+  document.getElementById("disc-tab-current").classList.toggle("active", tab === "current");
+  document.getElementById("disc-tab-discover").classList.toggle("active", tab === "discover");
+  document.getElementById("disc-status").textContent = "";
+  if (tab === "current") discShowCurrent();
+  else discShowDiscover();
+}
+
+async function discShowCurrent() {
+  var el = document.getElementById("disc-content");
+  try {
+    var r = await fetch("/api/models");
+    var models = await r.json();
+    if (!models.length) { el.innerHTML = "No models configured"; return; }
+    var h = "";
+    models.forEach(function(m) {
+      h += '<div class="disc-row">';
+      h += '<div style="flex:1"><div class="disc-name">' + esc(m.name) + '</div>';
+      h += '<div class="disc-id">' + esc(m.id) + '</div></div>';
+      h += '<button class="disc-btn-del" onclick="discRemove(\'' + esc(m.id) + '\',\'' + esc(m.name) + '\')">Remove</button>';
+      h += '</div>';
+    });
+    el.innerHTML = h;
+  } catch(e) { el.innerHTML = "Error loading models"; }
+}
+
+async function discShowDiscover() {
+  var el = document.getElementById("disc-content");
+  var st = document.getElementById("disc-status");
+  st.textContent = "Searching Anthropic API...";
+  el.innerHTML   = "";
+  try {
+    var r = await fetch("/api/models/discover", {method: "POST"});
+    var d = await r.json();
+    if (d.error) { st.textContent = "Error: " + d.error; return; }
+    st.textContent = d.models.length + " models found, " + d.new_count + " new";
+    var h = "";
+    d.models.forEach(function(m) {
+      h += '<div class="disc-row">';
+      h += '<div style="flex:1"><div class="disc-name">' + esc(m.name || m.id) + '</div>';
+      h += '<div class="disc-id">' + esc(m.id) + '</div></div>';
+      if (m.exists) {
+        h += '<span class="disc-badge">✓ installed</span>';
+      } else {
+        h += '<button class="disc-btn-add" onclick="discAdd(\'' + esc(m.id) + '\',\'' + esc(m.name || m.id) + '\')">+ Add</button>';
+      }
+      h += '</div>';
+    });
+    el.innerHTML = h;
+  } catch(e) { st.textContent = "Failed: " + e.message; }
+}
+
+async function discAdd(id, name) {
+  try {
+    var r = await fetch("/api/models/add", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id: id, name: name})
+    });
+    var d = await r.json();
+    if (d.error) { toast("Error: " + d.error); return; }
+    toast("Added: " + name);
+    await loadModels();
+    discShowDiscover();
+  } catch(e) { toast("Failed: " + e.message); }
+}
+
+async function discRemove(id, name) {
+  if (!confirm("Remove " + name + " from your models?")) return;
+  try {
+    var r = await fetch("/api/models/remove", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id: id})
+    });
+    var d = await r.json();
+    if (d.error) { toast("Error: " + d.error); return; }
+    toast("Removed: " + name);
+    await loadModels();
+    discShowCurrent();
+  } catch(e) { toast("Failed: " + e.message); }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
+//  PASTE & DRAG-DROP IMAGE SUPPORT
+//  Cmd+V / Ctrl+V paste screenshot directly into chat
+//  Drag image file onto chat window to attach it
+// ══════════════════════════════════════════════════════════════════════════
+
+// Paste from clipboard (Ctrl+V / Cmd+V)
+document.addEventListener("paste", function(e) {
+  var items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  var imageItems = [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].type.indexOf("image") !== -1) {
+      imageItems.push(items[i].getAsFile());
+    }
+  }
+  if (!imageItems.length) return;
+  e.preventDefault();
+  imageItems.forEach(function(file) {
+    // Give it a meaningful name with timestamp
+    var ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    var named = new File([file], "screenshot-" + ts + ".png", {type: file.type});
+    addPendingFile(named);
+  });
+  toast("📋 Screenshot pasted — press Send to attach");
+});
+
+// Drag and drop onto the chat area
+var msgsWrap = document.getElementById("msgs-wrap");
+if (msgsWrap) {
+  msgsWrap.addEventListener("dragover", function(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    msgsWrap.style.outline = "2px dashed var(--accent)";
+  });
+  msgsWrap.addEventListener("dragleave", function() {
+    msgsWrap.style.outline = "";
+  });
+  msgsWrap.addEventListener("drop", function(e) {
+    e.preventDefault();
+    msgsWrap.style.outline = "";
+    var files = Array.from(e.dataTransfer.files);
+    if (!files.length) return;
+    files.forEach(function(f) { addPendingFile(f); });
+    toast("📎 " + files.length + " file(s) dropped — press Send to attach");
+  });
+}
+
+// addPendingFile: adds file to the pending attachments list
+// Works with the existing file attachment system
+function addPendingFile(file) {
+  if (!window._pendingFiles) window._pendingFiles = [];
+  window._pendingFiles.push(file);
+  updateFilePreview();
+}
+
+function updateFilePreview() {
+  var files = window._pendingFiles || [];
+  var preview = document.getElementById("file-preview");
+  if (!preview) return;
+  if (!files.length) { preview.style.display = "none"; preview.innerHTML = ""; return; }
+  preview.style.display = "flex";
+  preview.innerHTML = files.map(function(f, i) {
+    var isImg = f.type.startsWith("image/");
+    var icon  = isImg ? "🖼" : "📎";
+    return '<div class="fp-item">' +
+      icon + ' <span>' + f.name + '</span>' +
+      '<button onclick="removePendingFile(' + i + ')">×</button>' +
+      '</div>';
+  }).join("");
+}
+
+function removePendingFile(idx) {
+  if (window._pendingFiles) window._pendingFiles.splice(idx, 1);
+  updateFilePreview();
+}
+
+boot();
+</script>
+
+<!-- ── Trash Modal ─────────────────────────────────────────────────────── -->
+<div id="trash-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.45);align-items:center;justify-content:center;">
+  <div style="background:var(--bg);border-radius:12px;padding:24px;width:min(520px,92vw);max-height:80vh;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.3)">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <span style="font-weight:600;font-size:15px">🗑 Trash</span>
+      <button onclick="closeTrash();" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted)">×</button>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin:0">Chats here are hidden from sidebar but <b>safe in your DB</b>. Restore anytime or delete forever.</p>
+    <div id="trash-list" style="overflow-y:auto;flex:1"></div>
+  </div>
+</div>
+
+<!-- == KB MANAGEMENT MODAL (June 13) == -->
+<div id="kb-modal-overlay" style="display:none;position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.55)" onclick="kbModalClose()"></div>
+<div id="kb-modal">
+  <div class="mhdr">
+    <span style="font-weight:600;font-size:15px">&#128218; Knowledge Base</span>
+    <button onclick="kbModalClose()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted)">&times;</button>
+  </div>
+  <div id="kb-modal-body">
+    <div style="font-size:11px;color:var(--text3);margin-bottom:10px;line-height:1.4">
+      One numbered list. Everything here is searched on every question (when
+      Knowledge Base Retrieval is on in Settings). Deleting is permanent.
+    </div>
+    <div style="display:flex;gap:5px;margin-bottom:10px">
+      <input id="kbm-search" type="text" placeholder="Search this KB (test retrieval)..." class="kb-input" style="flex:1;margin:0" onkeydown="if(event.key==='Enter')kbmSearch()"/>
+      <button onclick="kbmSearch()" style="background:var(--bg3);color:var(--text);border-radius:7px;padding:6px 10px;font-size:11px">Search</button>
+      <button onclick="kbmLoadUnified()" title="Show all" style="background:var(--bg3);color:var(--text);border-radius:7px;padding:6px 10px;font-size:11px">Show all</button>
+    </div>
+    <div id="kb-modal-list">Loading...</div>
+  </div>
+</div>
+</body>
+</html>
