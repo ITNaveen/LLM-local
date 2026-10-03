@@ -22,8 +22,6 @@ from typing import Optional, Generator
 
 from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
-import secrets as _secrets
-import base64 as _base64
 import anthropic
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,31 +48,6 @@ for d in [BASE_DIR, UPLOAD_DIR, CHATS_DIR, DROP_DIR]:
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# ── HTTP Basic Auth (gates every route, including static files) ────────────
-_AUTH_DIR = Path.home() / "Documents" / "jarvis-auth"
-_AUTH_USER = (_AUTH_DIR / "username.txt").read_text().strip()
-_AUTH_PASS = (_AUTH_DIR / "password.txt").read_text().strip()
-
-@app.before_request
-def _require_basic_auth():
-    auth_header = request.headers.get("Authorization")
-    if auth_header:
-        try:
-            scheme, credentials = auth_header.split(" ", 1)
-            if scheme.lower() == "basic":
-                decoded = _base64.b64decode(credentials).decode("utf-8")
-                username, _, password = decoded.partition(":")
-                user_ok = _secrets.compare_digest(username, _AUTH_USER)
-                pass_ok = _secrets.compare_digest(password, _AUTH_PASS)
-                if user_ok and pass_ok:
-                    return None  # credentials OK, let the request through
-        except Exception:
-            pass
-    return Response(
-        "Authentication required",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Jarvis LLM"'},
-    )
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
 
