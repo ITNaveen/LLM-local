@@ -22,9 +22,8 @@ from typing import Optional, Generator
 
 from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
-import secrets as _secrets
-import base64 as _base64
 import anthropic
+import repo_kb   # Living Repos + local (Ollama) knowledge mode — see repo_kb.py
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  LOGGING
@@ -50,31 +49,6 @@ for d in [BASE_DIR, UPLOAD_DIR, CHATS_DIR, DROP_DIR]:
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# ── HTTP Basic Auth (gates every route, including static files) ────────────
-_AUTH_DIR = Path.home() / "Documents" / "jarvis-auth"
-_AUTH_USER = (_AUTH_DIR / "username.txt").read_text().strip()
-_AUTH_PASS = (_AUTH_DIR / "password.txt").read_text().strip()
-
-@app.before_request
-def _require_basic_auth():
-    auth_header = request.headers.get("Authorization")
-    if auth_header:
-        try:
-            scheme, credentials = auth_header.split(" ", 1)
-            if scheme.lower() == "basic":
-                decoded = _base64.b64decode(credentials).decode("utf-8")
-                username, _, password = decoded.partition(":")
-                user_ok = _secrets.compare_digest(username, _AUTH_USER)
-                pass_ok = _secrets.compare_digest(password, _AUTH_PASS)
-                if user_ok and pass_ok:
-                    return None  # credentials OK, let the request through
-        except Exception:
-            pass
-    return Response(
-        "Authentication required",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Jarvis LLM"'},
-    )
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
 
@@ -2242,7 +2216,8 @@ def index():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/models")
 def api_models():
-    return jsonify(MODELS)
+    # Cloud models + whatever local Ollama models are installed (empty if Ollama is off)
+    return jsonify(MODELS + repo_kb.local_model_entries())
 
 
 @app.route("/api/settings", methods=["GET"])
@@ -2585,8 +2560,9 @@ def api_create_chat():
     s       = load_settings()
     chat_id = str(uuid.uuid4())
     model   = data.get("model", s.get("default_model", DEFAULT_MODEL))
-    # Guard: coerce any unknown/removed model (e.g. an old gemini chat) to default
-    if model not in MODEL_MAP:
+    # Guard: coerce any unknown/removed model (e.g. an old gemini chat) to default.
+    # Local models ("ollama:<name>") are discovered live, so they aren't in MODEL_MAP.
+    if model not in MODEL_MAP and not str(model).startswith("ollama:"):
         model = DEFAULT_MODEL
     title   = data.get("title", "New Chat")
     folder_id = data.get("folder_id")  # optional — create chat directly inside a folder
@@ -2849,6 +2825,32 @@ def api_list_trash():
 # ─────────────────────────────────────────────────────────────────────────────
 #  ROUTES — SEND MESSAGE (streaming)
 # ─────────────────────────────────────────────────────────────────────────────
+def _apply_auto_title(chat_id: str, text_input: str) -> None:
+    """Title a chat from its first message and rename its folder to match.
+    Shared by the cloud path below and the local path (repo_kb)."""
+    new_title = auto_title(text_input)
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE chats SET title = ? WHERE id = ?",
+            (new_title, chat_id)
+        )
+    # Rename chat folder to reflect the actual title
+    try:
+        from datetime import datetime as _dt2
+        date_prefix = _dt2.now().strftime("%Y-%m-%d")
+        safe = re.sub(r'[^\w\s\-]', '', new_title)[:50].strip().replace(' ', '_') or "chat"
+        new_folder = CHATS_DIR / f"{date_prefix}__{safe}__{chat_id[:8]}"
+        for d in CHATS_DIR.iterdir():
+            if d.is_dir() and d.name.endswith(f"__{chat_id[:8]}"):
+                if d != new_folder:
+                    d.rename(new_folder)
+                break
+        else:
+            new_folder.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        log.warning("Could not rename folder on auto-title: %s", e)
+
+
 @app.route("/api/chats/<chat_id>/messages", methods=["POST"])
 def api_send_message(chat_id: str):
     # ── Resolve chat + model ──────────────────────────────────────────────────
@@ -2858,6 +2860,13 @@ def api_send_message(chat_id: str):
         ).fetchone()
     if not chat:
         return jsonify({"error": "Chat not found"}), 404
+
+    # ── LOCAL MODE (Ollama on this Mac, $0) ───────────────────────────────────
+    # Handed off BEFORE any cloud logic runs: no API key needed, no Claude
+    # compression/memory/reviewer calls, nothing touches the prompt cache.
+    if str(dict(chat)["model"]).startswith("ollama:"):
+        return repo_kb.handle_local_message(chat_id, dict(chat)["model"],
+                                            apply_auto_title=_apply_auto_title)
 
     s        = load_settings()
     model    = dict(chat)["model"]
@@ -3016,27 +3025,7 @@ def api_send_message(chat_id: str):
         ).fetchone()["c"]
 
     if msg_count == 0 and text_input:
-        new_title = auto_title(text_input)
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE chats SET title = ? WHERE id = ?",
-                (new_title, chat_id)
-            )
-        # Rename chat folder to reflect the actual title
-        try:
-            from datetime import datetime as _dt2
-            date_prefix = _dt2.now().strftime("%Y-%m-%d")
-            safe = re.sub(r'[^\w\s\-]', '', new_title)[:50].strip().replace(' ', '_') or "chat"
-            new_folder = CHATS_DIR / f"{date_prefix}__{safe}__{chat_id[:8]}"
-            for d in CHATS_DIR.iterdir():
-                if d.is_dir() and d.name.endswith(f"__{chat_id[:8]}"):
-                    if d != new_folder:
-                        d.rename(new_folder)
-                    break
-            else:
-                new_folder.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            log.warning("Could not rename folder on auto-title: %s", e)
+        _apply_auto_title(chat_id, text_input)
 
     # ── Persist user message ──────────────────────────────────────────────────
     user_msg_id = str(uuid.uuid4())
@@ -4947,6 +4936,17 @@ def api_chat_snapshot(chat_id: str):
     return jsonify({"ok": True, "id": mid, "label": label, "preview": snap[:200], "chars": len(mem)})
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  LIVING REPOS + LOCAL KNOWLEDGE MODE  (repo_kb.py)
+# ─────────────────────────────────────────────────────────────────────────────
+repo_kb.init(
+    app,
+    get_db=get_db, now_iso=now_iso, load_settings=load_settings,
+    save_setting=save_setting, export_chat_txt=export_chat_txt,
+    extract_text=_extract_text_from_upload, base_dir=BASE_DIR, drop_dir=DROP_DIR,
+)
+
+
 if __name__ == "__main__":
     print()
     print("╔══════════════════════════════════════════════════════╗")
@@ -4958,6 +4958,7 @@ if __name__ == "__main__":
     print("║  Open    : http://localhost:8080                     ║")
     print("║  Network : http://192.168.x.x:8080  (phone access)  ║")
     print("║  Models  : Claude Sonnet · Haiku · Opus 4.6 · 4.7   ║")
+    print("║  Local   : Ollama models + Living Repos ($0)        ║")
     print("╚══════════════════════════════════════════════════════╝")
     print()
     app.run(host="0.0.0.0", port=8080, debug=False, threaded=True)
