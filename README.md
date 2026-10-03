@@ -1,3 +1,4 @@
+
 # LocalLLM — Personal Claude AI
 ### Built for Naveen | Token-optimised | 100% local data | DevOps-focused
 
@@ -177,3 +178,6 @@ Then add `llm.yourcompany.local` to your company DNS or local `/etc/hosts`.
 - All chat data stays on your Mac in `~/Documents/local-llm/`
 - No telemetry, no analytics, no cloud sync
 - For production network exposure: add HTTPS + basic auth in nginx config
+=======
+# LLM-local
+>>>>>>> 3a8623ac25005a62cf0f81c7c5495578f47aaabe
