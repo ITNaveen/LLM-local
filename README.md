@@ -4,6 +4,58 @@
 
 ---
 
+## Local knowledge mode + Living Repos (October 2026)
+
+Your work repo becomes a private knowledge base that a **local** model answers
+from — on the Mac, no internet, **$0 per question**. Cloud mode (Claude/OpenAI)
+is unchanged and optional.
+
+### One-time setup on the Mac
+```bash
+brew install ollama            # or install the Ollama app from ollama.com
+ollama pull qwen3.5:9b         # the answer model (~6 GB; fine on 24 GB RAM)
+ollama pull nomic-embed-text   # the search model (~270 MB) — you may already have it
+```
+With 48 GB RAM you can use a bigger, smarter model instead: `ollama pull gemma4:26b`,
+then pick it in **Settings → Local AI**. `LocalLLM.command` starts Ollama for you.
+
+### Every week
+1. Open **LLM Dropbox** → drag your repo folder in (or press **📁 Folder**).
+2. First time: choose **🧠 Living repo** and keep the folder name as the repo name.
+3. Next weeks: drop the same folder again (or press **⟳ Sync** on the repo).
+   You get a preview — *new / changed / unchanged / missing* — and only the new
+   and changed files are uploaded when you press **Apply sync**.
+4. Switch the top bar to **🏠 Local** and ask:
+   *"what's the latest on grafana in dev?"* → *"how did I fix it?"*
+
+### The safety rules (the "lock")
+| What happens | Where |
+|---|---|
+| Current files of each repo (browsable in Finder) | `~/Documents/local-llm-dropbox/living-repos/<repo>/` |
+| A changed file's previous version is kept, never overwritten | `~/Documents/local-llm-db/repo-history/<repo>/<date>/` |
+| A file missing from a new drop is **kept** and flagged "removed" | stays in place |
+| Uploads wait in staging; the repo changes only when the whole sync commits | `~/Documents/local-llm-db/repo-staging/` |
+| Repos are **locked**. Delete = unlock + type the name + it's only *moved* | `~/Documents/local-llm-db/repo-trash/` |
+
+### How "latest" is decided (code, not AI guesswork)
+* The path is read as data: `dev/grafana/otel-collector-crash/notes.md`
+  → environment **dev**, product **grafana**, work item **otel-collector-crash**.
+  Product-first layouts (`nexus/prod/3.95/…`) work too.
+* Versions are compared as numbers: 3.95 > 3.68, and 3.100 > 3.95. "Latest Nexus"
+  only sends the highest version's files — 3.68 is never mixed in unless you ask for it.
+* A file's date = the newer of its modified time on your laptop and any date written
+  in its name/header (`2026-09-26-…`, `Datum: 26.09.2026`).
+* The code picks the item and marks it ★; the model only explains it.
+* "prod" falls back to "maint" (and back) when one of them has no folder — the answer says so.
+* Asking about something that isn't in the repo gives "I can't find that", not a lookalike.
+
+**Check its accuracy without asking the AI:** the *Check what it would pick…* box
+under Living repos shows which item and files a question would use.
+Developers: `python3 -m unittest tests/test_living_repos.py -v` runs the whole
+weekly-drop scenario offline.
+
+---
+
 ## What This Is
 A self-hosted Claude AI interface that:
 - Runs on **http://localhost:5000** on your MacBook M4 Pro

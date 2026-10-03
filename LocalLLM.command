@@ -110,6 +110,31 @@ caffeinate -i &
 echo $! > "$CAFF_F"
 echo "✓ caffeinate: 1 process, -i only (idle guard)"
 
+# ── LOCAL AI (Ollama) ─────────────────────────────────────────────────────────
+# Local mode (free, private answers from your living repos) needs Ollama.
+# If it's installed but not running, start it. If it isn't installed, Cloud
+# mode still works exactly as before.
+if command -v ollama >/dev/null 2>&1 || [ -d "/Applications/Ollama.app" ]; then
+  if ! curl -sf --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1; then
+    if [ -d "/Applications/Ollama.app" ]; then
+      open -ga Ollama                                   # menu-bar app, in the background
+    else
+      nohup ollama serve >> "$LOG" 2>&1 &               # Homebrew install (no app)
+    fi
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      curl -sf --max-time 1 http://localhost:11434/api/tags > /dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+  if curl -sf --max-time 2 http://localhost:11434/api/tags > /dev/null 2>&1; then
+    echo "✓ Local AI (Ollama) running"
+  else
+    echo "⚠ Ollama didn't start — Local mode unavailable (Cloud mode still works)"
+  fi
+else
+  echo "ℹ Ollama not installed — Local mode off. Install: brew install ollama"
+fi
+
 # ── START FLASK SERVER ────────────────────────────────────────────────────────
 cd "$APP_DIR"
 nohup python3.11 app.py >> "$LOG" 2>&1 &

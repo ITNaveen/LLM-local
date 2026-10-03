@@ -251,6 +251,85 @@ a{color:var(--accentH)}
 }
 .dbx-del:hover{background:var(--red);color:#fff}
 #dbx-path{font-size:9px;color:var(--text3);text-align:center;margin-top:4px;font-family:var(--mono);word-break:break-all}
+#dbx-in,#dbx-dir{display:none}
+.dbx-pick{display:flex;gap:6px;justify-content:center;margin-top:8px}
+.dbx-pick button{
+  font-size:11px;padding:5px 10px;border-radius:7px;
+  background:var(--bg2);border:1px solid var(--border2);color:var(--text2);
+}
+.dbx-pick button:hover{border-color:var(--green);color:var(--text)}
+#dbx-progress{height:4px;border-radius:2px;background:var(--bg3);overflow:hidden;margin:0 0 6px;display:none}
+#dbx-progress.on{display:block}
+#dbx-bar{height:100%;width:0;background:var(--green);transition:width .2s}
+
+/* living repos (in the dropbox panel) */
+#lr-head{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--text2);margin:10px 2px 6px}
+#lr-head small{font-weight:400;color:var(--text3)}
+.lr-item{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:7px 8px;margin-bottom:5px}
+.lr-top{display:flex;align-items:center;gap:6px}
+.lr-lock{font-size:12px;cursor:pointer;flex-shrink:0}
+.lr-name{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--text);cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lr-name:hover{color:var(--accentH)}
+.lr-btn{font-size:10px;padding:3px 7px;border-radius:6px;background:var(--bg2);border:1px solid var(--border2);color:var(--text2);flex-shrink:0}
+.lr-btn:hover{border-color:var(--accent);color:var(--text)}
+.lr-btn.danger:hover{background:var(--red);border-color:var(--red);color:#fff}
+.lr-meta{font-size:10px;color:var(--text3);margin-top:3px;line-height:1.45}
+.lr-ov{font-size:10.5px;color:var(--text2);margin-top:6px;line-height:1.5;display:none}
+.lr-ov.open{display:block}
+.lr-ov b{color:var(--text)}
+.lr-ov .env{margin-top:4px;font-weight:600;color:var(--text);text-transform:uppercase;font-size:9.5px;letter-spacing:.04em}
+.lr-empty{font-size:10.5px;color:var(--text3);line-height:1.5;padding:2px 2px 6px}
+#lr-ask{display:flex;gap:5px;margin:4px 0 2px}
+#lr-ask input{flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border2);border-radius:7px;padding:5px 8px;font-size:11px;color:var(--text)}
+#lr-ask-out{font-size:10.5px;color:var(--text2);line-height:1.5;margin-bottom:4px}
+
+/* sync / choice modal */
+#lr-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);z-index:600;display:none}
+#lr-overlay.open{display:block}
+#lr-modal{
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:min(520px,94vw);max-height:86vh;overflow-y:auto;
+  background:var(--bg2);border:1px solid var(--border2);border-radius:14px;
+  box-shadow:0 24px 80px rgba(0,0,0,.45);z-index:601;display:none;padding:18px;
+}
+#lr-modal.open{display:block}
+#lr-modal h3{font-size:15px;font-weight:600;margin-bottom:6px;color:var(--text)}
+#lr-modal p{font-size:12px;color:var(--text2);line-height:1.55;margin-bottom:10px}
+.lr-counts{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin:10px 0}
+.lr-count{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--text2)}
+.lr-count b{display:block;font-size:18px;color:var(--text);font-variant-numeric:tabular-nums}
+.lr-count.new b{color:var(--green)}
+.lr-count.chg b{color:var(--accentH)}
+.lr-count.miss b{color:var(--yellow)}
+.lr-warn{background:rgba(184,134,11,.12);border:1px solid rgba(184,134,11,.4);color:var(--text);
+  border-radius:8px;padding:8px 10px;font-size:11.5px;line-height:1.5;margin-bottom:8px}
+#lr-modal details{font-size:11.5px;color:var(--text2);margin-bottom:6px}
+#lr-modal details summary{cursor:pointer;color:var(--text)}
+#lr-modal details ul{margin:4px 0 0 16px;font-family:var(--mono);font-size:10.5px;max-height:160px;overflow-y:auto}
+.lr-choice{display:flex;gap:9px;align-items:flex-start;background:var(--bg3);border:1px solid var(--border2);
+  border-radius:9px;padding:10px;margin-bottom:8px;cursor:pointer;font-size:12px;color:var(--text2);line-height:1.5}
+.lr-choice input[type=radio]{margin-top:3px}
+.lr-choice b{color:var(--text)}
+.lr-choice:has(input:checked){border-color:var(--accent)}
+#lr-name{width:100%;margin-top:6px;padding:7px 9px;border-radius:7px;background:var(--bg);border:1px solid var(--border2);font-size:12px;color:var(--text)}
+.lr-actions{display:flex;gap:8px;margin-top:12px}
+.lr-actions .go{flex:1;padding:9px;background:var(--accent);color:#fff;border-radius:8px;font-size:13px;font-weight:500}
+.lr-actions .go:hover{background:var(--accentH)}
+.lr-actions .go:disabled{opacity:.5;cursor:default}
+.lr-actions .no{padding:9px 14px;background:var(--bg3);color:var(--text2);border-radius:8px;font-size:13px;border:1px solid var(--border2)}
+#lr-modal-status{font-size:11.5px;color:var(--text2);min-height:16px;margin-top:8px}
+
+/* Local / Cloud switch (topbar) */
+#mode-toggle{display:flex;flex-shrink:0;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;padding:2px}
+#mode-toggle button{font-size:12px;padding:4px 9px;border-radius:7px;color:var(--text2);white-space:nowrap}
+#mode-toggle button.on{background:var(--bg);color:var(--text);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+#mode-toggle button#mode-local.on{color:var(--green)}
+/* Cloud-only controls are hidden in Local mode (web search, depth tiers and
+   "Save to KB" all call the paid API). */
+body.mode-local label:has(#ws-tog),
+body.mode-local #depth-toggle,
+body.mode-local #btn-save-kb{display:none!important}
 
 /* ── MAIN ─────────────────────────────────────────────── */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;height:100vh;height:100dvh;overflow:hidden}
@@ -560,6 +639,12 @@ a{color:var(--accentH)}
   #spend-pill{padding:7px 9px;font-size:11px}
   #model-pill-lbl{font-size:12px}
   #btn-discover{width:34px;height:34px}
+  #mode-toggle button span{display:none}
+  #mode-toggle button{padding:5px 6px}
+  #spend-pill-openai{display:none}
+  #topbar{gap:6px}
+  #model-pill{max-width:84px}
+  #spend-pill{padding:7px 7px}
   #model-drop{right:8px;left:8px;width:auto;top:56px}
 
   /* Messages — full width, readable */
@@ -1130,10 +1215,25 @@ a{color:var(--accentH)}
           ondragover="dbxOver(event)" ondragleave="dbxLeave(event)"
           ondrop="dbxDrop(event)" onclick="document.getElementById('dbx-in').click()">
           <div id="dbx-zone-icon">&#128228;</div>
-          <div id="dbx-zone-txt">Drop any file here<br/><span>or tap to browse</span></div>
+          <div id="dbx-zone-txt">Drop files or a whole folder here<br/><span>or tap to browse</span></div>
+          <div class="dbx-pick">
+            <button onclick="event.stopPropagation();document.getElementById('dbx-in').click()">&#128196; Files</button>
+            <button onclick="event.stopPropagation();dbxPickFolder(null)">&#128193; Folder</button>
+          </div>
         </div>
         <input type="file" id="dbx-in" multiple onchange="dbxFiles(event)"/>
+        <input type="file" id="dbx-dir" webkitdirectory directory multiple onchange="dbxDirPicked(event)"/>
         <div id="dbx-status"></div>
+        <div id="dbx-progress"><div id="dbx-bar"></div></div>
+
+        <!-- Living repos: flagged folders that keep growing (locked, searchable by Local AI) -->
+        <div id="lr-head">&#129504; Living repos <small>locked &middot; keep growing</small></div>
+        <div id="lr-list"></div>
+        <div id="lr-ask">
+          <input id="lr-ask-in" placeholder="Check what it would pick…" onkeydown="if(event.key==='Enter')lrAsk()"/>
+          <button class="lr-btn" onclick="lrAsk()">Check</button>
+        </div>
+        <div id="lr-ask-out"></div>
         <div id="dbx-list"></div>
         <div id="dbx-path"></div>
       </div>
@@ -1306,6 +1406,10 @@ a{color:var(--accentH)}
         </svg>
         <span>Research</span>
       </button>
+      <div id="mode-toggle" title="Local = free & private: answers from your living repos on this Mac. Cloud = Claude / OpenAI API (paid).">
+        <button id="mode-local" onclick="setMode('local')">&#127968; <span>Local</span></button>
+        <button id="mode-cloud" onclick="setMode('cloud')">&#9729;&#65039; <span>Cloud</span></button>
+      </div>
       <div id="model-pill" onclick="modelToggle()">
         <span id="model-pill-lbl">Sonnet 4.6</span>
         <span style="color:var(--text3);font-size:10px;flex-shrink:0">&#9660;</span>
@@ -1325,7 +1429,7 @@ a{color:var(--accentH)}
       <div id="welcome">
         <div id="welcome-logo">L</div>
         <h1>LocalLLM &mdash; Your Private AI</h1>
-        <p>Your private Claude AI — Sonnet · Haiku · Opus</p>
+        <p id="welcome-sub">Your private Claude AI — Sonnet · Haiku · Opus</p>
       </div>
       <div id="msgs" style="display:none"></div>
     </div>
@@ -1402,8 +1506,26 @@ a{color:var(--accentH)}
   </div>
   <div class="mbody">
 
+    <!-- ── Local AI (Ollama on this Mac) — free, private, powers Local mode ── -->
+    <div class="fg" style="border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--bg2)">
+      <label class="flabel">Local AI <span class="fbadge" style="background:#1b7a43;color:#fff">FREE &middot; PRIVATE</span> <span style="font-size:10px;color:var(--muted)">powers Local mode &amp; your living repos</span></label>
+      <div class="fhint" id="lai-status" style="line-height:1.5">Checking Ollama…</div>
+      <label class="flabel" style="font-size:11px;margin-top:8px">Answer model</label>
+      <select class="fselect" id="lai-model"></select>
+      <label class="flabel" style="font-size:11px;margin-top:8px">Search model (embeddings)</label>
+      <input type="text" class="finput" id="lai-embed" placeholder="nomic-embed-text"/>
+      <label class="flabel" style="font-size:11px;margin-top:8px">How much repo text one answer may read</label>
+      <select class="fselect" id="lai-ctx">
+        <option value="8192">8K tokens — fastest, least memory</option>
+        <option value="16384">16K tokens — recommended</option>
+        <option value="32768">32K tokens — reads more, needs more RAM</option>
+      </select>
+      <div class="fhint" id="lai-help" style="line-height:1.5"></div>
+      <button class="btn-save" style="margin-top:8px" onclick="localSettingsSave()">Save Local AI</button>
+    </div>
+
     <div class="fg">
-      <label class="flabel">Claude API Key <span class="fbadge paid">PAID</span></label>
+      <label class="flabel">Claude API Key <span class="fbadge paid">PAID</span> <span style="font-size:10px;color:var(--muted)">optional — only for Cloud mode</span></label>
       <input type="password" class="finput" id="s-claude" placeholder="sk-ant-api03-…"/>
       <div class="fhint" id="h-claude">console.anthropic.com &#8594; API Keys</div>
     </div>
@@ -1504,6 +1626,10 @@ a{color:var(--accentH)}
   </div>
 </div>
 
+
+<!-- ══ LIVING REPO MODAL (folder choice + sync preview) ════════════ -->
+<div id="lr-overlay"></div>
+<div id="lr-modal"></div>
 
 <!-- ══ SNAPSHOT MODAL ═══════════════════════════════════════════ -->
 <div id="snap-overlay" onclick="snapClose()"></div>
@@ -1607,7 +1733,7 @@ async function boot() {
 // working session without pinging all night.
 function startCacheKeepWarm() {
   setInterval(function() {
-    if (!S.chatId || S.streaming) return;
+    if (!S.chatId || S.streaming || isLocalModel(S.model)) return;   // local mode: no Claude calls
     var idleMs = Date.now() - (S.lastActivity || 0);
     if (idleMs > 45 * 60 * 1000) return;   // stopped working — let cache lapse
     fetch("/api/cache/keepwarm", { method: "POST" }).catch(function(){});
@@ -1644,7 +1770,113 @@ function renderModelDrop() {
   if (sel) {
     document.getElementById("model-pill-lbl").textContent = sel.name;
     document.getElementById("model-foot").textContent = sel.free ? sel.name + " (FREE)" : sel.name;
+  } else if (isLocalModel(S.model)) {
+    var nm = S.model.slice(7) + " · local (Ollama off?)";
+    document.getElementById("model-pill-lbl").textContent = nm;
+    document.getElementById("model-foot").textContent = nm;
   }
+  paintMode();
+}
+
+// ── LOCAL / CLOUD SWITCH ──────────────────────────────────────────────────
+// Local = an Ollama model on this Mac ("ollama:<name>"): free, private, answers
+// from your living repos. Cloud = Claude / OpenAI (paid). The switch just picks
+// a model of that kind; the choice is saved as the default for new chats.
+function isLocalModel(id) { return (id || "").indexOf("ollama:") === 0; }
+function lsGet(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function paintMode() {
+  var local = isLocalModel(S.model);
+  document.body.classList.toggle("mode-local", local);
+  var bl = document.getElementById("mode-local"), bc = document.getElementById("mode-cloud");
+  if (bl) bl.classList.toggle("on", local);
+  if (bc) bc.classList.toggle("on", !local);
+  var inp = document.getElementById("msg-in");
+  if (inp) inp.placeholder = local
+    ? "Ask your repo — e.g. what's the latest on grafana in dev? · how did I fix it?"
+    : "Ask anything — K8s, Bash, Java, Logs, Keycloak, LDAP…";
+  var sub = document.getElementById("welcome-sub");
+  if (sub) sub.innerHTML = local
+    ? "&#127968; Local knowledge mode — answers from your living repos, on this Mac, free.<br/>Try: <i>what's the latest on grafana in dev?</i>"
+    : "Your private Claude AI — Sonnet · Haiku · Opus";
+}
+async function setMode(mode) {
+  var want = mode === "local";
+  if (want === isLocalModel(S.model)) return;
+  var target;
+  if (want) {
+    var loc = S.models.filter(function(m) { return m.provider === "ollama"; });
+    if (!loc.length) { await loadModels(); loc = S.models.filter(function(m) { return m.provider === "ollama"; }); }
+    if (!loc.length) {
+      toast("Local AI isn't ready yet — see Settings → Local AI");
+      settingsOpen();
+      return;
+    }
+    lsSet("lastCloudModel", S.model);
+    target = loc.find(function(m) { return m.id === lsGet("lastLocalModel"); }) ||
+             loc.find(function(m) { return m.recommended; }) || loc[0];
+    target = target.id;
+  } else {
+    lsSet("lastLocalModel", S.model);
+    target = lsGet("lastCloudModel");
+    if (!target || isLocalModel(target) || !S.models.some(function(m) { return m.id === target; })) {
+      var c = S.models.find(function(m) { return m.provider === "claude"; }) || S.models[0];
+      target = c.id;
+    }
+  }
+  await modelSelect(target);
+  api("/api/settings", "POST", {default_model: target});   // new chats start in this mode
+}
+
+// ── LOCAL AI SETTINGS (Ollama) ────────────────────────────────────────────
+async function localStatusLoad() {
+  var st = document.getElementById("lai-status"), help = document.getElementById("lai-help");
+  var d;
+  try { d = await api("/api/local/status"); } catch (e) { st.textContent = "Could not check Ollama."; return; }
+  var sel = document.getElementById("lai-model");
+  sel.innerHTML = d.chat_models.length
+    ? d.chat_models.map(function(m) { return '<option value="' + esc(m) + '"' + (m === d.selected ? ' selected' : '') + '>' + esc(m) + '</option>'; }).join("")
+    : '<option value="">— no local model installed —</option>';
+  document.getElementById("lai-embed").value = d.embed_model || "";
+  var ctx = document.getElementById("lai-ctx");
+  ctx.value = String(d.num_ctx);
+  if (ctx.value !== String(d.num_ctx)) ctx.value = "16384";
+  var tips = [];
+  if (!d.running) {
+    st.innerHTML = "&#9888;&#65039; <b>Ollama is not running</b> on the Mac.";
+    tips.push("Install once: <code>brew install ollama</code> (or ollama.com), then start the Ollama app.");
+    tips.push("Then: <code>ollama pull " + esc(d.suggest.chat) + "</code> and <code>ollama pull " + esc(d.suggest.embed) + "</code>");
+  } else if (!d.chat_models.length) {
+    st.innerHTML = "&#9888;&#65039; Ollama is running but has <b>no answer model</b> yet.";
+    tips.push("Run: <code>ollama pull " + esc(d.suggest.chat) + "</code> (≈6&nbsp;GB, fine on 24&nbsp;GB RAM). With 48&nbsp;GB: <code>ollama pull " + esc(d.suggest.chat_big) + "</code>");
+  } else {
+    st.innerHTML = "&#10003; Ollama running &middot; answering with <b>" + esc(d.selected) + "</b>";
+  }
+  if (d.running && !d.embed_ready) {
+    tips.push("Search uses keywords only until you run: <code>ollama pull " + esc(d.embed_model) + "</code>");
+  } else if (d.chunks_pending) {
+    tips.push("Indexing for meaning-search: " + d.chunks_pending + " of " + d.chunks_total + " sections left" +
+              (d.embedding_running ? " (working…)" : "") + ".");
+  } else if (d.chunks_total) {
+    tips.push("Search index ready: " + d.chunks_total + " sections.");
+  }
+  if (d.embedding_error && d.running) tips.push("Index note: " + esc(d.embedding_error));
+  help.innerHTML = tips.join("<br/>");
+}
+async function localSettingsSave() {
+  var body = {
+    local_model: document.getElementById("lai-model").value,
+    embed_model: document.getElementById("lai-embed").value.trim(),
+    num_ctx: parseInt(document.getElementById("lai-ctx").value, 10),
+  };
+  var r = await api("/api/local/settings", "POST", body);
+  if (r.error) { toast("Error: " + r.error); return; }
+  await loadModels();
+  if (isLocalModel(S.model) && body.local_model && S.model !== "ollama:" + body.local_model) {
+    await modelSelect("ollama:" + body.local_model);
+  }
+  toast("✓ Local AI saved");
+  localStatusLoad();
 }
 
 function renderModelSelect() {
@@ -2447,7 +2679,8 @@ async function loadSettingsPreview() {
   var s = await r.json();
   if (s.claude_preview) document.getElementById("h-claude").textContent = "Saved: " + s.claude_preview;
   if (s.default_model)  { S.model = s.default_model; renderModelDrop(); }
-  if (!s.has_claude_key) setTimeout(settingsOpen, 700);
+  var hasLocal = S.models.some(function(m) { return m.provider === "ollama"; });
+  if (!s.has_claude_key && !hasLocal) setTimeout(settingsOpen, 700);
 }
 
 async function qualityTogglesSave() {
@@ -2491,6 +2724,7 @@ async function settingsOpen() {
   document.getElementById("s-kb-enabled").checked = (s.kb_enabled !== "false");
   document.getElementById("s-reviewer-enabled").checked = (s.reviewer_enabled === "true");
   applyThemeButtons(s.theme || "light");
+  localStatusLoad();
   await refreshStats();
 }
 function settingsClose() {
@@ -2531,25 +2765,352 @@ async function settingsSave() {
 }
 
 // ── DROPBOX ───────────────────────────────────────────────────────────────
+// Two kinds of drop:
+//   • FILES          → saved as-is to local-llm-dropbox/ (phone ↔ Mac, as before)
+//   • a whole FOLDER → you choose:
+//        🧠 LIVING REPO  one repo that keeps growing — synced like rsync, locked,
+//                        nothing ever deleted, searchable by Local AI
+//        📁 NORMAL       a plain copy with its sub-folders intact (Google-Drive style)
+// Dropping a folder whose name matches an existing living repo goes straight to
+// the sync preview — that is the weekly "drop the same repo again" flow.
+// (Ignore lists match repo_kb.py so .git / node_modules never travel.)
+var LR_IGNORE_DIRS  = {".git":1,".svn":1,".hg":1,"node_modules":1,"__pycache__":1,".venv":1,"venv":1,
+                       ".idea":1,".vscode":1,".terraform":1,".pytest_cache":1,".mypy_cache":1,".cache":1};
+var LR_IGNORE_FILES = {".ds_store":1,"thumbs.db":1,"desktop.ini":1};
+var LR_BATCH_FILES  = 25;                    // files per upload request
+var LR_BATCH_BYTES  = 25 * 1024 * 1024;      // …and bytes (Cloudflare caps a request at 100MB)
+S.lrRepos = {};
+
 function dbxToggle() {
   S.dbxOpen = !S.dbxOpen;
   document.getElementById("dbx-panel").classList.toggle("open", S.dbxOpen);
   document.getElementById("dbx-toggle").style.color = S.dbxOpen ? "var(--green)" : "";
-  if (S.dbxOpen) dbxLoad();
+  if (S.dbxOpen) { dbxLoad(); lrLoad(); }
 }
+function dbxStatus(msg, cls) {
+  var st = document.getElementById("dbx-status");
+  st.textContent = msg || ""; st.className = cls || "";
+}
+function dbxProgress(frac) {
+  var p = document.getElementById("dbx-progress");
+  if (frac === null || frac === undefined) { p.classList.remove("on"); return; }
+  p.classList.add("on");
+  document.getElementById("dbx-bar").style.width = Math.max(2, Math.round(frac * 100)) + "%";
+}
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+function fmtWhen(iso) {
+  if (!iso) return "never";
+  var d = new Date(iso + "Z");
+  return d.toLocaleDateString(undefined, {day: "numeric", month: "short"}) + " " +
+         d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"});
+}
+function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+function lrSlug(n) {
+  return (n || "").trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").toLowerCase().slice(0, 80);
+}
+
 function dbxOver(e) { e.preventDefault(); document.getElementById("dbx-zone").classList.add("over"); }
 function dbxLeave(e) { document.getElementById("dbx-zone").classList.remove("over"); }
-function dbxDrop(e) {
+async function dbxDrop(e) {
   e.preventDefault();
   document.getElementById("dbx-zone").classList.remove("over");
-  var files = Array.from(e.dataTransfer.files);
-  if (files.length) dbxUpload(files);
+  // Read the dropped entries NOW — the browser empties dataTransfer after this event.
+  var items = e.dataTransfer.items, entries = [];
+  if (items && items.length && items[0].webkitGetAsEntry) {
+    for (var i = 0; i < items.length; i++) {
+      var en = items[i].webkitGetAsEntry();
+      if (en) entries.push(en);
+    }
+  }
+  var dirs = entries.filter(function(en) { return en.isDirectory; });
+  if (!dirs.length) {                                   // plain files → old behaviour
+    var files = Array.from(e.dataTransfer.files);
+    if (files.length) dbxUpload(files);
+    return;
+  }
+  if (entries.length > 1) { dbxStatus("Drop one folder at a time (or use 📁 Folder).", "err"); return; }
+  dbxStatus("Reading folder “" + dirs[0].name + "”…");
+  try {
+    var list = await lrWalk(dirs[0], "");
+    folderReady(dirs[0].name, list, null);
+  } catch (err) {
+    dbxStatus("Could not read the folder: " + err.message, "err");
+  }
 }
-function dbxFiles(e) {
+// A folder entry lists its children in batches of ≤100 — keep asking until empty.
+function lrReadAll(reader) {
+  return new Promise(function(resolve, reject) {
+    var all = [];
+    (function next() {
+      reader.readEntries(function(batch) {
+        if (!batch.length) return resolve(all);
+        all = all.concat(Array.from(batch));
+        next();
+      }, reject);
+    })();
+  });
+}
+async function lrWalk(dirEntry, prefix) {
+  var out = [];
+  var kids = await lrReadAll(dirEntry.createReader());
+  for (var i = 0; i < kids.length; i++) {
+    var k = kids[i], rel = prefix ? prefix + "/" + k.name : k.name;
+    if (k.isDirectory) {
+      if (!LR_IGNORE_DIRS[k.name]) out = out.concat(await lrWalk(k, rel));
+    } else if (!LR_IGNORE_FILES[k.name.toLowerCase()]) {
+      var f = await new Promise(function(res, rej) { k.file(res, rej); });
+      out.push({file: f, rel: rel});
+    }
+  }
+  return out;
+}
+// 📁 Folder button (target = null) or ⟳ Sync on a repo (target = that repo's name)
+function dbxPickFolder(target) {
+  S.syncTarget = target;
+  document.getElementById("dbx-dir").click();
+}
+function dbxDirPicked(e) {
   var files = Array.from(e.target.files);
-  if (files.length) dbxUpload(files);
   e.target.value = "";
+  var target = S.syncTarget; S.syncTarget = null;
+  if (!files.length) return;
+  var root = (files[0].webkitRelativePath || "").split("/")[0] || "folder";
+  var list = [];
+  files.forEach(function(f) {
+    var parts = (f.webkitRelativePath || f.name).split("/");
+    parts.shift();                                       // paths are relative to the repo root
+    if (!parts.length) return;
+    if (parts.slice(0, -1).some(function(p) { return LR_IGNORE_DIRS[p]; })) return;
+    if (LR_IGNORE_FILES[parts[parts.length - 1].toLowerCase()]) return;
+    list.push({file: f, rel: parts.join("/")});
+  });
+  folderReady(root, list, target);
 }
+async function folderReady(rootName, list, target) {
+  if (!list.length) { dbxStatus("That folder has no files (or only ignored ones like .git).", "err"); return; }
+  dbxStatus("");
+  if (target) return lrStartSync(target, list);
+  var r = await api("/api/repos");
+  var match = (r.repos || []).find(function(x) { return x.slug === lrSlug(rootName); });
+  if (match) return lrStartSync(match.name, list);     // same name → it's the weekly re-drop
+  var total = list.reduce(function(a, x) { return a + x.file.size; }, 0);
+  lrShowChoice(rootName, list, total);
+}
+
+// ── modal helpers ──
+function lrModal(html) {
+  document.getElementById("lr-modal").innerHTML = html;
+  document.getElementById("lr-modal").classList.add("open");
+  document.getElementById("lr-overlay").classList.add("open");
+}
+function lrModalClose() {
+  document.getElementById("lr-modal").classList.remove("open");
+  document.getElementById("lr-overlay").classList.remove("open");
+}
+function lrModalStatus(t) { var s = document.getElementById("lr-modal-status"); if (s) s.textContent = t; }
+
+function lrShowChoice(rootName, list, total) {
+  S.lrPending = {root: rootName, list: list};
+  lrModal(
+    '<h3>&#128193; “' + esc(rootName) + '” &mdash; ' + list.length + ' files, ' + fmtBytes(total) + '</h3>' +
+    '<p>How should the Dropbox keep this folder?</p>' +
+    '<label class="lr-choice"><input type="radio" name="lr-kind" value="repo" checked/><span>' +
+      '<b>&#129504; Living repo</b> &mdash; one repo that keeps growing. Drop the same folder again any time: ' +
+      'only new and changed files are added, nothing is ever deleted, and it is locked against accidental ' +
+      'removal. Your Local AI answers from it.' +
+      '<input id="lr-name" value="' + esc(rootName) + '" placeholder="Repo name — its sync identity"/></span></label>' +
+    '<label class="lr-choice"><input type="radio" name="lr-kind" value="plain"/><span>' +
+      '<b>&#128193; Normal folder</b> &mdash; just keep a copy with its sub-folders (like Google Drive). ' +
+      'Not searched by the AI.</span></label>' +
+    '<div class="lr-actions"><button class="go" onclick="lrChoiceGo()">Continue</button>' +
+    '<button class="no" onclick="lrModalClose()">Cancel</button></div><div id="lr-modal-status"></div>');
+}
+function lrChoiceGo() {
+  var p = S.lrPending; if (!p) return;
+  var kind = document.querySelector('input[name="lr-kind"]:checked').value;
+  if (kind === "plain") { lrModalClose(); return dbxUploadFolderPlain(p.root, p.list); }
+  var name = document.getElementById("lr-name").value.trim();
+  if (!lrSlug(name)) { lrModalStatus("Give the repo a name (letters, digits, - _ .)."); return; }
+  lrStartSync(name, p.list);
+}
+
+// ── SYNC step 1: fingerprint locally, ask the Mac what is new/changed/missing ──
+async function lrHash(file) {
+  // SHA-256 needs a secure page (https or localhost). On plain http over the LAN
+  // it's unavailable — the Mac then compares size + date and re-checks uploads.
+  if (!(window.crypto && crypto.subtle) || file.size > 64 * 1024 * 1024) return "";
+  var h = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return Array.from(new Uint8Array(h)).map(function(b) { return b.toString(16).padStart(2, "0"); }).join("");
+}
+async function lrStartSync(name, list) {
+  S.lrPending = {name: name, list: list};
+  lrModal('<h3>&#129504; ' + esc(name) + '</h3><p>Comparing ' + list.length +
+          ' files with what the Mac already has…</p><div id="lr-modal-status"></div>');
+  var manifest = [];
+  for (var i = 0; i < list.length; i++) {
+    var x = list[i], sha = "";
+    try { sha = await lrHash(x.file); } catch (e) { sha = ""; }
+    manifest.push({path: x.rel, size: x.file.size, mtime: x.file.lastModified, sha256: sha});
+    if (i % 25 === 0) lrModalStatus("Fingerprinting " + (i + 1) + " / " + list.length + "…");
+  }
+  lrModalStatus("Asking the Mac…");
+  var plan = await api("/api/repos/plan", "POST", {name: name, files: manifest});
+  if (plan.error) {
+    lrModal('<h3>Could not prepare the sync</h3><p>' + esc(plan.error) + '</p>' +
+            '<div class="lr-actions"><button class="no" onclick="lrModalClose()">Close</button></div>');
+    return;
+  }
+  S.lrPlan = plan;
+  lrShowPlan(plan);
+}
+
+// ── SYNC step 2: show the preview; nothing changes until "Apply" ──
+function lrShowPlan(plan) {
+  var c = plan.counts, repo = plan.repo;
+  var bytes = 0, want = {};
+  plan.upload.forEach(function(r) { want[r] = 1; });
+  S.lrPending.list.forEach(function(x) { if (want[x.rel]) bytes += x.file.size; });
+  var nothing = !plan.upload.length && !c.missing && !c.restored;
+  function box(cls, label, n, hint) {
+    return '<div class="lr-count ' + cls + '"><b>' + n + '</b>' + label + (hint ? '<br/><small>' + hint + '</small>' : '') + '</div>';
+  }
+  function list(title, arr, total) {
+    if (!arr || !arr.length) return "";
+    return '<details><summary>' + title + ' (' + total + ')</summary><ul>' +
+      arr.map(function(p) { return '<li>' + esc(p) + '</li>'; }).join("") +
+      (total > arr.length ? '<li>… and ' + (total - arr.length) + ' more</li>' : '') + '</ul></details>';
+  }
+  var h = '<h3>' + (repo.exists ? '&#129504; Sync “' + esc(repo.name) + '”' : '&#129504; Create living repo “' + esc(repo.name) + '”') + '</h3>';
+  h += '<p>' + (repo.exists
+        ? 'Compared with the ' + repo.files_before + ' files the Mac already has. Nothing is changed until you press Apply.'
+        : 'First drop — everything is new. Next time, drop the same folder again and only the changes travel.') + '</p>';
+  (plan.warnings || []).forEach(function(w) { h += '<div class="lr-warn">&#9888;&#65039; ' + esc(w) + '</div>'; });
+  h += '<div class="lr-counts">' +
+       box("new", "&#10010; New", c["new"]) +
+       box("chg", "&#9998; Changed", c.changed, c.changed ? "old version kept in history" : "") +
+       box("", "= Unchanged", c.unchanged) +
+       box("miss", "&#9888; Missing from this drop", c.missing, c.missing ? "kept &amp; flagged, never deleted" : "") +
+       (c.check ? box("", "? To compare", c.check, "no fingerprint over plain http — the Mac checks after upload") : "") +
+       (c.restored ? box("new", "&#8634; Back again", c.restored) : "") +
+       '</div>';
+  h += list("New files", plan.samples["new"], c["new"]) + list("Changed files", plan.samples.changed, c.changed) +
+       list("Missing from this drop (kept)", plan.samples.missing, c.missing) +
+       list("To compare", plan.samples.check, c.check);
+  if (plan.skipped && plan.skipped.length) {
+    h += '<details><summary>Skipped (' + plan.skipped.length + ')</summary><ul>' +
+         plan.skipped.map(function(s) { return '<li>' + esc(s.path) + ' — ' + esc(s.why) + '</li>'; }).join("") + '</ul></details>';
+  }
+  if (nothing) {
+    h += '<p style="margin-top:10px"><b>Already up to date &#10003;</b> — nothing to upload.</p>' +
+         '<div class="lr-actions"><button class="no" onclick="lrCancel()">Close</button></div>';
+  } else {
+    h += '<p style="margin-top:10px">' + (plan.upload.length
+          ? 'Only <b>' + plan.upload.length + '</b> file(s) (' + fmtBytes(bytes) + ') will be uploaded.'
+          : 'No upload needed — only flags change.') + '</p>' +
+         '<div class="lr-actions"><button class="go" id="lr-apply" onclick="lrApply()">Apply sync</button>' +
+         '<button class="no" onclick="lrCancel()">Cancel</button></div>';
+  }
+  h += '<div id="lr-modal-status"></div>';
+  lrModal(h);
+}
+async function lrCancel() {
+  if (S.lrPlan) api("/api/repos/cancel", "POST", {plan_id: S.lrPlan.plan_id});
+  S.lrPlan = null;
+  lrModalClose();
+}
+
+// ── SYNC step 3: upload only what the plan asked for, then commit ──
+async function lrApply() {
+  var plan = S.lrPlan, pend = S.lrPending;
+  var btn = document.getElementById("lr-apply");
+  if (btn) btn.disabled = true;
+  var byRel = {};
+  pend.list.forEach(function(x) { byRel[x.rel] = x.file; });
+  var q = plan.upload.map(function(r) { return {rel: r, file: byRel[r]}; }).filter(function(x) { return x.file; });
+  var total = q.reduce(function(a, x) { return a + x.file.size; }, 0) || 1, sent = 0, i = 0;
+  try {
+    while (i < q.length) {
+      var fd = new FormData(), n = 0, bytes = 0;
+      fd.append("plan_id", plan.plan_id);
+      while (i < q.length && n < LR_BATCH_FILES && (n === 0 || bytes + q[i].file.size <= LR_BATCH_BYTES)) {
+        fd.append("files", q[i].file, q[i].file.name);
+        fd.append("paths", q[i].rel);
+        bytes += q[i].file.size; n++; i++;
+      }
+      lrModalStatus("Uploading " + i + " / " + q.length + " files…");
+      var r = await fetch("/api/repos/upload", {method: "POST", body: fd});
+      var d = {};
+      try { d = await r.json(); } catch (e) { d = {error: "HTTP " + r.status}; }
+      if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+      sent += bytes; dbxProgress(sent / total);
+    }
+    lrModalStatus("Applying the sync on the Mac…");
+    var c = await api("/api/repos/commit", "POST", {plan_id: plan.plan_id});
+    if (c.error) throw new Error(c.error);
+    var st;
+    for (;;) {
+      await sleep(600);
+      st = await api("/api/repos/sync/" + plan.plan_id);
+      if (st.status !== "committing") break;
+      lrModalStatus("Applying… " + st.done + " / " + st.total);
+      dbxProgress(st.total ? st.done / st.total : 1);
+    }
+    if (st.status !== "committed") throw new Error((st.result && st.result.error) || st.status);
+    var res = st.result || {}, parts = [];
+    if (res.added) parts.push(res.added + " new");
+    if (res.changed) parts.push(res.changed + " changed");
+    if (res.removed) parts.push(res.removed + " flagged missing (kept)");
+    if (res.restored) parts.push(res.restored + " back again");
+    lrModalClose();
+    dbxStatus("✓ " + plan.repo.name + " synced — " + (parts.join(", ") || "no content changes") +
+              ". Indexing for search in the background.", "ok");
+    if (res.errors && res.errors.length) toast("⚠ " + res.errors.length + " file(s) had problems — see server.log");
+    S.lrPlan = null;
+    lrLoad();
+  } catch (err) {
+    lrModalStatus("Stopped: " + err.message + " — the repo was not changed. You can try again.");
+    if (btn) btn.disabled = false;
+  } finally {
+    dbxProgress(null);
+  }
+}
+
+// ── NORMAL folder: plain copy with its sub-folders ──
+async function dbxUploadFolderPlain(root, list) {
+  var t = new Date(), pad = function(n) { return String(n).padStart(2, "0"); };
+  var target = t.getFullYear() + pad(t.getMonth() + 1) + pad(t.getDate()) + "_" +
+               pad(t.getHours()) + pad(t.getMinutes()) + pad(t.getSeconds()) + "_" + root;
+  var total = list.reduce(function(a, x) { return a + x.file.size; }, 0) || 1, sent = 0, i = 0, saved = 0, folder = "";
+  try {
+    while (i < list.length) {
+      var fd = new FormData(), n = 0, bytes = 0;
+      fd.append("target", target);
+      while (i < list.length && n < LR_BATCH_FILES && (n === 0 || bytes + list[i].file.size <= LR_BATCH_BYTES)) {
+        fd.append("files", list[i].file, list[i].file.name);
+        fd.append("paths", list[i].rel);
+        bytes += list[i].file.size; n++; i++;
+      }
+      dbxStatus("Uploading " + i + " / " + list.length + " files…");
+      var r = await fetch("/api/dropbox/upload-folder", {method: "POST", body: fd});
+      var d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || ("HTTP " + r.status));
+      saved += d.saved; folder = d.folder;
+      sent += bytes; dbxProgress(sent / total);
+    }
+    dbxStatus("Saved " + saved + " file(s) to Mac ✓", "ok");
+    if (folder) document.getElementById("dbx-path").textContent = folder;
+  } catch (err) {
+    dbxStatus("Upload failed: " + err.message, "err");
+  } finally {
+    dbxProgress(null);
+  }
+}
+
+// ── plain files (unchanged behaviour) ──
 async function dbxUpload(files) {
   var st = document.getElementById("dbx-status");
   st.textContent = "Uploading " + files.length + " file(s)…"; st.className = "";
@@ -2566,6 +3127,11 @@ async function dbxUpload(files) {
     if (d.errors && d.errors.length) { st.textContent = "Error: " + d.errors[0].error; st.className = "err"; }
   } catch(e) { st.textContent = "Upload failed"; st.className = "err"; }
 }
+function dbxFiles(e) {
+  var files = Array.from(e.target.files);
+  if (files.length) dbxUpload(files);
+  e.target.value = "";
+}
 async function dbxLoad() {
   // Upload-only mode: no file list shown in UI
   // Files are saved to local-llm-dropbox/ — manage via Finder
@@ -2576,6 +3142,89 @@ async function dbxDel(name) {
   if (!confirm("Delete " + name + "?")) return;
   await fetch("/api/dropbox/files/" + encodeURIComponent(name), {method: "DELETE"});
   dbxLoad();
+}
+
+// ── living repo list: lock, sync, overview, delete ──
+async function lrLoad() {
+  var el = document.getElementById("lr-list");
+  if (!el) return;
+  var r;
+  try { r = await api("/api/repos"); } catch (e) { return; }
+  var repos = r.repos || [];
+  S.lrRepos = {};
+  repos.forEach(function(x) { S.lrRepos[x.slug] = x; });
+  if (!repos.length) {
+    el.innerHTML = '<div class="lr-empty">None yet. Drop your work repo folder above and choose ' +
+                   '<b>Living repo</b>. Next week drop it again — only the changes are added.</div>';
+    return;
+  }
+  el.innerHTML = repos.map(function(x) {
+    var s = x.slug;
+    return '<div class="lr-item"><div class="lr-top">' +
+      '<span class="lr-lock" title="' + (x.locked ? 'Locked — click to unlock' : 'Unlocked — click to lock') +
+        '" onclick="lrLockToggle(\'' + s + '\')">' + (x.locked ? '&#128274;' : '&#128275;') + '</span>' +
+      '<span class="lr-name" onclick="lrOverview(\'' + s + '\')" title="Show what the app understood">' + esc(x.name) + '</span>' +
+      '<button class="lr-btn" onclick="lrSync(\'' + s + '\')" title="Pick the updated folder — only changes are applied">&#10227; Sync</button>' +
+      (x.locked ? '' : '<button class="lr-btn danger" onclick="lrDelete(\'' + s + '\')" title="Delete (moves to repo-trash)">&#128465;</button>') +
+      '</div><div class="lr-meta">' + x.files + ' files &middot; ' + x.envs + ' env &middot; ' + x.products + ' products' +
+      (x.removed ? ' &middot; ' + x.removed + ' flagged missing' : '') +
+      '<br/>synced ' + esc(fmtWhen(x.last_sync_at)) + ' (#' + x.sync_count + ')' +
+      (x.embedding_pending ? ' &middot; indexing ' + x.embedding_pending + ' sections' : '') + '</div>' +
+      '<div class="lr-ov" id="lr-ov-' + s + '"></div></div>';
+  }).join("");
+  if (r.dir) document.getElementById("dbx-path").textContent = r.dir;
+}
+function lrSync(slug) { var x = S.lrRepos[slug]; if (x) dbxPickFolder(x.name); }
+async function lrLockToggle(slug) {
+  var x = S.lrRepos[slug]; if (!x) return;
+  var r;
+  if (x.locked) {
+    var typed = prompt("Unlocking allows deleting “" + x.name + "”.\nType the repo name to unlock:");
+    if (typed === null) return;
+    r = await api("/api/repos/" + slug + "/lock", "POST", {locked: false, confirm: typed});
+  } else {
+    r = await api("/api/repos/" + slug + "/lock", "POST", {locked: true});
+  }
+  if (r.error) toast(r.error); else toast(x.locked ? "🔓 Unlocked" : "🔒 Locked");
+  lrLoad();
+}
+async function lrDelete(slug) {
+  var x = S.lrRepos[slug]; if (!x) return;
+  var typed = prompt("Delete living repo “" + x.name + "”?\nIts files are moved to repo-trash on the Mac (not erased).\n\nType the repo name to confirm:");
+  if (typed === null) return;
+  var r = await api("/api/repos/" + slug + "/delete", "POST", {confirm: typed});
+  if (r.error) { toast(r.error); return; }
+  toast("Moved to trash: " + r.moved_to);
+  lrLoad();
+}
+async function lrOverview(slug) {
+  var el = document.getElementById("lr-ov-" + slug);
+  if (!el) return;
+  if (el.classList.contains("open")) { el.classList.remove("open"); return; }
+  el.innerHTML = "Loading…"; el.classList.add("open");
+  var d = await api("/api/repos/" + slug + "/overview");
+  if (d.error) { el.textContent = d.error; return; }
+  el.innerHTML = d.envs.map(function(e) {
+    return '<div class="env">' + esc(e.env) + '</div>' + e.products.map(function(p) {
+      return '&bull; <b>' + esc(p.product) + '</b> &mdash; ' + p.items + ' item' + (p.items > 1 ? 's' : '') +
+        (p.versions.length ? ' &middot; v' + esc(p.versions.join(", ")) : '') +
+        '<br/>&nbsp;&nbsp;latest: ' + esc(p.latest.item) + ' (' + esc(p.latest.date) + ')';
+    }).join("<br/>");
+  }).join("") || "No files.";
+}
+// Accuracy check: what WOULD local mode pick for this question? (no AI call)
+async function lrAsk() {
+  var q = document.getElementById("lr-ask-in").value.trim();
+  var out = document.getElementById("lr-ask-out");
+  if (!q) return;
+  out.textContent = "Checking…";
+  var d = await api("/api/repos/ask?q=" + encodeURIComponent(q));
+  if (d.error) { out.textContent = d.error; return; }
+  out.innerHTML = (d.found
+      ? '&#9733; <b>' + esc(d.selected.item) + '</b><br/>'
+      : '<b>Nothing selected</b> — would say it can\'t find it.<br/>') +
+    '<span style="color:var(--text3)">understood: ' + esc(d.understood) + '</span>' +
+    (d.sources.length ? '<br/>files: ' + d.sources.map(function(s) { return esc(s.path) + ' (' + s.date + ')'; }).join(", ") : '');
 }
 
 // ── API HELPER ────────────────────────────────────────────────────────────
