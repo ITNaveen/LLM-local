@@ -1,0 +1,11 @@
+data/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+music/**/*.mp3
+music/**/*.wav
+music/**/*.m4a
+music/**/*.ogg
+music/**/*.flac
+music/**/*.aac

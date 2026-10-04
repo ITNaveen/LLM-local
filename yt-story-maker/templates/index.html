@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StoryMaker</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff5a36'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">▶</span> StoryMaker <small>your automatic Hindi video editor</small></div>
+  <div class="pills" id="pills"></div>
+  <button class="ghost" id="open-settings">⚙ Settings</button>
+</header>
+
+<main class="layout">
+  <section class="col-left">
+    <form class="card" id="new-form">
+      <h2>New video</h2>
+      <label>Topic <span class="hint">the big keyword</span>
+        <input name="topic" required maxlength="200" placeholder="e.g. Virat Kohli West Indies tour 2026">
+      </label>
+      <label>Story description <span class="hint">what it should show, the story you want</span>
+        <textarea name="description" rows="5" maxlength="3000" placeholder="e.g. Kohli comes under pressure after two low scores, the media doubts him, then he scores a match-winning century in the final Test. Show his celebration, the crowd and the press conference."></textarea>
+      </label>
+
+      <label>Length: <b id="minutes-out">10</b> minutes
+        <input type="range" name="minutes" min="8" max="15" step="1" value="10">
+      </label>
+
+      <div class="field">
+        <span class="label">Theme</span>
+        <div class="chips" data-name="theme">
+          <button type="button" data-value="auto" class="on">Auto</button>
+          <button type="button" data-value="epic">Epic tribute</button>
+          <button type="button" data-value="emotional">Emotional</button>
+          <button type="button" data-value="documentary">Documentary</button>
+          <button type="button" data-value="thriller">Thriller</button>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <span class="label">Hindi narration</span>
+          <div class="chips" data-name="narration">
+            <button type="button" data-value="none">None</button>
+            <button type="button" data-value="light" class="on">Light</button>
+            <button type="button" data-value="medium">More</button>
+          </div>
+        </div>
+        <div class="field">
+          <span class="label">Voice</span>
+          <div class="chips" data-name="voice">
+            <button type="button" data-value="male" class="on">Male</button>
+            <button type="button" data-value="female">Female</button>
+          </div>
+        </div>
+      </div>
+      <div class="row2">
+        <label>Editing style <select name="style" id="style-select"></select></label>
+        <label>Quality
+          <select name="resolution"><option value="1080p">1080p (YouTube)</option><option value="720p">720p (faster)</option></select>
+        </label>
+      </div>
+      <label class="toggle"><input type="checkbox" name="review" checked> Let me review the script before rendering</label>
+      <label class="toggle"><input type="checkbox" name="demo"> Demo mode: test with synthetic clips (no YouTube)</label>
+      <button class="primary" type="submit">🎬 Make my video</button>
+      <p class="error" id="form-error"></p>
+    </form>
+
+    <div class="card">
+      <h2>Learn an editing style</h2>
+      <p class="muted">Paste a video whose editing you love. StoryMaker measures its rhythm (shot lengths per act, pacing, how much dialogue) and copies the <i>style</i>, never the footage.</p>
+      <form id="style-form" class="inline">
+        <input name="url" placeholder="YouTube link or /path/to/video.mp4" required>
+        <input name="name" placeholder="Style name" required maxlength="40">
+        <button class="secondary" type="submit">Learn</button>
+      </form>
+      <div id="styles"></div>
+    </div>
+  </section>
+
+  <section class="col-right">
+    <div class="card">
+      <h2>Your videos</h2>
+      <div id="jobs" class="jobs"><p class="muted">No videos yet. Start with a topic on the left.</p></div>
+    </div>
+    <div class="card" id="detail" hidden></div>
+  </section>
+</main>
+
+<dialog id="settings">
+  <form method="dialog" id="settings-form">
+    <h2>Settings</h2>
+    <h3>Local AI (Ollama)</h3>
+    <label>Ollama URL <input name="ollama_url"></label>
+    <label>Story model <select name="llm_model" id="model-select"></select></label>
+    <label class="toggle"><input type="checkbox" name="llm_think"> Thinking mode (smarter stories, much slower)</label>
+    <label>Embedding models, in order <input name="embed_models"></label>
+    <h3>Voice</h3>
+    <label>Engine
+      <select name="tts_engine">
+        <option value="auto">Auto (Edge → Piper → Mac voice)</option>
+        <option value="edge">Microsoft Edge neural (free, online)</option>
+        <option value="piper">Piper (free, offline)</option>
+        <option value="say">macOS voice (offline)</option>
+      </select></label>
+    <div class="row2">
+      <label>Speed <input name="edge_rate"></label>
+      <label>Pitch <input name="edge_pitch"></label>
+    </div>
+    <label>Piper Hindi voice (.onnx path) <input name="piper_model"></label>
+    <h3>Footage &amp; music</h3>
+    <label>Music folder <input name="music_dir"></label>
+    <label>Videos to look at <input name="max_candidates" type="number" min="50" max="1000"></label>
+    <label>Videos to study closely <input name="shortlist_size" type="number" min="6" max="60"></label>
+    <label>Use YouTube cookies from browser <span class="hint">only if YouTube asks to sign in</span>
+      <select name="cookies_from_browser"><option value="">Off</option><option>chrome</option><option>safari</option><option>firefox</option><option>brave</option><option>edge</option></select></label>
+    <h3>Render</h3>
+    <label class="toggle"><input type="checkbox" name="burn_subtitles"> Burn Hindi subtitles into the video</label>
+    <label class="toggle"><input type="checkbox" name="title_card"> Title card after the opening</label>
+    <label>Port <input name="port" type="number"></label>
+    <div class="actions">
+      <button value="cancel" class="ghost">Close</button>
+      <button id="save-settings" value="default" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

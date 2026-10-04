@@ -1,0 +1,4 @@
+flask>=3.0
+yt-dlp[default]>=2025.10.22
+edge-tts>=7.0
+numpy>=1.26
