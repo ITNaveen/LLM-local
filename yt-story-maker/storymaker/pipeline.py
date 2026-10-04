@@ -131,20 +131,21 @@ def run_job(job, settings, source=None, llm=None):
         style = get_style(req.get("style") or "cinematic")
 
         # 1. research
-        share, _ = stage("research")
+        share, sub = stage("research")
         res = read_json(job.path("research.json"))
         if not res:
             log(f"Topic: {topic}")
-            res = research.research(source, llm, topic, desc, settings, log)
+            res = research.research(source, llm, topic, desc, settings, log, progress=sub)
             write_json(job.path("research.json"), res)
         finish(share)
 
         # 2. moments
-        share, _ = stage("moments")
+        share, sub = stage("moments")
         mom = read_json(job.path("moments.json"))
         if not mom:
             log("Reading transcripts and 'most replayed' graphs...")
-            mom = moments_mod.gather(source, res["shortlist"], log)
+            mom = moments_mod.gather(source, res["shortlist"], log, progress=sub,
+                                     workers=int(settings.get("search_workers", 4)))
             write_json(job.path("moments.json"), mom)
             log(f"Found {len(mom['moments'])} candidate moments in {len(mom['videos'])} videos.")
         finish(share)

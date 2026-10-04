@@ -39,11 +39,18 @@ $("#new-form").addEventListener("submit", async (e) => {
   };
   if (body.demo) body.minutes = 1.5;
   $("#form-error").textContent = "";
+  const btn = $("button[type=submit]", f);
+  btn.disabled = true;
+  btn.textContent = "Starting…";
   try {
     const { id } = await api("/api/jobs", { method: "POST", body: JSON.stringify(body) });
+    btn.textContent = "✓ Started – progress is on the right";
     select(id);
     refreshJobs();
-  } catch (err) { $("#form-error").textContent = err.message; }
+  } catch (err) {
+    $("#form-error").textContent = err.message;
+  }
+  setTimeout(() => { btn.disabled = false; btn.textContent = "🎬 Make my video"; }, 4000);
 });
 
 // ---------------------------------------------------------------- status + settings
@@ -175,6 +182,12 @@ async function refreshDetail() {
   if (["failed", "cancelled"].includes(st.status)) html += `<button class="secondary small" data-act="retry">Resume</button> `;
   if (st.status !== "running") html += ` <button class="ghost small" data-act="delete">Delete</button>`;
   html += `</div></div><div class="steps">${steps}</div>`;
+  if (["running", "queued"].includes(st.status)) {
+    const last = (st.log || []).filter((l) => !l.startsWith("Traceback")).slice(-1)[0] || "Waiting to start…";
+    const mins = Math.max(0, Math.round((Date.now() / 1000 - st.created) / 60));
+    html += `<div class="now"><span class="spinner"></span><div><b>Now:</b> ${esc(last.replace(/^\d\d:\d\d:\d\d\s+/, ""))}
+      <div class="muted">${Math.round((st.progress || 0) * 100)}% · running ${mins} min · you can close this tab, it keeps going</div></div></div>`;
+  }
   if (st.status === "failed") html += `<div class="banner bad"><b>Stopped:</b> ${esc(st.error)}<br>Fix the cause and press <b>Resume</b> – finished steps are kept.</div>`;
   if (st.status === "awaiting_review") html += `<div class="banner">Your story is ready. Read the Hindi narration below, change any line you like, then press <b>Render video</b>.</div>`;
 

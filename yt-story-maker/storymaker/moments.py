@@ -128,20 +128,37 @@ def build_moments(video, per_video=45):
     return out[:per_video]
 
 
-def gather(source, shortlist, log):
+def gather(source, shortlist, log, progress=None, workers=4):
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def one(cand):
+        t0 = time.time()
+        return cand, source.details(cand["id"]), time.time() - t0
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = [pool.submit(one, c) for c in shortlist]
+        for n, fut in enumerate(as_completed(futures), 1):
+            if progress:
+                progress(n / len(shortlist))
+            try:
+                cand, d, took = fut.result()
+            except Exception as e:  # noqa: BLE001 - skip unavailable / age-restricted videos
+                log(f"  [{n}/{len(shortlist)}] skipped a video: {str(e)[:120]}")
+                continue
+            d["score"] = cand.get("score", 0.5)
+            ms = build_moments(d)
+            results[cand["id"]] = (d, ms)
+            log(f"  [{n}/{len(shortlist)}] {d['title'][:60]} - {len(d.get('captions') or [])} "
+                f"caption lines, replay graph {'yes' if d.get('heatmap') else 'no'}, "
+                f"{len(ms)} moments ({took:.0f}s)")
     videos, moments = [], []
-    for i, cand in enumerate(shortlist, 1):
-        try:
-            d = source.details(cand["id"])
-        except Exception as e:  # noqa: BLE001 - skip unavailable / age-restricted videos
-            log(f"  [{i}/{len(shortlist)}] skipped {cand['id']}: {str(e)[:120]}")
-            continue
-        d["score"] = cand.get("score", 0.5)
-        ms = build_moments(d)
-        videos.append({k: v for k, v in d.items() if k not in ("captions", "heatmap")})
-        moments.extend(ms)
-        log(f"  [{i}/{len(shortlist)}] {d['title'][:60]} - {len(d.get('captions') or [])} "
-            f"caption lines, replay graph {'yes' if d.get('heatmap') else 'no'}, {len(ms)} moments")
+    for cand in shortlist:  # keep ranking order, deterministic output
+        if cand["id"] in results:
+            d, ms = results[cand["id"]]
+            videos.append({k: v for k, v in d.items() if k not in ("captions", "heatmap")})
+            moments.extend(ms)
     if not moments:
         raise RuntimeError("Could not read any of the shortlisted videos.")
     return {"videos": videos, "moments": moments}

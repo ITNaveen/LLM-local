@@ -101,3 +101,11 @@ dialog::backdrop { background: rgba(0,0,0,.6); }
 .banner { background: rgba(122,162,255,.12); border: 1px solid rgba(122,162,255,.35); padding: 10px 12px;
   border-radius: 10px; margin: 10px 0; font-size: 14px; }
 .banner.bad { background: rgba(255,77,109,.1); border-color: rgba(255,77,109,.4); }
+
+.now { display: flex; gap: 12px; align-items: flex-start; background: var(--panel2); border-radius: 10px;
+  padding: 10px 12px; margin: 0 0 12px; font-size: 14px; }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line);
+  border-top-color: var(--accent); animation: spin 0.9s linear infinite; flex: none; margin-top: 2px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+button:disabled { opacity: .7; cursor: default; }

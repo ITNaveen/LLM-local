@@ -103,3 +103,22 @@ def test_research_with_llm_and_diversity(settings, fake_llm):
         per_channel[c["channel"]] = per_channel.get(c["channel"], 0) + 1
     assert max(per_channel.values()) <= 3
     assert "virat kohli century" in res["plan"]["queries"]
+
+
+def test_research_runs_searches_in_parallel_with_time_limit(settings, fake_llm):
+    import time
+
+    class SlowYouTube(FixtureSource):
+        def search(self, query, n):
+            time.sleep(30 if "press conference" in query else 1.0)   # one query hangs
+            return super().search(query, n)
+
+    settings.update(search_workers=4, research_minutes=0.08)   # ~5 s budget
+    logs = []
+    t0 = time.time()
+    res = research.research(SlowYouTube(settings), fake_llm, "Virat Kohli", "century",
+                            settings, logs.append)
+    took = time.time() - t0
+    assert took < 8, took                      # did not wait for the hanging query
+    assert res["total_candidates"] == 12      # but used everything that came back
+    assert any("time limit" in line for line in logs)

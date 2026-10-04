@@ -112,7 +112,9 @@ class YouTubeSource:
 
     def _opts(self, **extra):
         opts = {"quiet": True, "no_warnings": True, "noprogress": True,
-                "socket_timeout": 30, "retries": 3, "ignoreerrors": False}
+                "socket_timeout": 20, "retries": 3, "ignoreerrors": False}
+        if self.settings.get("force_ipv4", True):
+            opts["source_address"] = "0.0.0.0"   # IPv6 to YouTube is often very slow at home
         browser = (self.settings.get("cookies_from_browser") or "").strip()
         if browser:
             opts["cookiesfrombrowser"] = (browser,)

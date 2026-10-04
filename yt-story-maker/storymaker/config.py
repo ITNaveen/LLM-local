@@ -28,6 +28,9 @@ DEFAULTS = {
     "min_video_seconds": 45,      # skip Shorts
     "max_video_seconds": 3 * 3600,
     "cookies_from_browser": "",   # e.g. "chrome" or "safari" if YouTube asks you to sign in
+    "force_ipv4": True,           # fixes very slow YouTube on many home networks
+    "search_workers": 4,          # searches / video reads running at the same time
+    "research_minutes": 6,        # stop searching after this long and go with what we have
     # Voice
     "tts_engine": "auto",         # auto | edge | piper | say | silent
     "edge_voice": "hi-IN-MadhurNeural",

@@ -3,6 +3,9 @@
 
 import math
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 from .llm import LLMError
 from .util import keywords, tokens
@@ -109,25 +112,49 @@ def score_candidate(c, plan):
     return round((0.65 * relevance + 0.35 * popularity) * shape * quality, 4)
 
 
-def research(source, llm, topic, description, settings, log):
+def research(source, llm, topic, description, settings, log, progress=None):
     plan = make_queries(llm, topic, description, log)
-    log(f"Searching YouTube with {len(plan['queries'])} queries...")
+    queries = plan["queries"]
+    workers = max(1, int(settings.get("search_workers", 4)))
+    budget = float(settings.get("research_minutes", 6)) * 60
+    log(f"Searching YouTube with {len(queries)} queries ({workers} at a time)...")
     candidates = {}
     limit = settings["max_candidates"]
-    for q in plan["queries"]:
-        if len(candidates) >= limit:
-            break
-        try:
-            results = source.search(q, settings["results_per_query"])
-        except Exception as e:  # noqa: BLE001 - one failed query should not stop research
-            log(f"  search failed for '{q}': {e}")
-            continue
-        new = 0
-        for r in results:
-            if r["id"] not in candidates:
-                candidates[r["id"]] = r
-                new += 1
-        log(f"  '{q}': {len(results)} results, {new} new (total {len(candidates)})")
+    started = time.time()
+
+    def one(q):
+        t0 = time.time()
+        return q, source.search(q, settings["results_per_query"]), time.time() - t0
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures = [pool.submit(one, q) for q in queries]
+    done_count = 0
+    try:
+        for fut in as_completed(futures, timeout=budget):
+            done_count += 1
+            if progress:
+                progress(done_count / len(queries))
+            try:
+                q, results, took = fut.result()
+            except Exception as e:  # noqa: BLE001 - one failed query should not stop research
+                log(f"  search failed: {str(e)[:200]}")
+                continue
+            new = 0
+            for r in results:
+                if r["id"] not in candidates:
+                    candidates[r["id"]] = r
+                    new += 1
+            log(f"  '{q}': {len(results)} results, {new} new (total {len(candidates)}) in {took:.0f}s")
+            if took > 60:
+                log("  (YouTube is answering slowly - see 'force IPv4' in Settings)")
+            if len(candidates) >= limit:
+                break
+    except FuturesTimeout:
+        log(f"  Search time limit reached ({budget / 60:.0f} min) - continuing with "
+            f"{len(candidates)} videos.")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    log(f"Search finished in {time.time() - started:.0f}s.")
     if not candidates:
         raise RuntimeError("YouTube search returned nothing. Check your internet connection, "
                            "update yt-dlp, or set 'cookies from browser' in Settings.")
