@@ -2054,149 +2054,246 @@ def chunk_text(text: str, chunk_chars: int = 4000, overlap_chars: int = 400) -> 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CHAT TXT EXPORT
+#  CHAT FILES ON DISK — a readable "book" of every conversation
 # ─────────────────────────────────────────────────────────────────────────────
-def export_chat_txt(chat_id: str):
-    """Write full conversation to chat.txt inside the chat folder."""
-    with get_db() as conn:
-        chat = conn.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
-        if not chat:
+# The database (chats.db) is the source of truth. These folders are a
+# human-readable copy of it, rebuilt after every reply and for every chat at
+# startup, so they can always be browsed in Finder:
+#
+#   local-llm-db/chats/
+#     INDEX - all chats.txt                     ← table of contents, newest first
+#     Unfiled/
+#       2026-10-05 · what's the latest on grafana in dev__7b126e90/
+#         chat.txt                              ← the conversation, word for word
+#     <UI folder name>/                         ← same names as the folders in the UI
+#       _Trash_/                                ← chats deleted in the UI (restorable)
+#     _Orphan/                                  ← "Delete forever" chats, kept for reference
+#
+# A chat folder is named  <date started> · <title exactly as in the UI>__<id>.
+# The "__7b126e90" tail is the chat's id: it is the link back to the database and
+# keeps two chats with the same title apart. Only characters a folder name can't
+# hold ( / and : ) are replaced.
+from datetime import timezone as _tz
+import shutil as _shutil
+import threading as _threading
+
+CHAT_INDEX_NAME = "INDEX - all chats.txt"
+_CHAT_DIR_RE = re.compile(r"__[0-9a-f]{8}$")
+_CHAT_FS_LOCK = _threading.RLock()       # replies arrive on several threads
+
+
+def _readable_name(text, maxlen: int = 90, fallback: str = "Chat") -> str:
+    s = re.sub(r"[\x00-\x1f/\\:]+", " ", str(text or ""))
+    s = s.replace("__", "_")                       # "__" is reserved for the id tail
+    s = re.sub(r"\s+", " ", s).strip().lstrip(".").strip()
+    return s[:maxlen].rstrip(" .") or fallback
+
+
+def _local_dt(iso):
+    """Stored timestamps are UTC → the Mac's local time for display."""
+    try:
+        return datetime.fromisoformat(str(iso)[:19]).replace(tzinfo=_tz.utc).astimezone()
+    except Exception:
+        return datetime.now().astimezone()
+
+
+def _chat_dirname(chat: dict) -> str:
+    return (f"{_local_dt(chat['created_at']):%Y-%m-%d} · "
+            f"{_readable_name(chat.get('title') or 'New Chat')}__{chat['id'][:8]}")
+
+
+def _walk_chat_dirs():
+    """Every chat folder under chats/, chats/<folder>/ and chats/<folder>/_Trash_/
+    (never inside _Orphan/, which holds records of chats deleted forever)."""
+    def scan(d, depth):
+        try:
+            kids = list(d.iterdir())
+        except OSError:
             return
-        msgs = conn.execute(
-            "SELECT role, content, created_at, tokens_in, tokens_out FROM messages "
-            "WHERE chat_id=? ORDER BY created_at", (chat_id,)
-        ).fetchall()
+        for p in kids:
+            if not p.is_dir() or p.name == "_Orphan":
+                continue
+            if _CHAT_DIR_RE.search(p.name):
+                yield p
+            elif depth < 2:
+                yield from scan(p, depth + 1)
+    yield from scan(CHATS_DIR, 0)
 
-    # ── FOLDER MIRROR (June 12): disk = 1:1 replica of UI folders ────────
-    # CHATS_DIR/<UI-folder>/<chat-dir>/chat.txt ; unfiled -> "Unfiled".
-    # Chat dirs (txt + uploads) MOVE when the chat changes folder in the UI.
-    # Old flat layout migrates automatically at boot via backfill_all_chat_txt.
-    folder_name = "Unfiled"
-    _fid = dict(chat).get("folder_id")
-    if _fid:
-        with get_db() as _c:
-            _fr = _c.execute("SELECT name FROM folders WHERE id=?", (_fid,)).fetchone()
-        if _fr:
-            folder_name = re.sub(r'[^\w\s\-]', '', _fr["name"])[:40].strip().replace(' ', '_') or "Unfiled"
-    desired_parent = CHATS_DIR / folder_name
-    desired_parent.mkdir(parents=True, exist_ok=True)
 
-    # Find existing chat dir: old flat root OR inside any folder dir (2 levels)
-    chat_folder = None
+def _chat_dirs_on_disk(chat_id: str) -> list:
     suffix = f"__{chat_id[:8]}"
-    _cands = [p for p in CHATS_DIR.iterdir() if p.is_dir()]
-    for _d in list(_cands):
-        if not _d.name.endswith(suffix):
-            _cands.extend(p for p in _d.iterdir() if p.is_dir())
-    for _d in _cands:
-        if _d.name.endswith(suffix):
-            chat_folder = _d
-            break
+    return [d for d in _walk_chat_dirs() if d.name.endswith(suffix)]
 
-    # Move it under the correct UI-folder dir if it lives elsewhere
-    if chat_folder is not None and chat_folder.parent != desired_parent:
-        import shutil as _sh
-        _old_parent = chat_folder.parent
-        _target = desired_parent / chat_folder.name
-        _sh.move(str(chat_folder), str(_target))
-        chat_folder = _target
-        log.info("Folder mirror: %s -> %s/", chat_folder.name, folder_name)
-        if _old_parent != CHATS_DIR:
-            try:
-                _old_parent.rmdir()       # drop now-empty old folder dir
-            except OSError:
-                pass                      # still holds other chats
 
-    # Fallback: create the folder if it doesn't exist yet (shouldn't happen, but safe)
-    if not chat_folder:
-        from datetime import datetime as _dt_fb
-        date_prefix = _dt_fb.now().strftime("%Y-%m-%d")
-        safe_title  = re.sub(r'[^\w\s\-]', '', (dict(chat).get("title", "chat")))[:50].strip().replace(' ', '_') or "chat"
-        chat_folder = desired_parent / f"{date_prefix}__{safe_title}__{chat_id[:8]}"
-        chat_folder.mkdir(parents=True, exist_ok=True)
-        log.info("Created missing chat folder: %s", chat_folder.name)
+def _prune_empty(d: Path) -> None:
+    """Remove folders left empty by a move (a lone .DS_Store counts as empty),
+    walking up — but never chats/ itself."""
+    root = CHATS_DIR.resolve()
+    while d.exists() and d.resolve() != root and root in d.resolve().parents:
+        kids = list(d.iterdir())
+        if any(k.name != ".DS_Store" for k in kids):
+            return
+        for k in kids:
+            k.unlink()
+        d.rmdir()
+        d = d.parent
 
-    title    = dict(chat).get("title", "Chat")
-    model    = dict(chat).get("model", "")
-    created  = dict(chat).get("created_at", "")[:10]
-    updated  = dict(chat).get("updated_at", "")[:10]
-    tokens   = dict(chat).get("tokens_used", 0)
 
-    lines = []
-    lines.append("=" * 60)
-    lines.append(f"  {title}")
-    lines.append("=" * 60)
-    lines.append(f"  Model   : {model}")
-    lines.append(f"  Created : {created}")
-    lines.append(f"  Updated : {updated}")
-    lines.append(f"  Tokens  : {tokens}")
-    lines.append("=" * 60)
-    lines.append("")
+def _merge_dir_into(src: Path, dst: Path) -> None:
+    """Fold a stray duplicate chat folder into the real one. Nothing is
+    overwritten: a clashing name gets ' (from <old folder>)' appended. An old
+    chat.txt is dropped because chat.txt is rebuilt from the database."""
+    for item in list(src.iterdir()):
+        if item.name in ("chat.txt", ".DS_Store"):
+            item.unlink()
+            continue
+        target = dst / item.name
+        n = 1
+        while target.exists():
+            tag = f" (from {src.name[:40]})" + (f" {n}" if n > 1 else "")
+            target = dst / f"{item.stem}{tag}{item.suffix}"
+            n += 1
+        os.rename(str(item), str(target))
+    src.rmdir()
 
+
+def _model_label(model_id) -> str:
+    model_id = str(model_id or "")
+    if model_id.startswith("ollama:"):
+        return f"{model_id[7:]} (local)"
+    m = MODEL_MAP.get(model_id)
+    return m["name"] if m else model_id
+
+
+def _chat_book_text(chat: dict, msgs: list, folder_label: str) -> str:
+    """The conversation as plain text, exactly as written — nothing stripped,
+    so commands, YAML and code read the same as in the app."""
+    rule, thin = "═" * 72, "─" * 72
+    n_q = sum(1 for m in msgs if m["role"] == "user")
+    cost = sum(float(m.get("cost_usd") or 0) for m in msgs)
+    where = folder_label + ("   (deleted — in Trash, restore it from Settings)" if chat.get("deleted_at") else "")
+    out = [rule, f"  {chat.get('title') or 'New Chat'}", rule,
+           f"  Folder     : {where}",
+           f"  Started    : {_local_dt(chat['created_at']):%a %d %b %Y, %H:%M}",
+           f"  Last reply : {_local_dt(chat['updated_at']):%a %d %b %Y, %H:%M}",
+           f"  Messages   : {len(msgs)}  ({n_q} question{'s' if n_q != 1 else ''})",
+           f"  Cost       : ${cost:.4f}",
+           rule, ""]
     for m in msgs:
-        role       = dict(m)["role"].upper()
-        raw_content = dict(m)["content"]
-        ts         = dict(m)["created_at"][:16].replace("T", " ")
-        tin        = dict(m).get("tokens_in", 0)
-        tout       = dict(m).get("tokens_out", 0)
-
-        # Convert content to clean text — handles JSON-encoded list blocks
-        # (PDF base64, image base64, etc.) → readable placeholder text
-        if isinstance(raw_content, str) and raw_content.startswith("["):
-            try:
-                parsed = json.loads(raw_content)
-                if isinstance(parsed, list):
-                    raw_content = parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        content_text = _content_to_str(raw_content)
-
-        if role == "USER":
-            lines.append(f"┌─ YOU  [{ts}]")
-            lines.append(f"│  {content_text.replace(chr(10), chr(10) + '│  ')}")
-            lines.append("│")
+        when = f"{_local_dt(m['created_at']):%d %b %Y, %H:%M}"
+        text = _content_to_str(m["content"]).rstrip()
+        if m["role"] == "user":
+            head = f"▶ YOU  ·  {when}"
         else:
-            token_info = f"  [{tin} in · {tout} out]" if tin or tout else ""
-            lines.append(f"└─ JARVIS  [{ts}]{token_info}")
-            # Strip markdown for readability
-            import re as _re
-            clean = _re.sub(r'```.*?```', lambda m: m.group().replace('```', '---'), content_text, flags=_re.DOTALL)
-            clean = _re.sub(r'[*#`]', '', clean)
-            lines.append(f"   {clean.replace(chr(10), chr(10) + '   ')}")
-            lines.append("")
+            local = str(m.get("model") or "").startswith("ollama:")
+            price = "$0.00" if local else f"${float(m.get('cost_usd') or 0):.4f}"
+            head = f"◀ JARVIS  ·  {when}  ·  {_model_label(m.get('model'))}  ·  {price}"
+        out += [head, thin, text, "", ""]
+    out += [rule, f"  End of conversation · {len(msgs)} messages", rule, ""]
+    return "\n".join(out)
 
-    lines.append("=" * 60)
-    lines.append(f"  End of conversation  |  {len(msgs)} messages")
-    lines.append("=" * 60)
 
-    txt_path = chat_folder / "chat.txt"
-    txt_path.write_text("\n".join(lines), encoding="utf-8")
-    log.info("Exported chat.txt: %s", txt_path)
+def _write_chat_index() -> None:
+    """chats/INDEX - all chats.txt — every chat, grouped like the sidebar."""
+    with get_db() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT c.id, c.title, c.created_at, c.updated_at, c.deleted_at, c.model, "
+            "f.name AS folder, (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS n "
+            "FROM chats c LEFT JOIN folders f ON f.id = c.folder_id ORDER BY c.updated_at DESC")]
+    groups = {}
+    for r in rows:
+        key = "TRASH  (deleted in the app — restore from Settings → Trash)" if r["deleted_at"] \
+            else _readable_name(r["folder"] or "Unfiled", 60, "Unfiled")
+        groups.setdefault(key, []).append(r)
+    order = sorted((k for k in groups if not k.startswith("TRASH")), key=lambda k: (k != "Unfiled", k.lower()))
+    order += [k for k in groups if k.startswith("TRASH")]
+    out = ["ALL CHATS — table of contents",
+           f"Updated {datetime.now():%a %d %b %Y, %H:%M} · {len(rows)} chats",
+           "",
+           "Each line is one folder below (same date and title). Open it, then chat.txt —",
+           "the whole conversation, word for word. chats.db stays the master copy.",
+           ""]
+    for k in order:
+        out += ["", f"{k.upper() if not k.startswith('TRASH') else k}  ({len(groups[k])})", "─" * 72]
+        for r in groups[k]:
+            mode = "local" if str(r["model"] or "").startswith("ollama:") else "cloud"
+            title = _readable_name(r["title"] or "New Chat", 64)
+            out.append(f"  {_local_dt(r['created_at']):%Y-%m-%d}  {title:<64}  {r['n']:>3} msgs  {mode}")
+    try:
+        (CHATS_DIR / CHAT_INDEX_NAME).write_text("\n".join(out) + "\n", encoding="utf-8")
+    except OSError as e:
+        log.warning("chat index write failed: %s", e)
+
+
+def export_chat_txt(chat_id: str, write_index: bool = True):
+    """Put the chat's folder where it belongs (its UI folder, or that folder's
+    _Trash_ if deleted), named after its current title, and (re)write chat.txt.
+    Old-style or duplicate folders of the same chat are moved/merged in — no
+    file is ever deleted except an old chat.txt, which is rebuilt right here."""
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+        if not row:
+            return
+        chat = dict(row)
+        msgs = [dict(r) for r in conn.execute(
+            "SELECT role, content, created_at, model, cost_usd FROM messages "
+            "WHERE chat_id=? ORDER BY created_at, rowid", (chat_id,))]
+        folder_label = "Unfiled"
+        if chat.get("folder_id"):
+            fr = conn.execute("SELECT name FROM folders WHERE id=?", (chat["folder_id"],)).fetchone()
+            if fr:
+                folder_label = fr["name"]
+
+    parent = CHATS_DIR / _readable_name(folder_label, 60, "Unfiled")
+    if chat.get("deleted_at"):
+        parent = parent / "_Trash_"
+    target = parent / _chat_dirname(chat)
+
+    with _CHAT_FS_LOCK:
+        dirs = _chat_dirs_on_disk(chat_id)
+        primary = target if target in dirs else next(
+            (d for d in dirs if (d / "chat.txt").exists()), dirs[0] if dirs else None)
+        if primary is None:
+            target.mkdir(parents=True, exist_ok=True)
+        elif primary != target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            old_parent = primary.parent
+            os.rename(str(primary), str(target))      # rename, never copy-then-delete
+            log.info("Chat folder: %s/%s -> %s/%s", old_parent.name, primary.name,
+                     target.parent.name, target.name)
+            _prune_empty(old_parent)
+        for extra in dirs:
+            if extra != primary and extra.exists() and extra != target:
+                old_parent = extra.parent
+                _merge_dir_into(extra, target)
+                log.info("Chat folder: merged duplicate %s into %s", extra.name, target.name)
+                _prune_empty(old_parent)
+        (target / "chat.txt").write_text(_chat_book_text(chat, msgs, folder_label), encoding="utf-8")
+    if write_index:
+        _write_chat_index()
 
 
 def backfill_all_chat_txt() -> int:
-    """
-    Write/refresh chat.txt for every chat in the DB.
-    Called once on startup so existing chats always have a text file.
-    Returns count of files written.
-    """
+    """Startup: put every chat's folder in its right place with a fresh chat.txt
+    (this is also what reorganises folders made by older versions), then write
+    the index once. Returns how many chats were written."""
     count = 0
     try:
         with get_db() as conn:
             all_ids = [r[0] for r in conn.execute("SELECT id FROM chats").fetchall()]
         for cid in all_ids:
             try:
-                export_chat_txt(cid)
+                export_chat_txt(cid, write_index=False)
                 count += 1
             except Exception as exc:
                 log.warning("backfill chat.txt failed for %s: %s", cid[:8], exc)
+        _write_chat_index()
     except Exception as exc:
         log.warning("backfill_all_chat_txt error: %s", exc)
     return count
 
 
-# Run on startup — writes chat.txt for all existing chats immediately
+# Run on startup — every chat gets its readable folder + chat.txt
 _backfilled = backfill_all_chat_txt()
 log.info("Startup backfill: wrote chat.txt for %d chats", _backfilled)
 
@@ -2227,10 +2324,7 @@ def api_get_settings():
     qk   = s.get("groq_key",   "")
     ok   = s.get("openai_key", "")
     ck2  = s.get("api_key_2",  "")
-    gk   = s.get("gemini_key", "")
     return jsonify({
-        "has_gemini_key":    bool(gk),
-        "gemini_preview":    f"AIza…{gk[-4:]}"     if len(gk) > 8  else "",
         "has_claude_key":    bool(ck),
         "claude_preview":    f"sk-ant-…{ck[-6:]}"  if len(ck) > 10 else "",
         "has_backup_key":    bool(ck2),
@@ -2286,11 +2380,6 @@ def api_post_settings():
     if key := data.get("groq_key", "").strip():
         save_setting("groq_key", key)
 
-    if key := data.get("gemini_key", "").strip():
-        # No prefix check — Google issues AI Studio keys in varying formats.
-        # The real validation happens when the key is used against the API.
-        save_setting("gemini_key", key)
-
     if key := data.get("openai_key", "").strip():
         if not key.startswith("sk-"):
             return jsonify({"error": "OpenAI key must start with sk-"}), 400
@@ -2324,100 +2413,6 @@ def api_post_settings():
             save_setting("theme", theme)
 
     return jsonify({"ok": True})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  ROUTE — RESEARCH (free Gemini grounded web search)
-#
-#  Fully ISOLATED from the Claude chat path by design:
-#    • no DB writes, no chat/message rows, no history persistence
-#    • no cost tracking (free tier), does not touch spend counters
-#    • does not touch KB, memory, summarization, or the two-block cache
-#    • stateless: the browser sends the full turn list each call; server keeps nothing
-#  Purpose: a private "refined Perplexity" for PUBLIC lookups (versions, release
-#  notes, CVEs, upgrade guides). Naveen reads the answer, copies the useful lines
-#  into a real chat. Keeps web-search cost off the metered Claude path.
-# ─────────────────────────────────────────────────────────────────────────────
-@app.route("/api/research", methods=["POST"])
-def api_research():
-    data = request.json or {}
-    # turns: [{role:"user"|"model", text:"..."}], oldest first. Browser owns history.
-    turns = data.get("turns", [])
-    if not isinstance(turns, list) or not turns:
-        return jsonify({"error": "No question provided."}), 400
-
-    gkey = load_settings().get("gemini_key", "").strip()
-    if not gkey:
-        return jsonify({"error": "No Gemini key saved. Add it in Settings → Research key."}), 400
-
-    # Build Gemini 'contents' from the turn list. Only text, only two roles.
-    contents = []
-    for t in turns[-12:]:                       # cap history sent; research is short back-and-forth
-        role = "model" if t.get("role") == "model" else "user"
-        txt  = str(t.get("text", "")).strip()
-        if not txt:
-            continue
-        contents.append({"role": role, "parts": [{"text": txt[:8000]}]})
-    if not contents:
-        return jsonify({"error": "Empty question."}), 400
-
-    payload = json.dumps({
-        "contents": contents,
-        "tools":    [{"google_search": {}}],     # <- live Google grounding
-    }).encode()
-
-    # Auth via URL query param (?key=) — this is exactly how the working curl
-    # authenticated. Avoids any header-handling quirk. Short hard timeout so the
-    # route can NEVER hang: if the network blocks, we fail fast with a message.
-    url = ("https://generativelanguage.googleapis.com/v1beta/"
-           "models/gemini-2.5-flash:generateContent?key=" + gkey)
-    obj = None
-    try:
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            obj = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        try:
-            emsg = json.loads(e.read().decode("utf-8")).get("error", {}).get("message", str(e))
-        except Exception:
-            emsg = f"HTTP {e.code}"
-        if e.code == 429:
-            emsg = "Free daily research limit reached. Resets tomorrow (Google's quota)."
-        log.info(f"[research] HTTPError {e.code}: {emsg}")
-        return jsonify({"error": emsg}), 502
-    except Exception as e:
-        # Network/DNS/SSL/timeout — fail fast and loud, never hang
-        log.info(f"[research] request failed: {type(e).__name__}: {e}")
-        return jsonify({"error": f"Search request failed ({type(e).__name__}). "
-                                 f"Check the Mac can reach Google, then retry."}), 502
-
-    if obj is None:
-        return jsonify({"error": "No response from search service."}), 502
-
-    # Extract answer text + grounding sources (titles + redirect URLs)
-    answer = ""
-    sources = []
-    try:
-        cand = (obj.get("candidates") or [{}])[0]
-        for part in cand.get("content", {}).get("parts", []):
-            if "text" in part:
-                answer += part["text"]
-        gm = cand.get("groundingMetadata", {}) or {}
-        for ch in gm.get("groundingChunks", []) or []:
-            w = ch.get("web", {}) or {}
-            if w.get("uri"):
-                sources.append({"title": w.get("title", "source"), "uri": w["uri"]})
-    except Exception:
-        pass
-
-    if not answer:
-        answer = "(No answer returned. Try rephrasing, or the free quota may be exhausted.)"
-
-    return jsonify({"answer": answer, "sources": sources})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2529,11 +2524,8 @@ def api_chats_status():
     orphan_folders = []
 
     if CHATS_DIR.exists():
-        for d in CHATS_DIR.iterdir():
-            if not d.is_dir():
-                continue
-            parts    = d.name.split("__")
-            short_id = parts[-1] if parts else ""
+        for d in _walk_chat_dirs():          # chats/, chats/<folder>/, …/_Trash_/
+            short_id = d.name.rsplit("__", 1)[-1]
             if short_id in short_to_full:
                 chat_status[short_to_full[short_id]] = True
             else:
@@ -2574,19 +2566,16 @@ def api_create_chat():
             folder_id = None
     ts      = now_iso()
 
-    # Folder named by title for easy Finder browsing
-    from datetime import datetime as _dt
-    date_prefix = _dt.now().strftime("%Y-%m-%d")
-    safe_title  = re.sub(r'[^\w\s\-]', '', title)[:50].strip().replace(' ', '_') or "chat"
-    chat_folder = CHATS_DIR / f"{date_prefix}__{safe_title}__{chat_id[:8]}"
-    chat_folder.mkdir(parents=True, exist_ok=True)
-
     with get_db() as conn:
         conn.execute(
             "INSERT INTO chats (id, title, model, created_at, updated_at, folder_id) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (chat_id, title, model, ts, ts, folder_id)
         )
+    try:
+        export_chat_txt(chat_id)       # readable folder on disk, named like the UI
+    except Exception as e:
+        log.warning("chat folder create failed: %s", e)
 
     log.info("Created chat '%s' (%s)", title, chat_id[:8])
     return jsonify({"id": chat_id, "title": title, "model": model, "created_at": ts, "folder_id": folder_id})
@@ -2634,19 +2623,6 @@ def api_update_chat(chat_id: str):
         new_title = data["title"][:120]
         sets.append("title = ?")
         params.append(new_title)
-        # Rename folder to match new title
-        try:
-            safe = re.sub(r'[^\w\s\-]', '', new_title)[:60].strip() or chat_id[:8]
-            new_folder = CHATS_DIR / f"{safe}__{chat_id[:8]}"
-            # Find and rename existing folder
-            for d in CHATS_DIR.iterdir():
-                if d.is_dir() and d.name.endswith(f"__{chat_id[:8]}"):
-                    d.rename(new_folder)
-                    break
-            else:
-                new_folder.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            log.warning("Could not rename chat folder: %s", e)
 
     if "model" in data:
         sets.append("model = ?")
@@ -2659,6 +2635,11 @@ def api_update_chat(chat_id: str):
                 f"UPDATE chats SET {', '.join(sets)}, updated_at = ? WHERE id = ?",
                 params
             )
+        if "title" in data:
+            try:
+                export_chat_txt(chat_id)   # folder on disk follows the new title
+            except Exception as e:
+                log.warning("Could not rename chat folder: %s", e)
     return jsonify({"ok": True})
 
 
@@ -2681,36 +2662,18 @@ def _find_chat_dir(chat_id: str):
 
 
 def _move_chat_dir_to_trash(chat_id: str):
-    """On UI delete: move the chat's dir into <its-parent>/_Trash_/ so it stays
-    inside its original folder (Devops/_Trash_/...), visibly an orphan, never
-    floating at the chats/ root. Safe + idempotent."""
+    """On UI delete (deleted_at already set): export_chat_txt moves the chat's
+    folder into <its UI folder>/_Trash_/ — kept, readable, restorable."""
     try:
-        d = _find_chat_dir(chat_id)
-        if not d or d.parent.name == "_Trash_":
-            return
-        import shutil as _sh
-        trash = d.parent / "_Trash_"
-        trash.mkdir(exist_ok=True)
-        _sh.move(str(d), str(trash / d.name))
-        log.info("Trash: %s -> %s/_Trash_/", d.name, d.parent.name)
+        export_chat_txt(chat_id)
     except Exception as e:
         log.warning("trash move failed for %s: %s", chat_id[:8], e)
 
 
 def _restore_chat_dir_from_trash(chat_id: str):
-    """On restore: pull the chat's dir back out of _Trash_ into its parent."""
+    """On restore (deleted_at cleared): export_chat_txt moves it back out."""
     try:
-        d = _find_chat_dir(chat_id)
-        if not d or d.parent.name != "_Trash_":
-            return
-        import shutil as _sh
-        parent = d.parent.parent
-        _sh.move(str(d), str(parent / d.name))
-        try:
-            d.parent.rmdir()             # remove _Trash_ if now empty
-        except OSError:
-            pass
-        log.info("Restore: %s pulled out of _Trash_", d.name)
+        export_chat_txt(chat_id)
     except Exception as e:
         log.warning("trash restore failed for %s: %s", chat_id[:8], e)
 
@@ -2755,7 +2718,7 @@ def _orphan_chat_dir(chat_id: str, parent_hint: str = ""):
         # derive the parent (UI folder) name; if it was in _Trash_, go one up
         real_parent = d.parent.parent if d.parent.name == "_Trash_" else d.parent
         parent_name = parent_hint or (real_parent.name if real_parent != CHATS_DIR else "Unfiled")
-        parent_name = re.sub(r'[^\w\s\-]', '', parent_name)[:40].strip().replace(' ', '_') or "Unfiled"
+        parent_name = _readable_name(parent_name, 40, "Unfiled")
 
         orphan_root = CHATS_DIR / "_Orphan"
         orphan_root.mkdir(exist_ok=True)
@@ -2806,6 +2769,7 @@ def api_hard_delete_chat(chat_id: str):
         conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
     try:
         _orphan_chat_dir(chat_id, parent_hint=parent_hint)
+        _write_chat_index()
     except Exception as e:
         log.warning("orphan step failed (chat still deleted from DB): %s", e)
     log.info("Hard-deleted chat %s", chat_id[:8])
@@ -2836,17 +2800,7 @@ def _apply_auto_title(chat_id: str, text_input: str) -> None:
         )
     # Rename chat folder to reflect the actual title
     try:
-        from datetime import datetime as _dt2
-        date_prefix = _dt2.now().strftime("%Y-%m-%d")
-        safe = re.sub(r'[^\w\s\-]', '', new_title)[:50].strip().replace(' ', '_') or "chat"
-        new_folder = CHATS_DIR / f"{date_prefix}__{safe}__{chat_id[:8]}"
-        for d in CHATS_DIR.iterdir():
-            if d.is_dir() and d.name.endswith(f"__{chat_id[:8]}"):
-                if d != new_folder:
-                    d.rename(new_folder)
-                break
-        else:
-            new_folder.mkdir(parents=True, exist_ok=True)
+        export_chat_txt(chat_id)
     except Exception as e:
         log.warning("Could not rename folder on auto-title: %s", e)
 
@@ -4612,48 +4566,42 @@ def api_spend_today():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/chats/cleanup", methods=["GET"])
 def api_chat_cleanup_list():
-    """List active vs orphan chat folders."""
+    """List chat folders on disk and whether each still has a chat in the DB."""
     with get_db() as conn:
-        active_ids = {r[0] for r in conn.execute("SELECT id FROM chats").fetchall()}
-
-    active, orphans = [], []
-    for d in sorted(CHATS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if not d.is_dir(): continue
-        # Extract chat ID from folder name (last 8 chars before end or __)
-        parts = d.name.split("__")
-        cid_part = parts[-1] if parts else ""
-        # Find matching active chat
-        matched = next((cid for cid in active_ids if cid.startswith(cid_part) or cid_part in cid), None)
-        if matched:
-            active.append({"folder": d.name, "chat_id": matched, "active": True})
-        else:
-            active.append({"folder": d.name, "chat_id": cid_part, "active": False})
-
-    return jsonify({"folders": active, "chats_dir": str(CHATS_DIR)})
+        active_ids = {r[0][:8]: r[0] for r in conn.execute("SELECT id FROM chats").fetchall()}
+    folders = []
+    for d in _walk_chat_dirs():
+        short = d.name.rsplit("__", 1)[-1]
+        folders.append({"folder": str(d.relative_to(CHATS_DIR)), "chat_id": active_ids.get(short, short),
+                        "active": short in active_ids})
+    return jsonify({"folders": folders, "chats_dir": str(CHATS_DIR)})
 
 
 @app.route("/api/chats/cleanup/orphans", methods=["DELETE"])
 def api_chat_cleanup_delete():
-    """Delete all orphan chat folders (not linked to any active chat)."""
+    """Tidy chat folders whose chat no longer exists in the DB. They are MOVED
+    into chats/_Orphan/ (kept as a record), never deleted. Only real chat
+    folders (…__<id>) are touched — never Unfiled/ or your UI folders."""
     if request.remote_addr not in ("127.0.0.1", "::1"):
         return jsonify({"error": "local only"}), 403
-
     with get_db() as conn:
-        active_ids = {r[0] for r in conn.execute("SELECT id FROM chats").fetchall()}
-
-    deleted = []
-    import shutil as _shutil
-    for d in CHATS_DIR.iterdir():
-        if not d.is_dir(): continue
-        parts = d.name.split("__")
-        cid_part = parts[-1] if parts else ""
-        matched = any(cid.startswith(cid_part) or cid_part in cid for cid in active_ids)
-        if not matched:
-            _shutil.rmtree(str(d))
-            deleted.append(d.name)
-            log.info("Deleted orphan folder: %s", d.name)
-
-    return jsonify({"deleted": deleted, "count": len(deleted)})
+        active = {r[0][:8] for r in conn.execute("SELECT id FROM chats").fetchall()}
+    moved = []
+    orphan_root = CHATS_DIR / "_Orphan"
+    with _CHAT_FS_LOCK:
+        for d in list(_walk_chat_dirs()):
+            if d.name.rsplit("__", 1)[-1] in active:
+                continue
+            orphan_root.mkdir(exist_ok=True)
+            target = orphan_root / d.name
+            if target.exists():
+                target = orphan_root / f"{d.name} (moved {datetime.now():%Y%m%d-%H%M%S})"
+            old_parent = d.parent
+            os.rename(str(d), str(target))
+            _prune_empty(old_parent)
+            moved.append(d.name)
+            log.info("Moved orphan chat folder to _Orphan/: %s", d.name)
+    return jsonify({"moved_to_orphan": moved, "count": len(moved)})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

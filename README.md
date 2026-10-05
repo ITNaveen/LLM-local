@@ -36,6 +36,29 @@ then pick it in **Settings → Local AI**. `LocalLLM.command` starts Ollama for 
 | A file missing from a new drop is **kept** and flagged "removed" | stays in place |
 | Uploads wait in staging; the repo changes only when the whole sync commits | `~/Documents/local-llm-db/repo-staging/` |
 | Repos are **locked**. Delete = unlock + type the name + it's only *moved* | `~/Documents/local-llm-db/repo-trash/` |
+| Every repo file (and old version) carries macOS's **Locked** flag, so Finder won't bin it without an extra confirmation | Finder → Get Info → "Locked" |
+| Files keep their original **Date Modified** from your work laptop | Finder shows the real dates |
+| One readable entry per sync: what was added, changed, missing | `~/Documents/local-llm-db/repo-history/<repo>/SYNC-LOG.txt` |
+
+Press **✓** next to a repo to re-check every file against the fingerprint taken
+when it arrived — proof the Mac copy is exactly what you dropped.
+
+### Reading your chats in Finder
+`~/Documents/local-llm-db/chats/` mirrors the sidebar, readable like a book:
+```
+chats/
+  INDEX - all chats.txt                          ← every chat, grouped like the sidebar
+  Unfiled/
+    2026-10-05 · make me statefulset for Postgres__7b126e90/chat.txt
+  Kafka/                                          ← your UI folders, same names
+    2026-10-05 · Kafka mTLS KafkaUser cert rotation__5c94832f/chat.txt
+    _Trash_/                                      ← chats deleted in the app (restorable)
+  _Orphan/                                        ← "Delete forever" chats, kept as a record
+```
+`chat.txt` is the conversation word for word (commands and code included). The
+folder follows the chat when you rename it or move it between UI folders. The
+`__7b126e90` tail is the chat's id — the link back to `chats.db`, which stays the
+master copy. Older folders are reorganised automatically on the first start.
 
 ### How "latest" is decided (code, not AI guesswork)
 * The path is read as data: `dev/grafana/otel-collector-crash/notes.md`
