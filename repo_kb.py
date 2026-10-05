@@ -54,6 +54,7 @@ import os
 import queue
 import re
 import shutil
+import stat
 import threading
 import time
 import urllib.error
@@ -134,7 +135,9 @@ def init(app, *, get_db, now_iso, load_settings, save_setting, export_chat_txt,
         d.mkdir(parents=True, exist_ok=True)
     _init_schema()
     _recover_interrupted_syncs()
+    _cleanup_stale_staging()
     app.register_blueprint(bp)
+    threading.Thread(target=_lock_existing_files, daemon=True).start()
     _kick_embeddings()      # finish any embeddings left over from last run
     log.info("Living Repos ready: %s", REPOS_DIR)
 
@@ -257,6 +260,21 @@ def _init_schema():
         conn.executescript(_SCHEMA)
 
 
+def _cleanup_stale_staging():
+    """Uploads left in repo-staging/ by a sync that was cancelled, closed or
+    finished are just copies (the originals are on your laptop) — tidy them.
+    A preview left open for over a day is cancelled; nothing in the repo changes."""
+    cutoff = (datetime.utcnow() - timedelta(days=1)).isoformat(timespec="seconds")
+    with _db() as conn:
+        conn.execute("UPDATE lr_syncs SET status='cancelled', finished_at=? "
+                     "WHERE status='planned' AND created_at < ?", (_now(), cutoff))
+        live = {r[0] for r in conn.execute("SELECT id FROM lr_syncs WHERE status IN ('planned','committing')")}
+    for d in STAGING_DIR.iterdir():
+        if d.is_dir() and d.name not in live:
+            shutil.rmtree(d, ignore_errors=True)
+            log.info("Living Repos: removed leftover upload folder %s", d.name)
+
+
 def _recover_interrupted_syncs():
     """A sync that was mid-commit when the app stopped is marked failed. Each
     file move is individually safe (old version archived first), so dropping
@@ -323,6 +341,81 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: f.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
+
+
+# ── Finder-level lock (the macOS "Locked" flag) ──────────────────────────────
+# Every file in a living repo, and every archived old version, gets the same
+# "Locked" flag you can tick in Finder → Get Info. Finder then won't bin it
+# without an extra "it's locked — continue?" confirmation, and other apps can't
+# overwrite it. The app lifts the flag only for the instant it archives a file
+# during a sync. (On Linux these helpers do nothing.)
+_IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0)
+
+
+def _fs_lock(p: Path) -> None:
+    if not _IMMUTABLE or not hasattr(os, "chflags"):
+        return
+    try:
+        flags = getattr(os.lstat(p), "st_flags", 0)
+        if not flags & _IMMUTABLE:
+            os.chflags(p, flags | _IMMUTABLE)
+    except OSError as e:
+        log.debug("lock %s: %s", p, e)
+
+
+def _fs_unlock(p: Path) -> None:
+    if not _IMMUTABLE or not hasattr(os, "chflags"):
+        return
+    try:
+        flags = getattr(os.lstat(p), "st_flags", 0)
+        if flags & _IMMUTABLE:
+            os.chflags(p, flags & ~_IMMUTABLE)
+    except OSError as e:
+        log.debug("unlock %s: %s", p, e)
+
+
+def _fs_is_locked(p: Path) -> bool:
+    try:
+        return bool(_IMMUTABLE and getattr(os.lstat(p), "st_flags", 0) & _IMMUTABLE)
+    except OSError:
+        return False
+
+
+def _lock_existing_files() -> None:
+    """Startup: files synced before these protections existed get their laptop
+    'Date Modified' back (it was recorded at sync time), then every repo file and
+    archived version gets the Finder lock."""
+    try:
+        with _db() as conn:
+            rows = conn.execute("SELECT r.slug, f.path, f.mtime FROM lr_files f "
+                                "JOIN lr_repos r ON r.id = f.repo_id WHERE f.mtime != ''").fetchall()
+        for r in rows:
+            fp = REPOS_DIR / r["slug"] / r["path"]
+            if fp.is_file() and not _fs_is_locked(fp):
+                _set_original_mtime(fp, r["mtime"])
+    except Exception as e:
+        log.warning("Living Repos: restoring original dates failed: %s", e)
+    if not _IMMUTABLE or not hasattr(os, "chflags"):
+        return
+    n = 0
+    for root in (REPOS_DIR, HISTORY_DIR):
+        for dirpath, _, names in os.walk(root):
+            for name in names:
+                if name != "SYNC-LOG.txt":
+                    _fs_lock(Path(dirpath) / name)
+                    n += 1
+    log.info("Living Repos: %d files carry the Finder lock", n)
+
+
+def _set_original_mtime(p: Path, iso: str) -> None:
+    """Give the Mac copy the same 'Date Modified' it had on the work laptop."""
+    if not iso:
+        return
+    try:
+        ts = datetime.fromisoformat(iso).replace(tzinfo=timezone.utc).timestamp()
+        os.utime(p, (ts, ts))
+    except (ValueError, OSError) as e:
+        log.debug("mtime %s: %s", p, e)
 
 
 def _ext(rel: str) -> str:
@@ -1025,7 +1118,8 @@ def _commit_sync(plan_id: str):
         now = _now()
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         res = {"added": 0, "changed": 0, "unchanged": 0, "restored": 0, "removed": 0,
-               "same_content": 0, "errors": []}
+               "same_content": 0, "errors": [],
+               "paths": {"added": [], "changed": [], "removed": [], "restored": []}}
         try:
             with _db() as conn:
                 repo = _repo_by_slug(conn, plan["slug"])
@@ -1057,13 +1151,18 @@ def _commit_sync(plan_id: str):
                                      "WHERE repo_id=? AND path=? AND status='active'",
                                      (now, repo["id"], rel)).rowcount
                     res["removed"] += n
+                    if n:
+                        res["paths"]["removed"].append(rel)
                 conn.execute("UPDATE lr_repos SET updated_at=?, last_sync_at=?, sync_count=sync_count+1 "
                              "WHERE id=?", (now, now, repo["id"]))
+                sync_no = conn.execute("SELECT sync_count FROM lr_repos WHERE id=?",
+                                       (repo["id"],)).fetchone()[0]
                 conn.execute("UPDATE lr_syncs SET status='committed', finished_at=?, result=?, "
                              "progress_done=progress_total WHERE id=?",
                              (_now(), json.dumps(res), plan_id))
             log.info("Living Repos: synced '%s' — %s", repo["name"],
-                     {k: v for k, v in res.items() if k != "errors"})
+                     {k: v for k, v in res.items() if k not in ("errors", "paths")})
+            _write_sync_log(repo, sync_no, stamp, res)
         except Exception as e:
             res["error"] = str(e)
             log.exception("Living Repos: sync %s failed", plan_id)
@@ -1073,6 +1172,32 @@ def _commit_sync(plan_id: str):
         finally:
             shutil.rmtree(stage, ignore_errors=True)
     _kick_embeddings()
+
+
+def _write_sync_log(repo, sync_no: int, stamp: str, res: dict) -> None:
+    """repo-history/<repo>/SYNC-LOG.txt — one readable entry per sync, newest
+    last: what came in, what changed (and where the old version is), what was
+    missing from the drop (kept)."""
+    p = HISTORY_DIR / repo["slug"] / "SYNC-LOG.txt"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    paths = res["paths"]
+    out = ["═" * 72,
+           f"Sync #{sync_no} · {datetime.now():%a %d %b %Y, %H:%M} · {repo['name']}",
+           f"  + {res['added']} new   ~ {res['changed']} changed   - {res['removed']} missing from the drop (kept)"
+           f"   = {res['unchanged'] + res['same_content']} unchanged"
+           + (f"   ↺ {res['restored']} back again" if res["restored"] else "")]
+    if paths["changed"]:
+        out.append(f"  Old versions of changed files: repo-history/{repo['slug']}/{stamp}/")
+    out += [f"  + {x}" for x in paths["added"]]
+    out += [f"  ~ {x}" for x in paths["changed"]]
+    out += [f"  - {x}   (still in living-repos, flagged 'removed')" for x in paths["removed"]]
+    out += [f"  ↺ {x}" for x in paths["restored"]]
+    out += [f"  ! {e}" for e in res["errors"]]
+    try:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n\n")
+    except OSError as e:
+        log.warning("sync log write failed: %s", e)
 
 
 def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
@@ -1086,6 +1211,7 @@ def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
         if cls == "restored":
             conn.execute("UPDATE lr_files SET status='active', removed_at=NULL WHERE id=?", (old["id"],))
             res["restored"] += 1
+            res["paths"]["restored"].append(rel)
             return
 
         staged = stage / rel
@@ -1099,16 +1225,22 @@ def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
             return
 
         dest = _inside(mirror, rel)
-        if dest.exists() and old:
+        if dest.exists():
+            # Never overwrite: the current copy goes to repo-history first.
             archived = _inside(hist, rel)
             archived.parent.mkdir(parents=True, exist_ok=True)
+            _fs_unlock(dest)
             shutil.move(str(dest), str(archived))
-            conn.execute("INSERT INTO lr_file_versions (id, file_id, sha256, size, mtime, archived_path, "
-                         "replaced_at) VALUES (?,?,?,?,?,?,?)",
-                         (uuid.uuid4().hex, old["id"], old["sha256"], old["size"], old["mtime"],
-                          str(archived.relative_to(HISTORY_DIR)), now))
+            _fs_lock(archived)
+            if old:
+                conn.execute("INSERT INTO lr_file_versions (id, file_id, sha256, size, mtime, archived_path, "
+                             "replaced_at) VALUES (?,?,?,?,?,?,?)",
+                             (uuid.uuid4().hex, old["id"], old["sha256"], old["size"], old["mtime"],
+                              str(archived.relative_to(HISTORY_DIR)), now))
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staged), str(dest))
+        _set_original_mtime(dest, m.get("mtime") or "")
+        _fs_lock(dest)
 
         text, is_text = _read_text(dest, rel)
         fac = path_facets(rel)
@@ -1126,6 +1258,7 @@ def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
                 (sha, size, mtime, now, fac["env"], fac["product"], fac["item"], fac["version"],
                  fac["version_key"], title, hint, rec, int(is_text), fid))
             res["changed"] += 1
+            res["paths"]["changed"].append(rel)
         else:
             fid = uuid.uuid4().hex
             conn.execute(
@@ -1135,6 +1268,7 @@ def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
                 (fid, repo["id"], rel, sha, size, mtime, now, now, fac["env"], fac["product"],
                  fac["item"], fac["version"], fac["version_key"], title, hint, rec, int(is_text)))
             res["added"] += 1
+            res["paths"]["added"].append(rel)
         _index_file(conn, fid, repo["id"], rel, text, is_text)
 
 
@@ -1197,6 +1331,41 @@ def api_repo_overview(slug):
     return jsonify({"repo": repo["name"], "envs": envs})
 
 
+@bp.route("/api/repos/<slug>/verify", methods=["GET"])
+def api_repo_verify(slug):
+    """Re-check every file on disk against the fingerprint taken when it arrived.
+    Proves the Mac copy is exactly what you dropped, and that old versions and
+    'missing' files are all still there."""
+    with _db() as conn:
+        repo = _repo_by_slug(conn, _slug(slug))
+        if not repo:
+            return jsonify({"error": "no such repo"}), 404
+        files = conn.execute("SELECT path, sha256, status FROM lr_files WHERE repo_id=?",
+                             (repo["id"],)).fetchall()
+        versions = conn.execute("SELECT v.archived_path FROM lr_file_versions v JOIN lr_files f "
+                                "ON f.id=v.file_id WHERE f.repo_id=?", (repo["id"],)).fetchall()
+    mirror = REPOS_DIR / repo["slug"]
+    ok, changed, missing, locked = 0, [], [], 0
+    for f in files:
+        p = mirror / f["path"]
+        if not p.is_file():
+            missing.append(f["path"])
+        elif _sha256_file(p) != f["sha256"]:
+            changed.append(f["path"])
+        else:
+            ok += 1
+            locked += _fs_is_locked(p)
+    hist_ok = sum(1 for v in versions if (HISTORY_DIR / v["archived_path"]).is_file())
+    return jsonify({
+        "repo": repo["name"], "checked": len(files), "intact": ok,
+        "changed_outside_app": changed[:50], "missing_on_disk": missing[:50],
+        "removed_but_kept": sum(1 for f in files if f["status"] == "removed"),
+        "old_versions": len(versions), "old_versions_on_disk": hist_ok,
+        "finder_locked": locked, "lock_supported": bool(_IMMUTABLE and hasattr(os, "chflags")),
+        "folder": str(mirror),
+    })
+
+
 @bp.route("/api/repos/<slug>/lock", methods=["POST"])
 def api_repo_lock(slug):
     data = request.get_json(silent=True) or {}
@@ -1229,7 +1398,7 @@ def api_repo_delete(slug):
     dest = TRASH_DIR / f"{repo['slug']}__{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     src = REPOS_DIR / repo["slug"]
     if src.exists():
-        shutil.move(str(src), str(dest))
+        os.rename(str(src), str(dest))        # files keep their Finder lock in the trash
     with _db() as conn:
         fids = [r[0] for r in conn.execute("SELECT id FROM lr_files WHERE repo_id=?", (repo["id"],))]
         for fid in fids:

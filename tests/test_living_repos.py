@@ -194,7 +194,7 @@ class LivingReposTest(unittest.TestCase):
             "dev/grafana/dashboard-perms/notes.md"]))          # only 3 files travel, not 11
 
         # ONE repo, not two
-        repos = self.c.get("/api/repos").get_json()["repos"]
+        repos = [x for x in self.c.get("/api/repos").get_json()["repos"] if x["name"] == "local-knowledge"]
         self.assertEqual(len(repos), 1)
         self.assertEqual(repos[0]["files"], 10)
         self.assertEqual(repos[0]["removed"], 1)
@@ -206,6 +206,35 @@ class LivingReposTest(unittest.TestCase):
         self.assertEqual(len(archived), 1)
         self.assertNotIn("SSO", archived[0].read_text())
         self.assertTrue((mirror / "dev/kafka/kafka-b/notes.md").exists())
+
+        # The Mac copy keeps the laptop's "Date Modified"
+        f395 = mirror / "prod/nexus/ha-deployment/3.95/notes.md"
+        self.assertEqual(int(f395.stat().st_mtime * 1000), ms("2026-09-28"))
+        os.utime(f395, None)                                   # like a file synced by the old version
+        R._lock_existing_files()                               # startup pass restores the laptop date
+        self.assertEqual(int(f395.stat().st_mtime * 1000), ms("2026-09-28"))
+
+        # Readable sync log, one entry per drop
+        log_txt = (R.HISTORY_DIR / "local-knowledge" / "SYNC-LOG.txt").read_text()
+        self.assertIn("Sync #1", log_txt)
+        self.assertIn("Sync #2", log_txt)
+        self.assertIn("+ prod/nexus/ha-deployment/3.95/notes.md", log_txt)
+        self.assertIn("~ dev/grafana/dashboard-perms/notes.md", log_txt)
+        self.assertIn("- dev/kafka/kafka-b/notes.md", log_txt)
+
+        # ✓ Verify: every file matches its fingerprint; history + missing are kept
+        v = self.c.get("/api/repos/local-knowledge/verify").get_json()
+        self.assertEqual(v["checked"], 11)
+        self.assertEqual(v["intact"], 11)
+        self.assertEqual(v["old_versions_on_disk"], 1)
+        self.assertEqual(v["removed_but_kept"], 1)
+        # …and it notices a file edited behind the app's back
+        f_a = mirror / "dev/kafka/strimzi-kafka-a/notes.md"
+        original = f_a.read_text()
+        f_a.write_text(original + "tampered\n")
+        v = self.c.get("/api/repos/local-knowledge/verify").get_json()
+        self.assertEqual(v["changed_outside_app"], ["dev/kafka/strimzi-kafka-a/notes.md"])
+        f_a.write_text(original)
 
         # "latest" now follows the edit / the new version
         r = self.ask("what is the latest on grafana in dev?")
@@ -286,7 +315,43 @@ class LivingReposTest(unittest.TestCase):
         r = self.c.post("/api/repos/local-knowledge/delete", json={"confirm": "local-knowledge"}).get_json()
         self.assertTrue(r["ok"])
         self.assertTrue(Path(r["moved_to"]).exists())                     # trash, not erased
-        self.assertEqual(self.c.get("/api/repos").get_json()["repos"], [])
+        self.assertNotIn("local-knowledge", [x["slug"] for x in self.c.get("/api/repos").get_json()["repos"]])
+
+    def test_finder_lock_is_lifted_only_to_archive(self):
+        """Simulate macOS's Locked flag: moving a locked file fails, exactly like
+        on the Mac. A sync that replaces a file must unlock → archive → re-lock."""
+        from unittest import mock
+        locked = set()
+        real_move = R.shutil.move
+
+        def strict_move(src, dst, *a, **k):
+            if str(Path(src).resolve()) in locked:
+                raise PermissionError(f"locked: {src}")
+            return real_move(src, dst, *a, **k)
+
+        with mock.patch.object(R, "_fs_lock", lambda p: locked.add(str(Path(p).resolve()))), \
+             mock.patch.object(R, "_fs_unlock", lambda p: locked.discard(str(Path(p).resolve()))), \
+             mock.patch.object(R.shutil, "move", strict_move):
+            files = {"dev/x/notes.md": ("# v1\n", "2026-01-01"), "dev/x/keep.md": ("same\n", "2026-01-01")}
+            _, r1 = self.drop("lock-test", files)
+            self.assertEqual(r1["errors"], [])
+            mirror = R.REPOS_DIR / "lock-test"
+            self.assertIn(str((mirror / "dev/x/notes.md").resolve()), locked)
+            files["dev/x/notes.md"] = ("# v2\n", "2026-02-01")
+            _, r2 = self.drop("lock-test", files)
+            self.assertEqual(r2["errors"], [])                                   # no PermissionError
+            self.assertEqual(r2["changed"], 1)
+            self.assertIn(str((mirror / "dev/x/notes.md").resolve()), locked)    # new version locked
+            archived = next(R.HISTORY_DIR.joinpath("lock-test").rglob("notes.md"))
+            self.assertIn(str(archived.resolve()), locked)                       # old version locked
+            self.assertEqual(archived.read_text(), "# v1\n")
+
+    def test_stale_uploads_are_tidied(self):
+        junk = R.STAGING_DIR / ("f" * 32)
+        (junk / "a").mkdir(parents=True)
+        (junk / "a" / "x.md").write_text("half upload")
+        R._cleanup_stale_staging()
+        self.assertFalse(junk.exists())
 
     def test_unsafe_paths_rejected(self):
         for bad in ["../etc/passwd", "a/../../b", "C:/x", ""]:

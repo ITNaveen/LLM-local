@@ -269,7 +269,7 @@ a{color:var(--accentH)}
 .lr-top{display:flex;align-items:center;gap:6px}
 .lr-lock{font-size:12px;cursor:pointer;flex-shrink:0}
 .lr-name{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--text);cursor:pointer;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  overflow-wrap:anywhere;line-height:1.3}
 .lr-name:hover{color:var(--accentH)}
 .lr-btn{font-size:10px;padding:3px 7px;border-radius:6px;background:var(--bg2);border:1px solid var(--border2);color:var(--text2);flex-shrink:0}
 .lr-btn:hover{border-color:var(--accent);color:var(--text)}
@@ -634,8 +634,6 @@ body.mode-local #btn-save-kb{display:none!important}
   #btn-toggle{display:flex!important;width:40px;height:40px;font-size:20px}
   #chat-title{font-size:15px}
   #model-pill{max-width:110px;padding:7px 10px}
-  #btn-research span{display:none}
-  #btn-research{padding:0 9px;height:34px}
   #spend-pill{padding:7px 9px;font-size:11px}
   #model-pill-lbl{font-size:12px}
   #btn-discover{width:34px;height:34px}
@@ -969,78 +967,6 @@ body.mode-local #btn-save-kb{display:none!important}
   position:fixed;inset:0;background:rgba(0,0,0,.6);
   backdrop-filter:blur(3px);z-index:700;display:none;
 }
-
-/* ── Research button + panel ── */
-#btn-research{
-  display:flex;align-items:center;gap:5px;flex-shrink:0;
-  height:28px;padding:0 11px;border-radius:14px;
-  font-size:11.5px;font-weight:600;cursor:pointer;
-  color:var(--text2);border:1px solid var(--border2);background:var(--bg3);
-  transition:all .15s;
-}
-#btn-research:hover{border-color:var(--accent);color:var(--accent);background:rgba(92,110,245,.1)}
-#btn-research.active{border-color:var(--accent);color:#fff;background:var(--accent)}
-
-#rsch-overlay{
-  position:fixed;inset:0;background:rgba(0,0,0,.5);
-  backdrop-filter:blur(2px);z-index:800;display:none;
-}
-#rsch-overlay.open{display:block}
-#rsch-panel{
-  position:fixed;top:0;right:0;height:100vh;
-  width:min(460px,94vw);z-index:801;
-  background:var(--bg2);border-left:1px solid var(--border2);
-  box-shadow:-16px 0 60px rgba(0,0,0,.5);
-  display:none;flex-direction:column;
-  transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);
-}
-#rsch-panel.open{display:flex;transform:translateX(0)}
-#rsch-hdr{
-  display:flex;align-items:center;gap:9px;padding:14px 16px;
-  border-bottom:1px solid var(--border);flex-shrink:0;
-}
-#rsch-hdr .rsch-dot{
-  width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0;
-  box-shadow:0 0 8px var(--green);
-}
-#rsch-hdr h3{font-size:14px;font-weight:700;color:var(--text);flex:1;margin:0}
-#rsch-hdr .rsch-free{font-size:9px;font-weight:700;color:var(--green);border:1px solid var(--green);border-radius:4px;padding:1px 5px;letter-spacing:.3px}
-#rsch-hdr button{width:26px;height:26px;border-radius:6px;color:var(--text3);font-size:15px;cursor:pointer;flex-shrink:0;background:none;border:none;transition:all .12s}
-#rsch-hdr button:hover{background:var(--bg3);color:var(--text)}
-#rsch-note{
-  font-size:10px;color:var(--muted);padding:7px 16px;line-height:1.45;
-  border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0;
-}
-#rsch-note b{color:var(--text2)}
-#rsch-msgs{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
-.rsch-empty{color:var(--text3);font-size:12px;text-align:center;margin:auto;line-height:1.6;max-width:280px}
-.rsch-empty .rsch-egs{margin-top:10px;font-size:11px;color:var(--muted)}
-.rsch-egs .rsch-eg{display:block;padding:5px 9px;margin:5px 0;border:1px solid var(--border);border-radius:7px;cursor:pointer;transition:all .12s;color:var(--text2);text-align:left}
-.rsch-egs .rsch-eg:hover{border-color:var(--accent);color:var(--accent);background:rgba(92,110,245,.06)}
-.rsch-turn{display:flex;flex-direction:column;gap:3px;font-size:13px;line-height:1.55}
-.rsch-turn.user{align-items:flex-end}
-.rsch-turn.user .rsch-bubble{background:var(--accent);color:#fff;border-radius:13px 13px 3px 13px;padding:8px 12px;max-width:85%}
-.rsch-turn.model .rsch-bubble{background:var(--bg3);color:var(--text);border-radius:13px 13px 13px 3px;padding:9px 13px;max-width:97%;white-space:pre-wrap}
-.rsch-turn.model .rsch-bubble.err{border:1px solid #b4453a;color:#e08b82;background:rgba(180,69,58,.08)}
-.rsch-src{margin-top:7px;padding-top:7px;border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:5px}
-.rsch-src a{font-size:10px;color:var(--accent);border:1px solid var(--border2);border-radius:10px;padding:2px 8px;text-decoration:none;transition:all .12s;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rsch-src a:hover{background:rgba(92,110,245,.1);border-color:var(--accent)}
-.rsch-copy{align-self:flex-start;margin-top:2px;font-size:10px;color:var(--text3);background:none;border:1px solid var(--border);border-radius:6px;padding:3px 8px;cursor:pointer;transition:all .12s}
-.rsch-copy:hover{color:var(--accent);border-color:var(--accent)}
-#rsch-input-wrap{padding:11px 14px;border-top:1px solid var(--border);flex-shrink:0;display:flex;gap:8px;align-items:flex-end}
-#rsch-in{
-  flex:1;resize:none;max-height:120px;min-height:38px;
-  background:var(--bg3);border:1px solid var(--border2);border-radius:10px;
-  padding:9px 12px;font-size:13px;color:var(--text);font-family:inherit;line-height:1.4;
-}
-#rsch-in:focus{border-color:var(--accent);outline:none}
-#rsch-send{
-  width:38px;height:38px;border-radius:10px;flex-shrink:0;
-  background:var(--accent);color:#fff;border:none;cursor:pointer;
-  display:flex;align-items:center;justify-content:center;transition:all .12s;
-}
-#rsch-send:hover{background:var(--accentH)}
-#rsch-send:disabled{opacity:.5;cursor:default}
 
 #disc-overlay.open{display:block}
 #disc-modal{
@@ -1400,12 +1326,6 @@ body.mode-local #btn-save-kb{display:none!important}
       </button>
       <button id="btn-close" onclick="chatClose()" title="Close chat">&#10005;</button>
       </div>
-      <button id="btn-research" onclick="rschOpen()" title="Research — free live web search (Gemini). Public lookups only; copy facts into your chat.">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="flex-shrink:0">
-          <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-        </svg>
-        <span>Research</span>
-      </button>
       <div id="mode-toggle" title="Local = free & private: answers from your living repos on this Mac. Cloud = Claude / OpenAI API (paid).">
         <button id="mode-local" onclick="setMode('local')">&#127968; <span>Local</span></button>
         <button id="mode-cloud" onclick="setMode('cloud')">&#9729;&#65039; <span>Cloud</span></button>
@@ -1551,11 +1471,6 @@ body.mode-local #btn-save-kb{display:none!important}
       <div class="fhint" id="h-openai">platform.openai.com &#8594; API Keys</div>
     </div>
 
-    <div class="fg">
-      <label class="flabel">Research Key (Gemini) <span class="fbadge" style="background:#1b7a43;color:#fff">FREE</span> <span style="font-size:10px;color:var(--muted)">powers the Research tab — live web search</span></label>
-      <input type="password" class="finput" id="s-gemini" placeholder="AIza…"/>
-      <div class="fhint" id="h-gemini">aistudio.google.com &#8594; Get API key (no card, ~5,000 searches/mo free)</div>
-    </div>
 
     <div class="fg">
       <label class="flabel">Default Model</label>
@@ -1654,29 +1569,6 @@ body.mode-local #btn-save-kb{display:none!important}
 <!-- ══ MODEL DISCOVER MODAL ════════════════════════════════════════ -->
 <div id="disc-overlay" onclick="discClose()"></div>
 
-<!-- ── Research panel (free Gemini grounded search — isolated from chat) ── -->
-<div id="rsch-overlay" onclick="rschClose()"></div>
-<div id="rsch-panel">
-  <div id="rsch-hdr">
-    <span class="rsch-dot"></span>
-    <h3>Research</h3>
-    <span class="rsch-free">FREE · LIVE WEB</span>
-    <button onclick="rschClose()" title="Close">&#10005;</button>
-  </div>
-  <div id="rsch-note">
-    Live Google-grounded search. <b>Public lookups only</b> — versions, release notes, CVEs, upgrade guides. Never paste internal configs/hostnames here. Nothing is saved; copy the useful lines into your chat.
-  </div>
-  <div id="rsch-msgs"></div>
-  <div id="rsch-input-wrap">
-    <textarea id="rsch-in" rows="1" placeholder="e.g. Nexus 3.70 → 3.93 breaking changes…"
-      oninput="rschResize(this)" onkeydown="rschKey(event)"></textarea>
-    <button id="rsch-send" onclick="rschSend()" title="Search">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-        <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-      </svg>
-    </button>
-  </div>
-</div>
 <div id="disc-modal">
   <h3>&#129302; Model Manager</h3>
   <div class="disc-tabs">
@@ -2703,7 +2595,6 @@ async function settingsOpen() {
   var s = await r.json();
   if (s.claude_preview) document.getElementById("h-claude").textContent = "Saved: " + s.claude_preview;
   if (s.openai_preview) document.getElementById("h-openai").textContent = "Saved: " + s.openai_preview;
-  if (s.gemini_preview) document.getElementById("h-gemini").textContent = "Saved: " + s.gemini_preview + " — free web search active.";
   if (s.backup_preview) document.getElementById("h-claude2").textContent = "Saved: " + s.backup_preview + " — your primary stays active until you flip the switch.";
   var ub = document.getElementById("s-use-backup");
   var bcRow = document.getElementById("backup-credit-row");
@@ -2741,14 +2632,12 @@ async function settingsSave() {
   var body = {};
   var ck = document.getElementById("s-claude").value.trim();
   var ok = document.getElementById("s-openai").value.trim();
-  var gk = document.getElementById("s-gemini").value.trim();
   var ck2 = document.getElementById("s-claude2").value.trim();
   var useBackup = document.getElementById("s-use-backup").checked;
   var backupCredit = document.getElementById("s-backup-credit").value.trim();
   var md = document.getElementById("s-model").value;
   if (ck) body.api_key = ck;
   if (ok) body.openai_key = ok;
-  if (gk) body.gemini_key = gk;
   if (ck2) body.api_key_2 = ck2;
   body.use_backup_key = useBackup;
   if (backupCredit) body.backup_starting_credit = parseFloat(backupCredit);
@@ -2757,7 +2646,6 @@ async function settingsSave() {
   if (r.error) { toast("Error: " + r.error); return; }
   document.getElementById("s-claude").value = "";
   document.getElementById("s-openai").value = "";
-  document.getElementById("s-gemini").value = "";
   document.getElementById("s-claude2").value = "";
   renderModelDrop();
   toast("Settings saved");
@@ -3165,11 +3053,13 @@ async function lrLoad() {
         '" onclick="lrLockToggle(\'' + s + '\')">' + (x.locked ? '&#128274;' : '&#128275;') + '</span>' +
       '<span class="lr-name" onclick="lrOverview(\'' + s + '\')" title="Show what the app understood">' + esc(x.name) + '</span>' +
       '<button class="lr-btn" onclick="lrSync(\'' + s + '\')" title="Pick the updated folder — only changes are applied">&#10227; Sync</button>' +
+      '<button class="lr-btn" onclick="lrVerify(\'' + s + '\')" title="Verify: re-check every file against its fingerprint">&#10003;</button>' +
       (x.locked ? '' : '<button class="lr-btn danger" onclick="lrDelete(\'' + s + '\')" title="Delete (moves to repo-trash)">&#128465;</button>') +
       '</div><div class="lr-meta">' + x.files + ' files &middot; ' + x.envs + ' env &middot; ' + x.products + ' products' +
       (x.removed ? ' &middot; ' + x.removed + ' flagged missing' : '') +
       '<br/>synced ' + esc(fmtWhen(x.last_sync_at)) + ' (#' + x.sync_count + ')' +
       (x.embedding_pending ? ' &middot; indexing ' + x.embedding_pending + ' sections' : '') + '</div>' +
+      '<div class="lr-meta" id="lr-vf-' + s + '"></div>' +
       '<div class="lr-ov" id="lr-ov-' + s + '"></div></div>';
   }).join("");
   if (r.dir) document.getElementById("dbx-path").textContent = r.dir;
@@ -3211,6 +3101,24 @@ async function lrOverview(slug) {
         '<br/>&nbsp;&nbsp;latest: ' + esc(p.latest.item) + ' (' + esc(p.latest.date) + ')';
     }).join("<br/>");
   }).join("") || "No files.";
+}
+// Proof the Mac copy is exactly what was dropped: every file re-fingerprinted.
+async function lrVerify(slug) {
+  var el = document.getElementById("lr-vf-" + slug);
+  if (!el) return;
+  el.textContent = "Checking every file…";
+  var d = await api("/api/repos/" + slug + "/verify");
+  if (d.error) { el.textContent = d.error; return; }
+  var bad = d.changed_outside_app.length + d.missing_on_disk.length;
+  var h = bad
+    ? '<span style="color:var(--red)">&#9888; ' + bad + ' problem(s)</span> &middot; ' + d.intact + ' of ' + d.checked + ' intact'
+    : '<span style="color:var(--green)">&#10003; All ' + d.checked + ' files intact</span> (fingerprints match)';
+  h += ' &middot; ' + d.old_versions_on_disk + ' old version' + (d.old_versions_on_disk === 1 ? '' : 's') + ' kept';
+  if (d.removed_but_kept) h += ' &middot; ' + d.removed_but_kept + ' missing-from-drop kept';
+  if (d.lock_supported) h += ' &middot; &#128274; ' + d.finder_locked + ' locked in Finder';
+  if (d.changed_outside_app.length) h += '<br/>changed outside the app: ' + d.changed_outside_app.map(esc).join(", ");
+  if (d.missing_on_disk.length) h += '<br/>missing on disk: ' + d.missing_on_disk.map(esc).join(", ");
+  el.innerHTML = h;
 }
 // Accuracy check: what WOULD local mode pick for this question? (no AI call)
 async function lrAsk() {
@@ -4218,112 +4126,6 @@ function filterChats(query) {
 //  MODEL MANAGER — discover new models + remove old ones via D button
 // ══════════════════════════════════════════════════════════════════════════════
 var _discTab = "current";
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  RESEARCH PANEL — free Gemini grounded web search
-//  Completely isolated: its own turn list in memory only, no chat/DB/cost impact.
-//  Cleared when the panel closes. Public lookups only.
-// ═════════════════════════════════════════════════════════════════════════════
-var _rschTurns = [];   // [{role:'user'|'model', text, sources?}]  — memory only
-var _rschBusy  = false;
-
-function rschOpen() {
-  document.getElementById("rsch-overlay").classList.add("open");
-  document.getElementById("rsch-panel").classList.add("open");
-  document.getElementById("btn-research").classList.add("active");
-  rschRender();
-  setTimeout(function(){ document.getElementById("rsch-in").focus(); }, 220);
-}
-function rschClose() {
-  document.getElementById("rsch-overlay").classList.remove("open");
-  document.getElementById("rsch-panel").classList.remove("open");
-  document.getElementById("btn-research").classList.remove("active");
-}
-function rschResize(el) { el.style.height="auto"; el.style.height=Math.min(el.scrollHeight,120)+"px"; }
-function rschKey(e) {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); rschSend(); }
-}
-function rschEg(text) {
-  document.getElementById("rsch-in").value = text;
-  rschSend();
-}
-function rschEsc(s) {
-  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-}
-function rschRender() {
-  var box = document.getElementById("rsch-msgs");
-  if (!_rschTurns.length) {
-    box.innerHTML =
-      '<div class="rsch-empty">Ask anything you\u2019d normally Google \u2014 you get one clear answer with sources, not twenty links.'
-      + '<div class="rsch-egs">'
-      + '<span class="rsch-eg" onclick="rschEg(\'Latest stable Sonatype Nexus Repository 3 version and its release date\')">Latest stable Nexus 3 version?</span>'
-      + '<span class="rsch-eg" onclick="rschEg(\'Keycloak 26.6.4 known issues or breaking changes vs 26.3\')">Keycloak 26.6.4 known issues?</span>'
-      + '<span class="rsch-eg" onclick="rschEg(\'OpenTelemetry operator helm chart breaking changes between 0.92 and 0.117\')">OTel operator 0.92 \u2192 0.117 breaking changes?</span>'
-      + '</div></div>';
-    return;
-  }
-  var html = "";
-  _rschTurns.forEach(function(t, i) {
-    if (t.role === "user") {
-      html += '<div class="rsch-turn user"><div class="rsch-bubble">' + rschEsc(t.text) + '</div></div>';
-    } else {
-      var cls = t.error ? "rsch-bubble err" : "rsch-bubble";
-      html += '<div class="rsch-turn model"><div class="' + cls + '" id="rsch-ans-' + i + '">' + rschEsc(t.text) + '</div>';
-      if (t.sources && t.sources.length) {
-        html += '<div class="rsch-src">';
-        t.sources.forEach(function(s) {
-          html += '<a href="' + rschEsc(s.uri) + '" target="_blank" rel="noopener">' + rschEsc(s.title || "source") + '</a>';
-        });
-        html += '</div>';
-      }
-      if (!t.error) {
-        html += '<button class="rsch-copy" onclick="rschCopy(' + i + ')">\u29C9 Copy answer</button>';
-      }
-      html += '</div>';
-    }
-  });
-  box.innerHTML = html;
-  box.scrollTop = box.scrollHeight;
-}
-function rschCopy(i) {
-  var t = _rschTurns[i];
-  if (!t) return;
-  navigator.clipboard.writeText(t.text).then(function(){ toast("Answer copied \u2014 paste into your chat"); });
-}
-async function rschSend() {
-  if (_rschBusy) return;
-  var el = document.getElementById("rsch-in");
-  var q = el.value.trim();
-  if (!q) return;
-  el.value = ""; rschResize(el);
-  _rschTurns.push({role:"user", text:q});
-  _rschTurns.push({role:"model", text:"Searching\u2026", pending:true});
-  rschRender();
-  _rschBusy = true;
-  document.getElementById("rsch-send").disabled = true;
-
-  // Send only the real turns (strip the pending placeholder) as {role,text}
-  var payloadTurns = _rschTurns
-    .filter(function(t){ return !t.pending; })
-    .map(function(t){ return {role:t.role, text:t.text}; });
-
-  try {
-    var r = await api("/api/research", "POST", {turns: payloadTurns});
-    _rschTurns.pop(); // remove placeholder
-    if (r.error) {
-      _rschTurns.push({role:"model", text:r.error, error:true});
-    } else {
-      _rschTurns.push({role:"model", text:r.answer || "(no answer)", sources:r.sources || []});
-    }
-  } catch (e) {
-    _rschTurns.pop();
-    _rschTurns.push({role:"model", text:"Request failed. Check your connection and that a Gemini key is saved in Settings.", error:true});
-  }
-  _rschBusy = false;
-  document.getElementById("rsch-send").disabled = false;
-  rschRender();
-  document.getElementById("rsch-in").focus();
-}
 
 function discOpen()  {
   document.getElementById("disc-overlay").classList.add("open");
