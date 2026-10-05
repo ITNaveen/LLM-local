@@ -39,7 +39,9 @@ For burned-in Hindi titles and subtitles, ffmpeg needs text support. If the top 
    is, the better the video.
 3. Pick a length (8–15 min), a theme (Epic / Emotional / Documentary / Thriller), and how much
    Hindi narration you want (None / Light / More).
-4. Keep **"Let me review the script"** on. When the story is ready you see every scene, its
+4. Press **Make my video** and walk away: it runs start to finish on its own (the Mac stays
+   awake while StoryMaker runs). Optional: tick **"Pause before rendering"** to check the
+   script first; then you see every scene, its
    clips and the Hindi narration lines. Change any line, then press **Render video**.
 5. Download the MP4, thumbnail, `.srt` subtitles and the upload kit.
 

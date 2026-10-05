@@ -68,4 +68,9 @@ fi
 PORT=$(python -c "from storymaker.config import load_settings; print(load_settings()['port'])")
 echo "Starting StoryMaker at http://localhost:$PORT  (keep this window open; Ctrl+C stops it)"
 (sleep 2; open "http://localhost:$PORT") &
-python -m storymaker
+# Keep the Mac awake while StoryMaker runs (screen may turn off; jobs keep going).
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -i python -m storymaker
+else
+  python -m storymaker
+fi
