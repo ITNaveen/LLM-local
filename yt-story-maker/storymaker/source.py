@@ -82,21 +82,44 @@ def clean_cues(cues):
     return [c for c in out if c["end"] - c["start"] > 0.05]
 
 
+UNDERSTOOD_LANGS = ("hi", "en")
+
+
+def base_lang(code):
+    return (code or "").replace("-orig", "").split("-")[0].split("_")[0].lower()
+
+
+def spoken_language(info):
+    """The language people actually speak in the video ('' if unknown)."""
+    if info.get("language"):
+        return base_lang(info["language"])
+    for key in (info.get("automatic_captions") or {}):
+        if key.endswith("-orig"):
+            return base_lang(key)
+    return ""
+
+
 def pick_caption_track(info):
-    """Choose best caption track URL (prefer manual, Hindi, json3)."""
-    for kind in ("subtitles", "automatic_captions"):
+    """Best transcript to *understand* the video: manual Hindi/English first, then the
+    auto-captions of the spoken language if that is Hindi/English, then YouTube's
+    machine translation to English/Hindi (so foreign videos can still be judged)."""
+    spoken = spoken_language(info)
+    subs = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+    options = [("subtitles", l) for l in CAPTION_LANG_PRIORITY if l in subs]
+    orig = [l for l in auto if l.endswith("-orig")]
+    options += [("automatic_captions", l) for l in orig if base_lang(l) in UNDERSTOOD_LANGS]
+    options += [("automatic_captions", l) for l in CAPTION_LANG_PRIORITY
+                if l in auto and l not in orig]
+    options += [("automatic_captions", l) for l in orig if base_lang(l) not in UNDERSTOOD_LANGS]
+    options += [("subtitles", l) for l in subs if l not in CAPTION_LANG_PRIORITY]
+    for kind, lang in options:
         tracks = info.get(kind) or {}
-        langs = [l for l in CAPTION_LANG_PRIORITY if l in tracks]
-        if kind == "automatic_captions":
-            # The '-orig' track is the spoken language; others are machine translations.
-            orig = [l for l in tracks if l.endswith("-orig")]
-            langs = orig + [l for l in langs if l not in orig]
-        for lang in langs:
-            fmts = tracks[lang]
-            for ext in ("json3", "vtt"):
-                for f in fmts:
-                    if f.get("ext") == ext and f.get("url"):
-                        return {"lang": lang, "ext": ext, "url": f["url"], "kind": kind}
+        for ext in ("json3", "vtt"):
+            for f in tracks.get(lang) or []:
+                if f.get("ext") == ext and f.get("url"):
+                    return {"lang": lang, "ext": ext, "url": f["url"], "kind": kind,
+                            "spoken": spoken}
     return None
 
 
@@ -107,7 +130,7 @@ class YouTubeSource:
     def __init__(self, settings, log=None):
         self.settings = settings
         self.log = log or (lambda m: None)
-        self.details_dir = CACHE_DIR / "details"
+        self.details_dir = CACHE_DIR / "details_v2"
         self.details_dir.mkdir(parents=True, exist_ok=True)
 
     def _opts(self, **extra):
@@ -155,7 +178,7 @@ class YouTubeSource:
                 try:
                     raw = ydl.urlopen(track["url"]).read().decode("utf-8", errors="replace")
                     captions = parse_json3(raw) if track["ext"] == "json3" else parse_vtt(raw)
-                    lang = track["lang"].replace("-orig", "")
+                    lang = base_lang(track["lang"])
                 except Exception as e:  # noqa: BLE001 - captions are optional
                     self.log(f"  captions failed for {video_id}: {e}")
         heatmap = [{"start": h["start_time"], "end": h["end_time"], "value": h["value"]}
@@ -175,6 +198,7 @@ class YouTubeSource:
             "heatmap": heatmap,
             "captions": captions,
             "caption_lang": lang,
+            "spoken_lang": spoken_language(info) or (lang if track and track["kind"] == "automatic_captions" else ""),
             "url": f"https://www.youtube.com/watch?v={video_id}",
         }
         write_json(cache, details)
@@ -235,14 +259,26 @@ class YouTubeSource:
 
 # ---------------------------------------------------------------- offline fixtures
 _FAKE_LINES = [
-    "यह पल पूरे देश के लिए ऐतिहासिक था",
-    "हमने कभी हार नहीं मानी और आगे बढ़ते रहे",
-    "जनता का भरोसा हमारी सबसे बड़ी ताकत है",
-    "आज हम दुनिया को दिखा देंगे कि हम क्या कर सकते हैं",
-    "ये जीत हर उस इंसान की है जिसने सपना देखा",
-    "मुश्किलें आईं लेकिन हौसला कभी नहीं टूटा",
-    "this is a historic moment for the whole country",
-    "the crowd is going absolutely wild right now",
+    "यह पल पूरे देश के लिए ऐतिहासिक था।",
+    "हमने कभी हार नहीं मानी और आगे बढ़ते रहे।",
+    "जनता का भरोसा हमारी सबसे बड़ी ताकत है।",
+    "आज हम दुनिया को दिखा देंगे कि हम क्या कर सकते हैं।",
+    "ये जीत हर उस इंसान की है जिसने सपना देखा।",
+    "मुश्किलें आईं लेकिन हौसला कभी नहीं टूटा।",
+    "this is a historic moment for the whole country.",
+    "the crowd is going absolutely wild right now.",
+]
+
+# Offline catalogue: mostly good news footage plus the traps a real search returns.
+FIXTURE_VIDEOS = [
+    ("Election night: full report", "hi"), ("Victory speech full video", "hi"),
+    ("Press conference after the result", "en"), ("Ground report from the rally", "hi"),
+    ("Parliament debate highlights", "en"), ("Crowd celebrations live", "hi"),
+    ("Expert analysis: what changes now", "en"), ("Interview with the party leader", "hi"),
+    ("Stand-up comedy special 2025", "hi"),          # off-topic: the AI should reject it
+    ("జర్మనీ ఉద్యోగాలు vlog", "te"),                 # regional Indian language: never used
+    ("Tagesschau Wahlabend Sondersendung", "de"),   # foreign speech: silent visuals only
+    ("Drone footage of the rally", ""),             # no speech/captions: visuals only
 ]
 
 
@@ -268,7 +304,7 @@ class FixtureSource:
             vid = f"fx{i:02d}"
             out.append({
                 "id": vid,
-                "title": f"{query} — part {i + 1} highlights",
+                "title": f"{query} — {FIXTURE_VIDEOS[i % len(FIXTURE_VIDEOS)][0]}",
                 "channel": f"Channel {i % 5}",
                 "duration": float(90 + (i * 37) % 150),
                 "views": int(10 ** rng.uniform(3.5, 6.8)),
@@ -282,11 +318,14 @@ class FixtureSource:
         i = int(video_id[2:])
         duration = float(90 + (i * 37) % 150)
         rng = self._rng(video_id)
+        title, spoken = FIXTURE_VIDEOS[i % len(FIXTURE_VIDEOS)]
         captions, t = [], 3.0
-        while t < duration - 4:
+        while spoken and t < duration - 4:
             dur = rng.uniform(2.5, 5.5)
-            captions.append({"start": round(t, 2), "end": round(t + dur, 2),
-                             "text": rng.choice(_FAKE_LINES)})
+            line = rng.choice(_FAKE_LINES)
+            if spoken == "te":
+                line = "ఇది ఒక పరీక్ష వాక్యం."
+            captions.append({"start": round(t, 2), "end": round(t + dur, 2), "text": line})
             t += dur + rng.uniform(0.2, 1.5)
         heatmap, steps = [], 100
         peaks = [rng.uniform(0.15, 0.9) * duration for _ in range(2)]
@@ -296,10 +335,11 @@ class FixtureSource:
                 0.75 * max(0.0, 1 - abs(s - p) / (duration * 0.05)) for p in peaks)
             heatmap.append({"start": s, "end": s + duration / steps, "value": min(1.0, v)})
         return {
-            "id": video_id, "title": f"Fixture video {i + 1}", "channel": f"Channel {i % 5}",
+            "id": video_id, "title": title, "channel": f"Channel {i % 5}",
             "duration": duration, "views": 1000 * (i + 1), "upload_date": f"2024{(i % 12) + 1:02d}15",
             "width": 1280, "height": 720 if i % 4 else 960, "description": "",
-            "chapters": [], "heatmap": heatmap, "captions": captions, "caption_lang": "hi",
+            "chapters": [], "heatmap": heatmap, "captions": captions,
+            "caption_lang": "en" if spoken == "de" else spoken, "spoken_lang": spoken,
             "url": f"https://www.youtube.com/watch?v={video_id}",
         }
 

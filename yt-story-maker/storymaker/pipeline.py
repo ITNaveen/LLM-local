@@ -10,17 +10,16 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 
-from . import moments as moments_mod
-from . import music, publish, render, research, story, timeline, voice
+from . import editor, music, publish, render, research, timeline, voice
 from .config import JOBS_DIR
 from .llm import NoLLM, OllamaLLM
 from .source import FixtureSource, YouTubeSource
 from .style import get_style
-from .util import read_json, slugify, write_json
+from .util import keywords, read_json, slugify, write_json
 
 STAGES = [  # name, share of the progress bar
-    ("research", 0.10), ("moments", 0.15), ("story", 0.10), ("voice", 0.05),
-    ("edit", 0.05), ("timeline", 0.02), ("download", 0.20), ("render", 0.30), ("publish", 0.03),
+    ("research", 0.08), ("moments", 0.22), ("story", 0.10), ("voice", 0.05),
+    ("edit", 0.02), ("timeline", 0.01), ("download", 0.20), ("render", 0.29), ("publish", 0.03),
 ]
 VOICES = {"male": "hi-IN-MadhurNeural", "female": "hi-IN-SwaraNeural"}
 
@@ -106,7 +105,7 @@ def run_job(job, settings, source=None, llm=None):
         settings["edge_voice"] = VOICES[req["voice"]]
     if req.get("resolution") == "720p":
         settings["width"], settings["height"] = 1280, 720
-    job.set(status="running", error="")
+    job.set(status="running", error="", started=time.time())
     done_share = 0.0
 
     def stage(name):
@@ -139,32 +138,28 @@ def run_job(job, settings, source=None, llm=None):
             write_json(job.path("research.json"), res)
         finish(share)
 
-        # 2. moments
+        # 2. read every video, throw out what doesn't belong, understand what is said
         share, sub = stage("moments")
         mom = read_json(job.path("moments.json"))
         if not mom:
-            log("Reading transcripts and 'most replayed' graphs...")
-            mom = moments_mod.gather(source, res["shortlist"], log, progress=sub,
-                                     workers=int(settings.get("search_workers", 4)))
+            mom = understand_videos(source, llm, topic, desc, res, settings, log, sub)
             write_json(job.path("moments.json"), mom)
-            log(f"Found {len(mom['moments'])} candidate moments in {len(mom['videos'])} videos.")
         finish(share)
 
-        # 3. story outline
+        # 3. the story: scenes, links, editor review
         share, _ = stage("story")
         outline = read_json(job.path("outline.json"))
         if not outline:
-            log("Writing the story...")
-            outline = story.plan_outline(llm, topic, desc, req.get("theme", "auto"), minutes,
-                                         req.get("narration", "light"), mom["moments"], log)
-            story.assign_narration_ids(outline)
+            log("Planning the film scene by scene...")
+            outline = editor.plan_story(llm, topic, desc, req.get("theme", "auto"), minutes,
+                                        req.get("narration", "light"), mom["passages"],
+                                        mom["videos"], log)
             write_json(job.path("outline.json"), outline)
         finish(share)
 
         # 4. narration voice
         share, _ = stage("voice")
-        lines = {b["narration_id"]: b["narration"] for a in outline["acts"] for b in a["beats"]
-                 if b.get("narration_id") and b["narration"]}
+        lines = editor.narration_lines(outline)
         vo = read_json(job.path("voice.json"))
         if vo is None or set(vo) != set(lines):
             if lines:
@@ -173,14 +168,16 @@ def run_job(job, settings, source=None, llm=None):
             write_json(job.path("voice.json"), vo)
         finish(share)
 
-        # 5. edit decision: which seconds of which video go where
+        # 5. exact clips for every scene, fitted to the requested length
         share, _ = stage("edit")
         st = read_json(job.path("story.json"))
         if not st:
-            log("Choosing the best seconds of footage for every beat...")
-            filler = story.Filler(mom["moments"], style, minutes * 60, topic, llm=llm, log=log)
-            st = filler.fill(copy.deepcopy(outline),
-                             {k: v["duration"] for k, v in vo.items()})
+            log("Cutting the scenes...")
+            theme = req.get("theme", "auto")
+            st = editor.Assembler(mom["passages"], mom["videos"], mom["visuals"], style,
+                                  minutes * 60, log).build(
+                outline, {k: v["duration"] for k, v in vo.items()},
+                theme if theme in ("epic", "emotional", "documentary", "thriller") else "documentary")
             write_json(job.path("story.json"), st)
         finish(share)
 
@@ -193,8 +190,8 @@ def run_job(job, settings, source=None, llm=None):
         share, _ = stage("timeline")
         tracks = music.choose_tracks(st["acts"], settings["music_dir"], seed=zlib.crc32(job.id.encode()) % 1000)
         if not any(tracks.values()):
-            log("Music library is empty - using the generated background score. Add royalty-free "
-                "tracks to the music/ folder for a much better result.")
+            log("Music library is empty - the film uses the footage's own sound. Add royalty-free "
+                "tracks to the music/ folder for build-ups and the climax.")
         grids = {k: music.beat_times(t) if t else [] for k, t in tracks.items()}
         tl = timeline.build(st, vo, tracks, grids, settings)
         tl["title_hi"] = st.get("title_hi", topic)
@@ -251,24 +248,69 @@ def run_job(job, settings, source=None, llm=None):
     return job
 
 
-def apply_review_edits(job, edits):
-    """edits: {narration_id: new Hindi text}. Re-records changed lines, re-edits footage."""
+def apply_review_edits(job, edits, remove=()):
+    """edits: {scene_id: new Hindi text} for narration/text scenes; remove: scene ids to drop.
+    Re-records changed lines and re-cuts the film; the AI planning is kept."""
     outline = read_json(job.path("outline.json"))
+    remove = set(remove or ())
     changed = False
-    for act in outline["acts"]:
-        for b in act["beats"]:
-            nid = b.get("narration_id")
-            if nid in edits:
-                new = story.clean_narration(edits[nid])
-                if new and new != b["narration"]:
-                    b["narration"] = new
-                    (job.path("voice") / f"{nid}.wav").unlink(missing_ok=True)
-                    changed = True
+    kept = []
+    for sc in outline["scenes"]:
+        if sc.get("id") in remove:
+            changed = True
+            continue
+        if sc.get("id") in edits and sc["type"] in ("narration", "text"):
+            new = editor.clean_text(edits[sc["id"]], 30)
+            if new and new != sc["text"]:
+                sc["text"] = new
+                if sc.get("narration_id"):
+                    (job.path("voice") / f"{sc['narration_id']}.wav").unlink(missing_ok=True)
+                changed = True
+        kept.append(sc)
     if changed:
+        outline["scenes"] = kept
         write_json(job.path("outline.json"), outline)
         for name in ("voice.json", "story.json", "timeline.json"):
             job.path(name).unlink(missing_ok=True)
     return changed
+
+
+def understand_videos(source, llm, topic, desc, res, settings, log, sub):
+    log("Reading the shortlisted videos (language, transcript, replay graph)...")
+    details = editor.read_videos(source, res["shortlist"], log, progress=lambda f: sub(0.3 * f),
+                                 workers=int(settings.get("search_workers", 4)))
+    log("Checking every video: on-topic? understandable language?")
+    kept, rejected = editor.screen(llm, topic, desc, res.get("plan"), details, log,
+                                   progress=lambda f: sub(0.3 + 0.2 * f),
+                                   trust_topic=isinstance(source, FixtureSource) and not llm.available())
+    if not kept:
+        raise RuntimeError("None of the videos found were on-topic and in Hindi/English. "
+                           "Try a more specific topic or description.")
+    speech = [v for v in kept if v["role"] == "speech"]
+    topic_words = keywords(f"{topic} {desc}")
+    passages, visuals = [], []
+    for v in kept:
+        visuals += editor.visual_moments(v)
+    for i, v in enumerate(speech, 1):
+        log(f"Understanding what is said ({i}/{len(speech)}): {v['title'][:60]}")
+        allp = editor.build_passages(v)
+        chosen = {p["id"] for p in editor.preselect(allp, topic_words)}
+        annotated = {p["id"]: p for p in editor.annotate(
+            llm, topic, desc, v, [p for p in allp if p["id"] in chosen], log)}
+        for p in allp:
+            p = annotated.get(p["id"], p)
+            p.setdefault("video_title", v.get("title", ""))
+            p.setdefault("channel", v.get("channel", ""))
+            passages.append(p)
+        sub(0.5 + 0.5 * i / max(1, len(speech)))
+    usable = sum(1 for p in passages if p.get("use"))
+    log(f"{usable} strong on-topic passages from {len(speech)} videos, "
+        f"{len(visuals)} visual moments from {len(kept)} videos.")
+    if not usable:
+        raise RuntimeError("The on-topic videos had no usable Hindi/English speech. "
+                           "Try a broader topic or a more specific description.")
+    videos = [{k: val for k, val in v.items() if k not in ("captions", "heatmap")} for v in kept]
+    return {"videos": videos, "rejected": rejected, "passages": passages, "visuals": visuals}
 
 
 def list_jobs():

@@ -32,71 +32,90 @@ def frames(seconds, fps):
     return max(1, int(round(seconds * fps)))
 
 
+# Without a music track the footage's own sound carries montages and bridges.
+CLIP_GAIN_NO_MUSIC = {"original": 1.0, "narration": 0.18, "music": 0.75}
+TEXT_CARD_FADE = 0.35
+
+
 def build(story, voice, tracks, beat_grids, settings):
     fps = settings["fps"]
     segments, acts_out, subtitles, chapters = [], [], [], []
     t = 0.0
+    n_acts = len(story["acts"])
     for ai, act in enumerate(story["acts"]):
         act_start = t
-        clips, modes, beat_of, mins = [], [], [], {}
+        has_music = bool(tracks.get(act["key"])) or settings.get("generated_music", False)
+        clip_gain = CLIP_GAIN if has_music else CLIP_GAIN_NO_MUSIC
+        # 1. flatten the act into items (clips and on-screen text cards), in order
+        items, mins = [], {}
         for bi, beat in enumerate(act["beats"]):
-            first = len(clips)
+            audio = beat.get("audio", "music")
+            if audio == "text":
+                items.append({"kind": "card", "beat": bi, "dur": beat.get("seconds", 3.0),
+                              "text": beat.get("narration", ""), "mode": "card"})
+                continue
+            first = len(items)
             for c in beat.get("clips", []):
-                clips.append(c)
-                modes.append(beat["audio"])
-                beat_of.append(bi)
-            if beat["audio"] == "narration" and beat.get("narration_id") in voice and len(clips) > first:
+                items.append({"kind": "clip", "beat": bi, "dur": c["end"] - c["start"],
+                              "clip": c, "mode": audio})
+            if audio == "narration" and beat.get("narration_id") in voice and len(items) > first:
                 mins[bi] = voice[beat["narration_id"]]["duration"] + NARRATION_LEAD + NARRATION_TAIL
-        if not clips:
+        if not items:
             continue
-        durs = [c["end"] - c["start"] for c in clips]
-        durs = snap_to_beats(durs, modes, beat_grids.get(act["key"]) or [])
-        # narration beats must be at least as long as their voice line
-        for bi, need in mins.items():
-            idx = [i for i, b in enumerate(beat_of) if b == bi]
+        durs = snap_to_beats([it["dur"] for it in items], [it["mode"] for it in items],
+                             beat_grids.get(act["key"]) or [])
+        for bi, need in mins.items():           # narration fits inside its pictures
+            idx = [i for i, it in enumerate(items) if it["beat"] == bi]
             have = sum(durs[i] for i in idx)
             if have < need:
                 durs[idx[-1]] += need - have
-        # frame-accurate
         durs = [frames(d, fps) / fps for d in durs]
 
-        act_segments = []
-        narration, gain_points = [], []
-        beat_start = {}
-        for i, c in enumerate(clips):
-            mode = modes[i]
-            bi = beat_of[i]
-            beat_start.setdefault(bi, t)
-            heat_boost = act["key"] == "climax" and mode == "music" and c.get("heat", 0) > 0.6
-            seg = {
-                "type": "clip", "video_id": c["video_id"], "src_start": c["start"],
-                "dur": durs[i], "frames": frames(durs[i], fps), "t": round(t, 4),
-                "act": act["key"], "beat": bi, "mode": mode,
-                "clip_gain": 0.35 if heat_boost else CLIP_GAIN[mode],
-                "fade_in": 0.0, "fade_out": 0.0, "heat": c.get("heat", 0),
-                "video_title": c.get("video_title", ""), "channel": c.get("channel", ""),
-            }
-            gain_points.append((t - act_start, t - act_start + durs[i], MUSIC_GAIN[mode]))
+        # 2. segments
+        act_segments, narration, gain_points, beat_start = [], [], [], {}
+        for i, it in enumerate(items):
+            beat_start.setdefault(it["beat"], t)
+            if it["kind"] == "card":
+                seg = {"type": "card", "text": it["text"], "dur": durs[i], "frames": frames(durs[i], fps),
+                       "t": round(t, 4), "act": act["key"], "beat": it["beat"], "mode": "card",
+                       "clip_gain": 0.0, "fade_in": TEXT_CARD_FADE, "fade_out": TEXT_CARD_FADE,
+                       "style": "text"}
+                gain_points.append((t - act_start, t - act_start + durs[i], MUSIC_GAIN["card"]))
+            else:
+                c, mode = it["clip"], it["mode"]
+                heat_boost = act["key"] == "climax" and mode == "music" and c.get("heat", 0) > 0.6
+                seg = {
+                    "type": "clip", "video_id": c["video_id"], "src_start": c["start"],
+                    "dur": durs[i], "frames": frames(durs[i], fps), "t": round(t, 4),
+                    "act": act["key"], "beat": it["beat"], "mode": mode,
+                    "clip_gain": max(clip_gain[mode], 0.35 if heat_boost else 0.0),
+                    "fade_in": 0.0, "fade_out": 0.0, "heat": c.get("heat", 0),
+                    "video_title": c.get("video_title", ""), "channel": c.get("channel", ""),
+                }
+                gain_points.append((t - act_start, t - act_start + durs[i], MUSIC_GAIN[mode]))
             act_segments.append(seg)
             t += durs[i]
-        act_segments[0]["fade_in"] = 1.0 if ai == 0 else ACT_FADE
-        act_segments[-1]["fade_out"] = 1.6 if ai == len(story["acts"]) - 1 else ACT_FADE
+        if act_segments[0]["type"] == "clip":
+            act_segments[0]["fade_in"] = 1.0 if ai == 0 else ACT_FADE
+        if act_segments[-1]["type"] == "clip":
+            act_segments[-1]["fade_out"] = 1.6 if ai == n_acts - 1 else ACT_FADE
 
         for bi, beat in enumerate(act["beats"]):
             nid = beat.get("narration_id")
-            if beat["audio"] == "narration" and nid in voice and bi in beat_start:
+            if beat.get("audio") == "narration" and nid in voice and bi in beat_start:
                 vt = beat_start[bi] + NARRATION_LEAD
                 narration.append({"file": voice[nid]["file"], "t": round(vt - act_start, 4),
                                   "abs": round(vt, 4), "duration": voice[nid]["duration"]})
                 subtitles.extend(split_subtitles(beat["narration"], vt, voice[nid]["duration"]))
 
-        # Title card right after the opening act (cold open -> title -> story).
+        # Title card right after the opening act (hook -> title -> story).
         if ai == 0 and settings.get("title_card", True):
             card_dur = frames(TITLE_CARD_SECONDS, fps) / fps
             act_segments.append({
                 "type": "card", "text": story.get("title_hi", ""), "dur": card_dur,
                 "frames": frames(card_dur, fps), "t": round(t, 4), "act": act["key"],
                 "beat": -1, "mode": "card", "clip_gain": 0.0, "fade_in": 0.6, "fade_out": 0.6,
+                "style": "title",
             })
             gain_points.append((t - act_start, t - act_start + card_dur, MUSIC_GAIN["card"]))
             t += card_dur

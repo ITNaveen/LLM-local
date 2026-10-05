@@ -24,7 +24,7 @@ DEFAULTS = {
     # Research
     "max_candidates": 500,        # videos looked at (metadata only)
     "results_per_query": 50,
-    "shortlist_size": 24,         # videos whose transcripts + replay graphs are read
+    "shortlist_size": 30,         # videos whose transcripts + replay graphs are read
     "min_video_seconds": 45,      # skip Shorts
     "max_video_seconds": 3 * 3600,
     "cookies_from_browser": "",   # e.g. "chrome" or "safari" if YouTube asks you to sign in
@@ -40,6 +40,7 @@ DEFAULTS = {
     "piper_model": "",            # path to a Hindi .onnx voice for fully offline TTS
     # Music
     "music_dir": str(ROOT / "music"),
+    "generated_music": False,     # plain generated pad when the library is empty (off = no music)
     # Render
     "width": 1920,
     "height": 1080,

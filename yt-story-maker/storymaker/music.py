@@ -187,10 +187,13 @@ def synth_bed(mood, seconds, seed=0):
 
 
 # ------------------------------------------------------------------ bed rendering
-def load_track(track, seconds, mood, seed):
-    """Track audio of exactly `seconds`, looped if short; synth if no track."""
+def load_track(track, seconds, mood, seed, generate=False):
+    """Track audio of exactly `seconds`, looped if short. Without a track: silence, or the
+    generated pad if switched on (it is plain, so it is off by default)."""
     n = int(round(seconds * SR))
     if not track:
+        if not generate:
+            return np.zeros((n, 2), dtype=np.float32)
         return synth_bed(mood, seconds, seed)[:n]
     data = decode(track)
     if len(data) == 0:
@@ -222,10 +225,11 @@ def envelope(n, points, ramp=0.35, rate=1000):
     return np.interp(np.arange(n) * (rate / SR), np.arange(m), smooth).astype(np.float32)
 
 
-def render_act_bed(out_path, act_seconds, track, mood, gain_points, narration, seed=0):
+def render_act_bed(out_path, act_seconds, track, mood, gain_points, narration, seed=0,
+                   generate=True):
     """Write one act's bed: ducked music + narration placed at their times."""
     n = int(round(act_seconds * SR))
-    music = load_track(track, act_seconds, mood, seed)
+    music = load_track(track, act_seconds, mood, seed, generate)
     if len(music) < n:
         music = np.pad(music, ((0, n - len(music)), (0, 0)))
     bed = music * envelope(n, gain_points)[:, None]

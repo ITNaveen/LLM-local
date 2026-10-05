@@ -1,7 +1,6 @@
 #!/bin/bash
 # Double-click on your Mac to start StoryMaker. First run installs everything it needs.
 cd "$(dirname "$0")"
-set -e
 
 need_brew() {
   if ! command -v brew >/dev/null 2>&1; then
@@ -39,20 +38,34 @@ done
 if [ -z "$PY" ]; then need_brew; brew install python@3.12; PY=python3.12; fi
 
 if [ ! -d .venv ]; then
-  echo "First run: setting up Python packages (one time)..."
+  echo "First run: creating the Python environment (one time)..."
   "$PY" -m venv .venv
 fi
 source .venv/bin/activate
-pip install -q --upgrade pip >/dev/null
-pip install -q -r requirements.txt
-pip install -q --upgrade "yt-dlp[default]"   # YouTube changes often; stay current
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install packages only when requirements.txt changed (fast restarts, no silent waiting).
+REQ_HASH=$(shasum requirements.txt | cut -d' ' -f1)
+if [ "$(cat .venv/.req-hash 2>/dev/null)" != "$REQ_HASH" ]; then
+  echo "Installing Python packages (a minute or two)..."
+  pip install --timeout 30 -r requirements.txt && echo "$REQ_HASH" > .venv/.req-hash
+fi
+# YouTube changes often: refresh yt-dlp at most once a day, never block the start.
+if [ -z "$(find .venv/.ytdlp-checked -mtime -1 2>/dev/null)" ]; then
+  echo "Checking for a newer yt-dlp (max 60 s)..."
+  ( pip install -q --timeout 20 --upgrade "yt-dlp[default]" >/dev/null 2>&1 & PID=$!
+    ( sleep 60; kill $PID 2>/dev/null ) & wait $PID ) || true
+  touch .venv/.ytdlp-checked
+fi
 
 # Start Ollama if it's installed but not running.
-if command -v ollama >/dev/null 2>&1 && ! curl -s http://127.0.0.1:11434/api/tags >/dev/null; then
+if command -v ollama >/dev/null 2>&1 && ! curl -s -m 2 http://127.0.0.1:11434/api/tags >/dev/null; then
+  echo "Starting Ollama..."
   (ollama serve >/dev/null 2>&1 &)
   sleep 3
 fi
 
 PORT=$(python -c "from storymaker.config import load_settings; print(load_settings()['port'])")
-(sleep 2; (open "http://localhost:$PORT" 2>/dev/null || xdg-open "http://localhost:$PORT" 2>/dev/null || true)) &
+echo "Starting StoryMaker at http://localhost:$PORT  (keep this window open; Ctrl+C stops it)"
+(sleep 2; open "http://localhost:$PORT" 2>/dev/null || xdg-open "http://localhost:$PORT" 2>/dev/null || true) &
 python -m storymaker

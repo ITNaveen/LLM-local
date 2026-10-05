@@ -163,11 +163,15 @@ def render_card(seg, background_png, out_v, out_a, tl, settings, work):
     W, H, fps = tl["width"], tl["height"], tl["fps"]
     dur = seg["frames"] / fps
     ass = Path(work) / f"card_{seg['i']}.ass"
-    size = int(H * 0.085)
+    if seg.get("style") == "text":   # story text card: calmer, smaller, slow push-in
+        size, tags = int(H * 0.058), (f"{{\\an5\\q0\\fad(350,350)\\fscx100\\fscy100"
+                                      f"\\t(0,{int(dur * 1000)},\\fscx104\\fscy104)}}")
+    else:                            # title card
+        size, tags = int(H * 0.085), (f"{{\\an5\\fad(500,500)\\fscx108\\fscy108"
+                                      f"\\t(0,{int(dur * 1000)},\\fscx100\\fscy100)}}")
     ass.write_text(ass_header(W, H, size, 0, outline=4) +
-                   f"Dialogue: 0,{_ass_ts(0)},{_ass_ts(dur)},Default,,0,0,0,,"
-                   f"{{\\an5\\fad(500,500)\\fscx108\\fscy108\\t(0,{int(dur * 1000)},\\fscx100\\fscy100)}}"
-                   f"{_ass_escape(seg['text'])}\n", encoding="utf-8")
+                   f"Dialogue: 0,{_ass_ts(0)},{_ass_ts(dur)},Default,,{int(W * 0.1)},{int(W * 0.1)},0,,"
+                   f"{tags}{_ass_escape(seg['text'])}\n", encoding="utf-8")
     if background_png and Path(background_png).exists():
         inputs = ["-loop", "1", "-framerate", str(fps), "-i", str(background_png)]
         bg = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
@@ -265,7 +269,14 @@ def render(tl, files, settings, job_dir, log, progress=None):
     hero_png = extract_frame(work / f"v{hero['i']:04d}.mp4", hero["dur"] * 0.4, work / "hero.png")
     for seg in segs:
         if seg["type"] == "card":
-            render_card(seg, hero_png, work / f"v{seg['i']:04d}.mp4", work / f"a{seg['i']:04d}.wav",
+            bg = hero_png
+            if seg.get("style") == "text":   # background: the shot the card leads into
+                near = next((x for x in segs[seg["i"] + 1:] if x["type"] == "clip"), None) or \
+                    next((x for x in reversed(segs[:seg["i"]]) if x["type"] == "clip"), None)
+                if near:
+                    bg = extract_frame(work / f"v{near['i']:04d}.mp4", near["dur"] * 0.3,
+                                       work / f"bg{seg['i']:04d}.png")
+            render_card(seg, bg, work / f"v{seg['i']:04d}.mp4", work / f"a{seg['i']:04d}.wav",
                         tl, settings, work)
 
     log("Joining shots...")
@@ -281,7 +292,8 @@ def render(tl, files, settings, job_dir, log, progress=None):
         seconds = act["frames"] / tl["fps"]
         path = work / f"bed{i}.wav"
         music.render_act_bed(path, seconds, act["track"], act["mood"], act["gain_points"],
-                             act["narration"], seed=i)
+                             act["narration"], seed=i,
+                             generate=bool(settings.get("generated_music", False)))
         bed_files.append(path)
     blist = work / "bed.txt"
     blist.write_text("".join(f"file '{p.name}'\n" for p in bed_files))

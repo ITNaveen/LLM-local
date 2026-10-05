@@ -129,11 +129,13 @@ def _job_or_404(job_id):
 @app.get("/api/jobs/<job_id>")
 def job_detail(job_id):
     job = _job_or_404(job_id)
-    st = read_json(job.path("story.json")) or read_json(job.path("outline.json"))
+    st = read_json(job.path("story.json"))
     tl = read_json(job.path("timeline.json"))
+    mom = read_json(job.path("moments.json")) or {}
     return jsonify({
         "state": job.state,
         "story": st,
+        "rejected": mom.get("rejected"),
         "chapters": (tl or {}).get("chapters"),
         "youtube": read_json(job.path("youtube.json")),
         "research": _research_summary(job),
@@ -163,8 +165,8 @@ def cancel(job_id):
 @app.post("/api/jobs/<job_id>/approve")
 def approve(job_id):
     job = _job_or_404(job_id)
-    edits = (request.get_json(force=True) or {}).get("edits") or {}
-    pipeline.apply_review_edits(job, edits)
+    body = request.get_json(force=True) or {}
+    pipeline.apply_review_edits(job, body.get("edits") or {}, body.get("remove") or [])
     job.set(approved=True, status="queued")
     work_queue.put(job_id)
     return jsonify({"ok": True})

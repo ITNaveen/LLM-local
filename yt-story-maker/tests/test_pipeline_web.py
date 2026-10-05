@@ -23,7 +23,7 @@ def _loudness(path):
 
 def test_full_pipeline_with_ai(settings, fake_llm):
     job = pipeline.Job.create({"topic": "Virat Kohli", "description": "pressure then a century",
-                               "minutes": 1.5, "theme": "epic", "narration": "light", "demo": True})
+                               "minutes": 2.5, "theme": "epic", "narration": "light", "demo": True})
     pipeline.run_job(job, settings, source=FixtureSource(settings), llm=fake_llm)
     assert job.state["status"] == "done", job.state.get("error") or job.state["log"][-5:]
     final = job.path("final.mp4")
@@ -44,20 +44,25 @@ def test_full_pipeline_with_ai(settings, fake_llm):
 
 
 def test_review_flow_edit_and_resume(settings, fake_llm):
-    job = pipeline.Job.create({"topic": "Virat Kohli", "minutes": 1.2, "review": True,
+    job = pipeline.Job.create({"topic": "Virat Kohli", "minutes": 2.5, "review": True,
                                "narration": "medium", "demo": True})
     src = FixtureSource(settings)
     pipeline.run_job(job, settings, source=src, llm=fake_llm)
     assert job.state["status"] == "awaiting_review"
     assert not job.path("final.mp4").exists()
     outline = json.loads(job.path("outline.json").read_text())
-    nid = next(b["narration_id"] for a in outline["acts"] for b in a["beats"] if b.get("narration_id"))
-    assert pipeline.apply_review_edits(job, {nid: "नई लाइन जो मैंने खुद लिखी है।"})
+    narr = next(sc for sc in outline["scenes"] if sc["type"] == "narration")
+    drop = [sc for sc in outline["scenes"] if sc["type"] == "dialogue"][-1]
+    assert pipeline.apply_review_edits(job, {narr["id"]: "नई लाइन जो मैंने खुद लिखी है।"},
+                                       remove=[drop["id"]])
     job.set(approved=True)
     pipeline.run_job(job, settings, source=src, llm=fake_llm)
     assert job.state["status"] == "done", job.state.get("error")
     srt = job.path("narration_hi.srt").read_text()
     assert "नई लाइन जो मैंने खुद लिखी" in srt and "है।" in srt
+    story = json.loads(job.path("story.json").read_text())
+    ids = {b.get("scene_id") for a in story["acts"] for b in a["beats"]}
+    assert drop["id"] not in ids and narr["id"] in ids
 
 
 def test_resume_after_failure_reuses_finished_stages(settings, fake_llm):

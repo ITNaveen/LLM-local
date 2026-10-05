@@ -49,15 +49,20 @@ stopped (**Resume**).
 
 ## How the "editor brain" works
 
+StoryMaker edits like a documentary editor: it builds **scenes**, never a pile of random clips.
+
 | Step | What happens |
 |---|---|
 | 1. Research | The AI turns your topic into 10–16 searches (Hindi + English) and reads up to **500 videos' titles, views and channels**. Downloads nothing. |
-| 2. Rank | Scores each video for relevance, popularity and footage quality. Reaction videos, Shorts and podcasts are pushed down. The AI then picks the best ~24. |
-| 3. Moments | Reads each video's **transcript** (what is said, when) and YouTube's **"Most replayed" graph** (the seconds people rewatch). These become hundreds of candidate moments. |
-| 4. Story | The AI writes a **five-act story**: opening hook → build-up → rising tension → climax → ending. For every beat it decides **who speaks**: the *narrator* (Hindi voice-over), the *clip itself* (speech, commentary, crowd) or *music only* (montage). |
-| 5. Clip choice | Every beat gets the best matching seconds: whole sentences for dialogue, the hottest replayed seconds for the climax, and no footage reused. It opens with a **cold-open teaser** of the biggest moments. |
-| 6. Sound | Narration is recorded (free Microsoft Edge Hindi neural voice; offline Piper or the Mac voice as backup). Music ducks automatically under speech. Cuts in montages **snap to the music's beat**. |
-| 7. Render | Downloads **only the seconds it uses**, fills vertical clips with a blurred background, adds a light colour grade, a title card, Hindi subtitles, YouTube loudness (−14 LUFS) and chapters. |
+| 2. Screen | Every shortlisted video is checked. **Indian regional languages are never used** (Telugu, Tamil, …): Indian footage must be Hindi or English. **Foreign-language videos** (e.g. German news) are used only as silent visuals. Comedy, vlogs, reactions and off-topic videos are rejected by the AI, with the reason shown. |
+| 3. Understand | The transcript of every usable video is cut into **passages**: complete thoughts of 10–35 s. The AI reads each one: who says what, which sub-topic, how strong. |
+| 4. Plan scenes | The AI builds the film as scenes: **hook** (the most powerful real lines), **text cards** (context, like the best Indian edits), **dialogue** (one complete passage from one source), **narration** bridges, **montages**. For every scene it must write *why it follows the previous one*. One thread at a time; a bridge whenever the source or sub-topic changes. |
+| 5. Editor review | A second AI pass reviews the whole film like a senior editor: removes scenes that break the flow, reorders, adds bridges, and scores it with a list of weak spots. You see this in the review. |
+| 6. Fit the length | If the film is short, speakers *continue* (the next passage of the same video) or the AI adds scenes that continue an existing thread. It never pads with random clips; if there isn't enough strong material it tells you. |
+| 7. Sound & render | Hindi narration, music only from your library (ducked under speech), cuts on the beat in montages, 1080p, Hindi subtitles, chapters, YouTube loudness. |
+
+In the **review** you see every scene with what is actually said, why it is there, and a
+**Keep** box. Untick anything you don't like, edit any text, then press **Render video**.
 
 ## Teach it your favourite editing style
 
