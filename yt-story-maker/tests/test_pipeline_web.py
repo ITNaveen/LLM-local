@@ -154,3 +154,24 @@ def test_web_api(client):
     st = client.get("/api/styles").get_json()
     assert st["styles"][0]["name"] == "cinematic"
     assert client.post("/api/settings", json={"burn_subtitles": False, "unknown": 1}).get_json()["burn_subtitles"] is False
+
+
+def test_one_video_refusing_download_still_finishes(settings, fake_llm):
+    """Like the real 'ffmpeg exited with code 8': one source fails, the film is re-cut."""
+    import threading
+    lock, bad = threading.Lock(), []
+
+    class OneBad(FixtureSource):
+        def download_section(self, video_id, *a, **k):
+            with lock:
+                if not bad:
+                    bad.append(video_id)          # the first video asked for always fails
+            if video_id == bad[0]:
+                raise RuntimeError("ERROR: ffmpeg exited with code 8")
+            return super().download_section(video_id, *a, **k)
+    job = pipeline.Job.create({"topic": "x", "minutes": 2.5, "demo": True})
+    pipeline.run_job(job, settings, source=OneBad(settings), llm=fake_llm)
+    assert job.state["status"] == "done", job.state.get("error")
+    tl = json.loads(job.path("timeline.json").read_text())
+    assert all(s["video_id"] != bad[0] for s in tl["segments"] if s["type"] == "clip")
+    assert any("re-editing around them" in line for line in job.state["log"])

@@ -46,10 +46,9 @@ def clean_text(text, max_words=28):
 
 
 def _num(value, default=None):
-    try:
-        return int(str(value).strip().lstrip("PVpv#"))
-    except (TypeError, ValueError):
-        return default
+    """First whole number in a value: 7, "7", "7/10", "P12", "V3" -> 7, 7, 7, 12, 3."""
+    m = re.search(r"-?\d+", str(value)) if value is not None else None
+    return int(m.group()) if m else default
 
 
 # =================================================================== 0. reading
@@ -874,7 +873,7 @@ class Assembler:
                 need = min(25.0 - beat_seconds(b), self.total * 0.95 - total())
                 if need > 2:
                     b["clips"] += self.broll(need, avoid_vid=b["clips"][-1]["video_id"])
-        if total() < self.total * 0.9:
+        if total() < self.total * 0.85:
             msg = (f"Only {total() / 60:.1f} min of strong, on-topic material was found, so the film "
                    f"is shorter than {self.total / 60 + 0.07:.0f} min rather than padded with weak clips. "
                    "A more specific description or a broader topic gives more material.")

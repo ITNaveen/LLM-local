@@ -166,3 +166,36 @@ def test_thumbnail_text_keeps_every_word():
     assert render.thumbnail_text("विराट का जवाब") == "विराट का जवाब"
     two = render.thumbnail_text("विराट कोहली का सबसे बड़ा जवाब")
     assert two.replace("\\N", " ") == "विराट कोहली का सबसे बड़ा जवाब" and "\\N" in two
+
+
+def test_locate_prefers_full_cover_then_start_cover():
+    files = {"a": [{"start": 10.0, "end": 20.0, "file": "f1"}]}
+    inside = {"video_id": "a", "src_start": 12.0, "dur": 5.0}
+    overflow = {"video_id": "a", "src_start": 15.0, "dur": 9.0}      # ends 4 s past the file
+    outside = {"video_id": "a", "src_start": 30.0, "dur": 2.0}
+    assert render.locate(files, inside) == ("f1", 2.0)
+    assert render.locate(files, overflow) == ("f1", 5.0)
+    assert render.locate(files, overflow, strict=True) == (None, 0.0)
+    assert render.locate(files, outside) == (None, 0.0)
+    render.merge_files(files, {"a": [{"start": 14.0, "end": 26.0, "file": "f2"}]})
+    assert render.locate(files, overflow, strict=True) == ("f2", 1.0)
+
+
+def test_download_all_accepts_whole_video_fallback(tmp_path):
+    class WholeVideo:
+        def download_section(self, video_id, start, end, out_base):
+            return {"file": "full.mp4", "start": 0.0, "end": 300.0}
+    segs = [{"type": "clip", "video_id": "v", "src_start": 100.0, "dur": 4.0}]
+    files, failed = render.download_all(WholeVideo(), segs, tmp_path, lambda m: None)
+    assert not failed
+    assert render.locate(files, segs[0], strict=True) == ("full.mp4", 100.0)
+
+
+def test_render_holds_last_frame_when_source_is_short(tmp_path):
+    src = tmp_path / "short.mp4"
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=2", "-f", "lavfi", "-i",
+           "sine=duration=2", "-c:v", "libx264", "-preset", "ultrafast", "-shortest", str(src))
+    seg = {"frames": 240, "fade_in": 0, "fade_out": 0, "clip_gain": 1.0}   # 8 s from a 2 s file
+    render.render_segment(seg, str(src), 0.5, tmp_path / "v.mp4", tmp_path / "a.wav",
+                          {"width": 320, "height": 180, "fps": 30}, {"preset": "ultrafast"})
+    assert int(probe(tmp_path / "v.mp4")["streams"][0]["nb_frames"]) == 240

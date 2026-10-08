@@ -202,22 +202,34 @@ def run_job(job, settings, source=None, llm=None):
         # 7. download only what we use
         share, sub = stage("download")
         files, failed = render.download_all(source, tl["segments"], job.path("downloads"), log)
-        clip_segs = [s for s in tl["segments"] if s["type"] == "clip"]
-        missing = [s for s in clip_segs if not render.locate(files, s)[0]]
-        if len(missing) == len(clip_segs):
-            raise RuntimeError("No footage could be downloaded. " + "; ".join(failed[:2]))
-        if missing:
-            # Edit around unavailable shots for this render only; the saved story keeps them,
-            # so a temporary network problem never loses footage from the plan.
-            log(f"{len(missing)} shots unavailable - re-editing around them.")
-            gone = {(s["video_id"], round(s["src_start"], 2)) for s in missing}
-            pruned = copy.deepcopy(st)
-            for act in pruned["acts"]:
-                for b in act["beats"]:
-                    b["clips"] = [c for c in b["clips"] if (c["video_id"], round(c["start"], 2)) not in gone]
-            tl = timeline.build(pruned, vo, tracks, grids, settings)
-            tl["title_hi"] = st.get("title_hi", topic)
-            write_json(job.path("timeline.json"), tl)
+        gone_keys = set()
+        for _round in range(3):
+            clip_segs = [s for s in tl["segments"] if s["type"] == "clip"]
+            gone = [s for s in clip_segs if not render.locate(files, s)[0]]
+            if len(gone) == len(clip_segs):
+                raise RuntimeError("No footage could be downloaded. " + "; ".join(failed[:2]))
+            if gone:
+                # Edit around unavailable shots for this render only; the saved story keeps
+                # them, so a temporary network problem never loses footage from the plan.
+                log(f"{len(gone)} shots unavailable - re-editing around them.")
+                gone_keys |= {(s["video_id"], round(s["src_start"], 2)) for s in gone}
+                pruned = copy.deepcopy(st)
+                for act in pruned["acts"]:
+                    for b in act["beats"]:
+                        b["clips"] = [c for c in b["clips"]
+                                      if (c["video_id"], round(c["start"], 2)) not in gone_keys]
+                tl = timeline.build(pruned, vo, tracks, grids, settings)
+                tl["title_hi"] = st.get("title_hi", topic)
+                write_json(job.path("timeline.json"), tl)
+            # Re-cutting can lengthen a neighbouring shot: fetch those extra seconds.
+            short = [s for s in tl["segments"] if s["type"] == "clip"
+                     and render.locate(files, s)[0] and not render.locate(files, s, strict=True)[0]]
+            if not gone and not short:
+                break
+            if short:
+                log(f"Fetching a few extra seconds for {len(short)} re-cut shots...")
+                more, _ = render.download_all(source, short, job.path("downloads"), log)
+                render.merge_files(files, more)
         finish(share)
 
         # 8. render

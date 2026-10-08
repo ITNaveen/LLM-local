@@ -50,8 +50,9 @@ def download_all(source, segments, out_dir, log, workers=3):
         futures = [pool.submit(job, r) for r in plan]
         for n, fut in enumerate(as_completed(futures), 1):
             try:
-                r, path = fut.result()
-                files.setdefault(r["video_id"], []).append({**r, "file": path})
+                r, got = fut.result()
+                entry = {**r, **got} if isinstance(got, dict) else {**r, "file": got}
+                files.setdefault(r["video_id"], []).append(entry)
             except Exception as e:  # noqa: BLE001 - drop clips from this section later
                 failed.append(str(e)[:200])
                 log(f"  download failed: {str(e)[:160]}")
@@ -60,11 +61,24 @@ def download_all(source, segments, out_dir, log, workers=3):
     return files, failed
 
 
-def locate(files, seg):
-    for r in files.get(seg["video_id"], []):
+def locate(files, seg, strict=False):
+    """File + offset for a shot. Prefers a file that covers the whole shot; unless strict,
+    falls back to one that covers its start (the renderer holds the last frame)."""
+    ranges = files.get(seg["video_id"], [])
+    for r in ranges:
         if r["start"] - 0.01 <= seg["src_start"] and seg["src_start"] + seg["dur"] <= r["end"] + 0.6:
             return r["file"], seg["src_start"] - r["start"]
+    if not strict:
+        for r in ranges:
+            if r["start"] - 0.01 <= seg["src_start"] < r["end"] - 0.5:
+                return r["file"], seg["src_start"] - r["start"]
     return None, 0.0
+
+
+def merge_files(files, more):
+    for vid, lst in more.items():
+        files.setdefault(vid, []).extend(lst)
+    return files
 
 
 # ------------------------------------------------------------------ segments
@@ -103,7 +117,7 @@ def render_segment(seg, src, offset, out_v, out_a, tl, settings):
     if seg["fade_out"]:
         fades += f",fade=t=out:st={max(0, dur - seg['fade_out']):.3f}:d={seg['fade_out']}"
     vchain += (f"[v0]setsar=1,fps={fps},eq=contrast=1.05:saturation=1.08,"
-               f"tpad=stop_mode=clone:stop_duration=4{fades},format=yuv420p[v]")
+               f"tpad=stop_mode=clone:stop_duration={max(4.0, dur + 1):.1f}{fades},format=yuv420p[v]")
     gain = seg["clip_gain"]
     afades = f"afade=t=in:d={max(0.03, seg['fade_in'])}"
     afades += f",afade=t=out:st={max(0, dur - max(0.06, seg['fade_out'])):.3f}:d={max(0.06, seg['fade_out'])}"

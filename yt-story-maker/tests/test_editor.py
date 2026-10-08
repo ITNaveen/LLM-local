@@ -220,3 +220,8 @@ def test_timeline_with_text_cards_and_no_music(material, settings):
     for act in tl["acts"]:
         for n in act["narration"]:
             assert act["start"] <= n["abs"] and n["abs"] + n["duration"] <= act["end"] + 0.01
+
+
+def test_numbers_from_ai_text():
+    assert [editor._num(x) for x in (7, "7/10", "score 8 of 10", "P12", None, "x")] == \
+        [7, 7, 8, 12, None, None]

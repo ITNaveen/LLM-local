@@ -205,30 +205,61 @@ class YouTubeSource:
         return details
 
     def download_section(self, video_id, start, end, out_base):
-        """Download only [start, end] seconds of a video. Returns the file path."""
+        """Download only [start, end] seconds of a video.
+        Returns the file path, or {"file", "start", "end"} when it had to fall back to
+        downloading the whole video (some videos refuse cut-out sections)."""
         import yt_dlp
         from yt_dlp.utils import download_range_func
         h = self.settings.get("height", 1080)
         out_base = Path(out_base)
-        existing = glob.glob(str(out_base) + ".*")
-        done = [p for p in existing if p.endswith((".mp4", ".mkv", ".webm"))]
-        if done:
-            return done[0]
-        opts = self._opts(
-            format=(f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/"
-                    f"b[height<={h}]/bv*+ba/b"),
-            download_ranges=download_range_func(None, [(start, end)]),
-            force_keyframes_at_cuts=True,
-            merge_output_format="mp4",
-            outtmpl={"default": str(out_base) + ".%(ext)s"},
-        )
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-        files = [p for p in glob.glob(str(out_base) + ".*")
-                 if p.endswith((".mp4", ".mkv", ".webm"))]
-        if not files:
-            raise PipelineError(f"download of {video_id} [{start:.0f}-{end:.0f}s] produced no file")
-        return files[0]
+
+        def found(base):
+            return [p for p in glob.glob(str(base) + ".*") if p.endswith((".mp4", ".mkv", ".webm"))]
+
+        def clean(base):
+            for p in glob.glob(str(base) + ".*"):
+                Path(p).unlink(missing_ok=True)
+
+        if found(out_base):
+            return found(out_base)[0]
+        full_base = out_base.parent / f"{video_id}_full"
+        if found(full_base):
+            return self._full_result(video_id, found(full_base)[0])
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        formats = [f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
+                   "b[height<=720][ext=mp4]/b[height<=720]/18/b"]   # plain single-file fallback
+        errors = []
+        for fmt in formats:
+            try:
+                with yt_dlp.YoutubeDL(self._opts(
+                        format=fmt, download_ranges=download_range_func(None, [(start, end)]),
+                        force_keyframes_at_cuts=True, merge_output_format="mp4",
+                        outtmpl={"default": str(out_base) + ".%(ext)s"})) as ydl:
+                    ydl.download([url])
+                if found(out_base):
+                    return found(out_base)[0]
+            except Exception as e:  # noqa: BLE001 - try the next way
+                errors.append(str(e)[-120:])
+            clean(out_base)
+        # Last resort: the whole video (only if it is not too long), cut locally later.
+        duration = float((read_json(self.details_dir / f"{video_id}.json") or {}).get("duration") or 0)
+        if 0 < duration <= 40 * 60:
+            self.log(f"  section download refused for {video_id}; fetching the whole video instead")
+            try:
+                with yt_dlp.YoutubeDL(self._opts(
+                        format="b[height<=720][ext=mp4]/bv*[height<=720]+ba/b[height<=720]/b",
+                        merge_output_format="mp4",
+                        outtmpl={"default": str(full_base) + ".%(ext)s"})) as ydl:
+                    ydl.download([url])
+                if found(full_base):
+                    return self._full_result(video_id, found(full_base)[0])
+            except Exception as e:  # noqa: BLE001
+                errors.append(str(e)[-120:])
+        raise PipelineError(f"download of {video_id} [{start:.0f}-{end:.0f}s] failed: {errors[-1] if errors else '?'}")
+
+    def _full_result(self, video_id, path):
+        from .util import media_duration
+        return {"file": path, "start": 0.0, "end": media_duration(path)}
 
     def download_full(self, url, out_base, max_height=720):
         """Used by the style learner for a reference video."""
