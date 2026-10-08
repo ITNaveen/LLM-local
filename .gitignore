@@ -4,3 +4,9 @@ __pycache__/
 
 # macOS Finder metadata
 .DS_Store
+
+# Live Translator
+live-translator/.venv/
+live-translator/certs/
+live-translator/dist/
+.pytest_cache/

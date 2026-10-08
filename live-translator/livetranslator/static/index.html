@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Translator</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'%3EDE%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-left">
+    <div class="brand" title="Live Translator - German → English">
+      <span class="logo">DE→EN</span>
+    </div>
+    <div class="meeting-box">
+      <input id="meetingName" class="meeting-name" type="text" maxlength="80" placeholder="Name this meeting…" aria-label="Meeting name" autocomplete="off">
+      <span id="meetingWhen" class="meeting-when"></span>
+    </div>
+  </div>
+  <div class="bar-right">
+    <div class="health">
+      <span id="asrPill" class="pill" title="Speech recognition"><i></i><b>Speech</b></span>
+      <span id="llmPill" class="pill" title="Translation"><i></i><b>Translator</b></span>
+    </div>
+    <div class="meter" id="meter" title="Microphone level">
+      <div class="meter-fill" id="meterFill"></div>
+      <span class="meter-voice" id="meterVoice" title="Voice detected"></span>
+    </div>
+    <span id="timer" class="timer">00:00</span>
+    <div class="btn-group" role="group" aria-label="Text size">
+      <button class="icon" id="smaller" title="Smaller text" aria-label="Smaller text">A−</button>
+      <button class="icon" id="bigger" title="Bigger text" aria-label="Bigger text">A+</button>
+    </div>
+    <button class="icon toggle" id="toggleDe" title="Show / hide the German line" aria-pressed="true">DE</button>
+    <button id="startBtn" class="primary big" disabled>Start</button>
+    <button id="meetingsBtn" class="ghost">Meetings</button>
+    <button id="settingsBtn" class="icon" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.7 7.7 0 0 0-1.7-1L15 3h-4l-.4 2.9a7.7 7.7 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.4-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg>
+    </button>
+  </div>
+</header>
+
+<div id="viewBanner" class="view-banner" hidden>
+  <div class="vb-text"><strong id="vbTitle"></strong> <span id="vbWhen"></span></div>
+  <div class="vb-actions">
+    <button id="vbSummary" class="ghost">Meeting notes</button>
+    <button id="vbContinue" class="ghost" title="Keep listening and add to this meeting">Continue this meeting</button>
+    <a id="vbDownloadMd" class="btn ghost" download>Download</a>
+    <a id="vbDownloadTxt" class="btn ghost" download>.txt</a>
+    <button id="vbFolder" class="ghost">Show folder</button>
+    <button id="vbDelete" class="ghost danger">Delete</button>
+    <button id="vbBack" class="primary">Back to live</button>
+  </div>
+</div>
+
+<div id="browserAudio" class="browser-audio" hidden>
+  <span>Audio input is set to <b>this browser</b>.</span>
+  <button id="baMic" class="ghost">Send this browser's microphone</button>
+  <button id="baTab" class="ghost" title="Chrome/Edge: share a tab or the screen with 'Share audio' ticked">Send tab / system audio</button>
+  <span id="baState" class="muted"></span>
+</div>
+
+<main id="scroller" class="scroller">
+  <div class="feed-wrap">
+    <section id="summaryBox" class="summary" hidden></section>
+    <section id="liveFeed" class="feed" aria-live="polite"></section>
+    <section id="viewFeed" class="feed" hidden></section>
+    <div id="partial" class="line partial" hidden><div class="t"><span class="dot"></span></div><div class="body"><div class="de"></div></div></div>
+    <div id="emptyState" class="empty">
+      <h1>Ready when you are.</h1>
+      <p>Put the meeting on the speaker next to this laptop and press <b>Start</b>.<br>
+      Each time the speaker pauses, the German line appears with the English translation underneath.<br>
+      Everything is saved automatically in <code id="dataDir">~/LiveTranslator/Meetings</code>.</p>
+      <p class="muted" id="emptyHint"></p>
+    </div>
+  </div>
+</main>
+<button id="jumpLive" class="jump" hidden>↓ Latest</button>
+
+<aside id="meetingsDrawer" class="drawer" hidden aria-label="Meetings">
+  <div class="drawer-head"><h2>Meetings</h2><button class="icon close" data-close aria-label="Close">✕</button></div>
+  <input id="meetingSearch" class="search" type="search" placeholder="Search names…">
+  <div id="meetingList" class="meeting-list"></div>
+</aside>
+
+<aside id="settingsDrawer" class="drawer wide" hidden aria-label="Settings">
+  <div class="drawer-head"><h2>Settings</h2><span id="savedMark" class="saved" hidden>Saved ✓</span><button class="icon close" data-close aria-label="Close">✕</button></div>
+  <form id="settingsForm" class="settings" onsubmit="return false">
+    <fieldset>
+      <legend>Listening</legend>
+      <label>Audio input
+        <select name="input_source">
+          <option value="mic">Microphone of this computer (recommended)</option>
+          <option value="browser">Audio sent from a browser (remote / host-name use)</option>
+        </select>
+      </label>
+      <label data-for-source="mic">Microphone
+        <select name="input_device" id="deviceSelect"><option value="">System default</option></select>
+      </label>
+      <label>Sensitivity
+        <select name="sensitivity">
+          <option value="normal">Normal (recommended)</option>
+          <option value="high">High - quiet or far-away speaker</option>
+          <option value="low">Low - noisy room, only clear speech</option>
+        </select>
+      </label>
+      <label>New line after a pause of <output id="pauseOut"></output>
+        <input type="range" name="pause_ms" min="300" max="1200" step="50">
+        <small>Shorter = faster lines; longer = fewer half sentences.</small>
+      </label>
+      <label class="check"><input type="checkbox" name="live_preview"> Show German live while someone is speaking (grey)</label>
+    </fieldset>
+    <fieldset>
+      <legend>Speech recognition</legend>
+      <label>Model
+        <select name="asr_model" id="asrSelect"></select>
+        <small>Changing it reloads the model (the first time it is downloaded).</small>
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Translation (Ollama)</legend>
+      <label>Model
+        <select name="llm_model" id="llmSelect"></select>
+      </label>
+      <div id="pullBox" class="pull" hidden>
+        <button type="button" id="pullBtn" class="primary">Download model</button>
+        <progress id="pullProgress" max="100" value="0" hidden></progress>
+        <span id="pullText" class="muted"></span>
+      </div>
+      <label>Lines of context the translator sees
+        <input type="number" name="context_lines" min="0" max="40">
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Help it with names and topics</legend>
+      <label>Names, products, abbreviations (one per line or comma separated)
+        <textarea name="glossary" rows="4" placeholder="e.g.&#10;Herr Schneider&#10;SAP S/4HANA&#10;Ausländerbehörde&#10;Aufenthaltstitel"></textarea>
+        <small>Both the speech model and the translator use these - names come out spelled right.</small>
+      </label>
+      <label>What is the meeting about? (optional)
+        <textarea name="topic" rows="2" placeholder="e.g. Weekly project meeting about the data migration"></textarea>
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Display</legend>
+      <label>Text size <output id="fontOut"></output>
+        <input type="range" name="font_scale" min="0.7" max="2.2" step="0.05">
+      </label>
+      <label class="check"><input type="checkbox" name="show_german"> Show the German line</label>
+      <label>Theme
+        <select name="theme"><option value="auto">Follow system</option><option value="dark">Dark</option><option value="light">Light</option></select>
+      </label>
+    </fieldset>
+    <p class="muted small" id="infoLine"></p>
+  </form>
+</aside>
+<div id="scrim" class="scrim" hidden></div>
+<div id="toasts" class="toasts" aria-live="assertive"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
