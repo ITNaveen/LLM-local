@@ -14,6 +14,10 @@ warn() { printf "  \033[33m!\033[0m %s\n" "$*"; }
 
 bold "Live Translator - setup"
 OS="$(uname -s)"; ARCH="$(uname -m)"
+if [ "$OS" = "Darwin" ]; then
+  # downloaded files are quarantined by macOS; allow double-clicking the launcher
+  xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
+fi
 echo "  System: $OS $ARCH"
 if [ "$OS" = "Darwin" ] && [ "$ARCH" != "arm64" ]; then
   warn "Intel Mac detected - speech recognition will run on the CPU (slower)."
