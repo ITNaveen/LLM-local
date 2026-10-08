@@ -46,7 +46,16 @@ import sqlite3
 import sys
 import re
 
-DB_PATH = os.path.expanduser("~/Documents/local-llm-db/chats.db")
+# Same folder logic as app.py: local-llm-db next to this app's folder
+# (e.g. ~/Documents/LLM/), LOCALLLM_ROOT overrides, ~/Documents is the fallback.
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if os.environ.get("LOCALLLM_ROOT"):
+    _ROOT = os.path.expanduser(os.environ["LOCALLLM_ROOT"])
+elif os.path.isdir(os.path.join(_PARENT, "local-llm-db")):
+    _ROOT = _PARENT
+else:
+    _ROOT = os.path.expanduser("~/Documents")
+DB_PATH = os.path.join(_ROOT, "local-llm-db", "chats.db")
 
 
 def disarm_self():

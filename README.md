@@ -28,6 +28,10 @@ then pick it in **Settings → Local AI**. `LocalLLM.command` starts Ollama for 
 4. Switch the top bar to **🏠 Local** and ask:
    *"what's the latest on grafana in dev?"* → *"how did I fix it?"*
 
+> **Folder location:** keep `local-llm-app`, `local-llm-db` and `local-llm-dropbox` side by side —
+> e.g. all three in `~/Documents/LLM/` (paths below use `~/Documents/`). The app and
+> `LocalLLM.command` find them wherever they are; `LOCALLLM_ROOT=/path` overrides.
+
 ### The safety rules (the "lock")
 | What happens | Where |
 |---|---|

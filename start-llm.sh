@@ -1,8 +1,11 @@
 #!/bin/bash
-APP_DIR="$HOME/Documents/local-llm-app"
-LOG="$HOME/Documents/local-llm-db/server.log"
-PID_F="$HOME/Documents/local-llm-db/server.pid"
-CAFF_F="$HOME/Documents/local-llm-db/caff.pid"
+ROOT="${LOCALLLM_ROOT:-$HOME/Documents}"
+[ -z "$LOCALLLM_ROOT" ] && [ -f "$HOME/Documents/LLM/local-llm-app/app.py" ] && ROOT="$HOME/Documents/LLM"
+export LOCALLLM_ROOT="$ROOT"
+APP_DIR="$ROOT/local-llm-app"
+LOG="$ROOT/local-llm-db/server.log"
+PID_F="$ROOT/local-llm-db/server.pid"
+CAFF_F="$ROOT/local-llm-db/caff.pid"
 
 echo ""
 echo "╔══════════════════════════════════╗"

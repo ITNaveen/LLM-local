@@ -18,12 +18,25 @@
 #  No accumulation. No leftovers. Clean every time.
 # ═══════════════════════════════════════════════════════════════════════════
 
-PID_F="$HOME/Documents/local-llm-db/server.pid"
-CAFF_F="$HOME/Documents/local-llm-db/caff.pid"
-TUNNEL_F="$HOME/Documents/local-llm-db/tunnel.pid"
-WATCHDOG_F="$HOME/Documents/local-llm-db/watchdog.pid"
-APP_DIR="$HOME/Documents/local-llm-app"
-LOG="$HOME/Documents/local-llm-db/server.log"
+# ── WHERE THE LOCALLLM FOLDERS LIVE ──────────────────────────────────────────
+# local-llm-app, local-llm-db and local-llm-dropbox sit side by side in ROOT.
+# Uses ~/Documents/LLM if the app is there, otherwise ~/Documents (the old
+# place). To use another place: export LOCALLLM_ROOT=/path before running.
+if [ -n "$LOCALLLM_ROOT" ]; then
+  ROOT="$LOCALLLM_ROOT"
+elif [ -f "$HOME/Documents/LLM/local-llm-app/app.py" ]; then
+  ROOT="$HOME/Documents/LLM"
+else
+  ROOT="$HOME/Documents"
+fi
+export LOCALLLM_ROOT="$ROOT"          # app.py and the tunnel watchdog read this too
+
+PID_F="$ROOT/local-llm-db/server.pid"
+CAFF_F="$ROOT/local-llm-db/caff.pid"
+TUNNEL_F="$ROOT/local-llm-db/tunnel.pid"
+WATCHDOG_F="$ROOT/local-llm-db/watchdog.pid"
+APP_DIR="$ROOT/local-llm-app"
+LOG="$ROOT/local-llm-db/server.log"
 
 
 # ── STOP ─────────────────────────────────────────────────────────────────────
@@ -72,6 +85,15 @@ fi
 
 
 # ── START ─────────────────────────────────────────────────────────────────────
+# Refuse to half-start (power settings changed, no server) if the app can't be found.
+if [ ! -f "$APP_DIR/app.py" ] || [ ! -d "$ROOT/local-llm-db" ]; then
+  echo ""
+  echo "✗ Can't find LocalLLM in: $ROOT"
+  echo "  Expected $ROOT/local-llm-app/app.py and $ROOT/local-llm-db/"
+  echo "  Nothing was started or changed."
+  sleep 5
+  exit 1
+fi
 echo ""
 echo "╔══════════════════════════════════╗"
 echo "║    LocalLLM — Starting...        ║"
@@ -161,8 +183,8 @@ echo "  Phone  → http://$IP:8080"
 # Smart: if Flask unreachable → system sleeping → do nothing, wait for wake.
 # On wake: detects tunnel drop, restarts cloudflared within 30s.
 nohup bash -c '
-  LOG="$HOME/Documents/local-llm-db/server.log"
-  TUNNEL_PID_F="$HOME/Documents/local-llm-db/tunnel.pid"
+  LOG="$LOCALLLM_ROOT/local-llm-db/server.log"
+  TUNNEL_PID_F="$LOCALLLM_ROOT/local-llm-db/tunnel.pid"
 
   start_tunnel() {
     [ -f "$TUNNEL_PID_F" ] && kill $(cat "$TUNNEL_PID_F") 2>/dev/null
