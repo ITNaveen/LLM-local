@@ -3,7 +3,7 @@
 LocalLLM — Production-grade personal AI for Naveen Thapliyal
 Claude (Anthropic) API
 Token-conservative: rolling compression + prompt caching + smart windowing
-All data stored locally in ~/Documents/local-llm-db/
+All data stored locally in local-llm-db/, next to this app's folder
 """
 
 import os
@@ -38,11 +38,24 @@ log = logging.getLogger("localllm")
 # ─────────────────────────────────────────────────────────────────────────────
 #  PATHS & APP INIT
 # ─────────────────────────────────────────────────────────────────────────────
-BASE_DIR   = Path.home() / "Documents" / "local-llm-db"
+# The three LocalLLM folders are siblings:  <ROOT>/local-llm-app   (this code)
+#                                            <ROOT>/local-llm-db    (chats, settings, KB)
+#                                            <ROOT>/local-llm-dropbox
+# The app uses the data folders NEXT TO ITS OWN folder, so moving all three
+# together (e.g. into ~/Documents/LLM/) just works. LOCALLLM_ROOT (set by
+# LocalLLM.command) wins; the original ~/Documents is the fallback.
+_APP_PARENT = Path(__file__).resolve().parent.parent
+if os.environ.get("LOCALLLM_ROOT"):
+    ROOT_DIR = Path(os.environ["LOCALLLM_ROOT"]).expanduser()
+elif (_APP_PARENT / "local-llm-db").is_dir():
+    ROOT_DIR = _APP_PARENT
+else:
+    ROOT_DIR = Path.home() / "Documents"
+BASE_DIR   = ROOT_DIR / "local-llm-db"
 DB_PATH    = BASE_DIR / "chats.db"
 UPLOAD_DIR = BASE_DIR / "uploads"
 CHATS_DIR  = BASE_DIR / "chats"
-DROP_DIR   = Path.home() / "Documents" / "local-llm-dropbox"
+DROP_DIR   = ROOT_DIR / "local-llm-dropbox"
 
 for d in [BASE_DIR, UPLOAD_DIR, CHATS_DIR, DROP_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -4609,7 +4622,7 @@ def api_chat_cleanup_delete():
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/dropbox/upload", methods=["POST"])
 def api_dropbox_upload():
-    """Receive files from phone/browser, save to ~/Documents/local-llm-dropbox/"""
+    """Receive files from phone/browser, save to local-llm-dropbox/"""
     if "files" not in request.files:
         return jsonify({"error": "No files provided"}), 400
 

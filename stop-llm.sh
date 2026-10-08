@@ -1,6 +1,9 @@
 #!/bin/bash
-PID_F="$HOME/Documents/local-llm-db/server.pid"
-CAFF_F="$HOME/Documents/local-llm-db/caff.pid"
+ROOT="${LOCALLLM_ROOT:-$HOME/Documents}"
+[ -z "$LOCALLLM_ROOT" ] && [ -f "$HOME/Documents/LLM/local-llm-app/app.py" ] && ROOT="$HOME/Documents/LLM"
+export LOCALLLM_ROOT="$ROOT"
+PID_F="$ROOT/local-llm-db/server.pid"
+CAFF_F="$ROOT/local-llm-db/caff.pid"
 
 echo ""
 echo "╔══════════════════════════════════╗"
