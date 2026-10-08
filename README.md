@@ -32,6 +32,16 @@ then pick it in **Settings → Local AI**. `LocalLLM.command` starts Ollama for 
 > e.g. all three in `~/Documents/LLM/` (paths below use `~/Documents/`). The app and
 > `LocalLLM.command` find them wherever they are; `LOCALLLM_ROOT=/path` overrides.
 
+### Repo numbers — when the source folder is renamed
+Every living repo has a permanent number, shown as **#1**, **#2** … next to it. It never
+changes and is never reused. If your work repo is renamed (say `5x` → `29x`):
+* Drop it as usual. The app compares the files' fingerprints with your repos and
+  offers **"Sync into #1 5x — 187 of 200 files are identical"**, or type the number yourself.
+* In the preview, tick **"Also rename #1 to 29x"** to match the source. Number, files,
+  history and search stay the same.
+* Folders renamed *inside* the repo (`dev/kafka-a` → `dev/kafka-strimzi`) are detected
+  the same way: identical files are **moved**, not uploaded again, and keep their history.
+
 ### The safety rules (the "lock")
 | What happens | Where |
 |---|---|

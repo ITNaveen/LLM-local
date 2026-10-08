@@ -258,6 +258,25 @@ CREATE TABLE IF NOT EXISTS lr_chat_focus (
 def _init_schema():
     with _db() as conn:
         conn.executescript(_SCHEMA)
+        # Every living repo has a permanent NUMBER (#1, #2, …). The name can change
+        # (the source folder gets renamed); the number never does and is never
+        # reused, so "sync into #1" always means the same repo.
+        if "ref_no" not in {r[1] for r in conn.execute("PRAGMA table_info(lr_repos)")}:
+            conn.execute("ALTER TABLE lr_repos ADD COLUMN ref_no INTEGER")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_lr_repos_ref ON lr_repos(ref_no)")
+        for r in conn.execute("SELECT id FROM lr_repos WHERE ref_no IS NULL ORDER BY created_at").fetchall():
+            conn.execute("UPDATE lr_repos SET ref_no=? WHERE id=?", (_next_ref(conn), r["id"]))
+
+
+def _next_ref(conn) -> int:
+    """Next repo number. Remembered in settings so a deleted repo's number is
+    never handed out again."""
+    row = conn.execute("SELECT value FROM settings WHERE key='living_repo_last_ref'").fetchone()
+    last = max(int(row[0]) if row and str(row[0]).isdigit() else 0,
+               conn.execute("SELECT COALESCE(MAX(ref_no), 0) FROM lr_repos").fetchone()[0])
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('living_repo_last_ref', ?)",
+                 (str(last + 1),))
+    return last + 1
 
 
 def _cleanup_stale_staging():
@@ -933,15 +952,95 @@ def _repo_by_slug(conn, slug: str):
     return conn.execute("SELECT * FROM lr_repos WHERE slug=?", (slug,)).fetchone()
 
 
+def _repo_by_ref(conn, ref):
+    return conn.execute("SELECT * FROM lr_repos WHERE ref_no=?", (ref,)).fetchone()
+
+
+def _parse_ref(v):
+    """'3', 3 or '#3' → 3; anything else → None."""
+    try:
+        n = int(str(v).strip().lstrip("#"))
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _best_move_source(rel: str, cands: list) -> str:
+    """Several missing files can share one fingerprint (e.g. identical READMEs).
+    Pick the one that looks most like the same file: same file name first, then
+    the most path parts in common from the end."""
+    def score(c):
+        common = 0
+        for x, y in zip(reversed(c.split("/")), reversed(rel.split("/"))):
+            if x != y:
+                break
+            common += 1
+        return (c.rsplit("/", 1)[-1] == rel.rsplit("/", 1)[-1], common)
+    return max(cands, key=score)
+
+
+def _rename_groups(pairs: list) -> list:
+    """[(old, new), …] → [{'from': 'dev/kafka-a', 'to': 'dev/kafka-strimzi', 'files': 12}]
+    by dropping the path parts both sides share at the end."""
+    groups = {}
+    for old, new in pairs:
+        a, b = old.split("/"), new.split("/")
+        while len(a) > 1 and len(b) > 1 and a[-1] == b[-1]:
+            a, b = a[:-1], b[:-1]
+        key = ("/".join(a), "/".join(b))
+        groups[key] = groups.get(key, 0) + 1
+    return [{"from": k[0], "to": k[1], "files": n}
+            for k, n in sorted(groups.items(), key=lambda kv: -kv[1])]
+
+
+@bp.route("/api/repos/match", methods=["POST"])
+def api_repo_match():
+    """Does a dropped folder look like one of the living repos — even under a new
+    name? Compares fingerprints (and, without them, paths) with every repo."""
+    data = request.get_json(silent=True) or {}
+    shas, paths = set(), set()
+    for f in data.get("files") or []:
+        sha = (f.get("sha256") or "").lower()
+        if re.fullmatch(r"[0-9a-f]{64}", sha):
+            shas.add(sha)
+        try:
+            paths.add(clean_relpath(f.get("path", "")))
+        except ValueError:
+            pass
+    out = []
+    with _db() as conn:
+        for r in conn.execute("SELECT * FROM lr_repos"):
+            rows = conn.execute("SELECT path, sha256 FROM lr_files WHERE repo_id=? AND status='active'",
+                                (r["id"],)).fetchall()
+            same_content = sum(1 for x in rows if x["sha256"] in shas)
+            same_path = sum(1 for x in rows if x["path"] in paths)
+            score = max(same_content, same_path)
+            if score:
+                out.append({"ref": r["ref_no"], "name": r["name"], "slug": r["slug"], "files": len(rows),
+                            "same_content": same_content, "same_path": same_path, "score": score})
+    out.sort(key=lambda x: -x["score"])
+    return jsonify({"dropped": len(paths), "candidates": out[:3]})
+
+
 @bp.route("/api/repos/plan", methods=["POST"])
 def api_repo_plan():
     """Step 1. The browser sends the manifest (no file content). We answer with
     what is new / changed / unchanged / missing and which files to upload."""
     data = request.get_json(silent=True) or {}
-    name = (data.get("name") or "").strip()
-    slug = _slug(name)
-    if not slug:
-        return jsonify({"error": "Give the repo a name (letters, digits, - _ .)"}), 400
+    ref = _parse_ref(data.get("ref")) if data.get("ref") not in (None, "") else None
+    if data.get("ref") not in (None, "") and ref is None:
+        return jsonify({"error": "The repo number must be a number, e.g. 1"}), 400
+    if ref:
+        with _db() as conn:
+            target = _repo_by_ref(conn, ref)
+        if not target:
+            return jsonify({"error": f"There is no living repo #{ref}."}), 404
+        name, slug = target["name"], target["slug"]
+    else:
+        name = (data.get("name") or "").strip()
+        slug = _slug(name)
+        if not slug:
+            return jsonify({"error": "Give the repo a name (letters, digits, - _ .)"}), 400
     manifest, skipped, seen, too_big = {}, [], set(), set()
     for f in data.get("files") or []:
         try:
@@ -971,13 +1070,28 @@ def api_repo_plan():
                                   (repo["id"],)):
                 existing[r["path"]] = dict(r)
 
-    counts = {"new": 0, "changed": 0, "check": 0, "unchanged": 0, "restored": 0, "missing": 0}
+    missing = sorted(p for p, r in existing.items()
+                     if r["status"] == "active" and p not in manifest and p not in too_big)
+    # MOVED / RENAMED: a file at a new path whose fingerprint equals a file that
+    # is missing from this drop is the SAME file under a new name or folder.
+    # It keeps its history and dates, and nothing is uploaded again.
+    by_sha = {}
+    for p_ in missing:
+        by_sha.setdefault(existing[p_]["sha256"], []).append(p_)
+    moved_pairs = []
+
+    counts = {"new": 0, "changed": 0, "check": 0, "unchanged": 0, "restored": 0, "moved": 0, "missing": 0}
     samples = {k: [] for k in counts}
     upload = []
     for rel, m in manifest.items():
         old = existing.get(rel)
         if not old:
             cls = "new"
+            if m["sha"] and by_sha.get(m["sha"]):
+                src = _best_move_source(rel, by_sha[m["sha"]])
+                by_sha[m["sha"]].remove(src)
+                cls, m["from"] = "moved", src
+                moved_pairs.append((src, rel))
         elif m["sha"]:
             cls = ("restored" if old["status"] == "removed" else "unchanged") \
                 if m["sha"] == old["sha256"] else "changed"
@@ -988,11 +1102,11 @@ def api_repo_plan():
         m["cls"] = cls
         counts[cls] += 1
         if len(samples[cls]) < 200:
-            samples[cls].append(rel)
+            samples[cls].append(f"{m['from']}  →  {rel}" if cls == "moved" else rel)
         if cls in ("new", "changed", "check"):
             upload.append(rel)
-    missing = sorted(p for p, r in existing.items()
-                     if r["status"] == "active" and p not in manifest and p not in too_big)
+    moved_from = {a for a, _ in moved_pairs}
+    missing = [p_ for p_ in missing if p_ not in moved_from]
     counts["missing"] = len(missing)
     samples["missing"] = missing[:200]
 
@@ -1008,7 +1122,8 @@ def api_repo_plan():
 
     plan_id = uuid.uuid4().hex
     plan = {"slug": slug, "name": repo["name"] if repo else name, "files": manifest,
-            "missing": missing, "upload": upload, "counts": counts}
+            "missing": missing, "upload": upload, "counts": counts,
+            "repo_id": repo["id"] if repo else None}
     with _db() as conn:
         conn.execute("INSERT INTO lr_syncs (id, repo_id, repo_name, status, plan, created_at) "
                      "VALUES (?,?,?,?,?,?)",
@@ -1017,9 +1132,11 @@ def api_repo_plan():
     return jsonify({
         "plan_id": plan_id,
         "repo": {"name": plan["name"], "slug": slug, "exists": bool(repo),
+                 "ref": repo["ref_no"] if repo else None,
                  "locked": bool(repo["locked"]) if repo else True,
                  "files_before": active_before},
         "counts": counts, "samples": samples, "upload": upload,
+        "renames": _rename_groups(moved_pairs)[:50],
         "skipped": skipped[:200], "warnings": warnings,
     })
 
@@ -1117,18 +1234,33 @@ def _commit_sync(plan_id: str):
         stage = STAGING_DIR / plan_id
         now = _now()
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        res = {"added": 0, "changed": 0, "unchanged": 0, "restored": 0, "removed": 0,
+        res = {"added": 0, "changed": 0, "unchanged": 0, "restored": 0, "removed": 0, "moved": 0,
                "same_content": 0, "errors": [],
-               "paths": {"added": [], "changed": [], "removed": [], "restored": []}}
+               "paths": {"added": [], "changed": [], "removed": [], "restored": [], "moved": []}}
         try:
             with _db() as conn:
-                repo = _repo_by_slug(conn, plan["slug"])
+                repo = None
+                if plan.get("repo_id"):              # by identity — survives a rename
+                    repo = conn.execute("SELECT * FROM lr_repos WHERE id=?", (plan["repo_id"],)).fetchone()
+                if not repo:
+                    repo = _repo_by_slug(conn, plan["slug"])
                 if not repo:
                     rid = uuid.uuid4().hex
-                    conn.execute("INSERT INTO lr_repos (id, name, slug, locked, created_at, updated_at) "
-                                 "VALUES (?,?,?,1,?,?)", (rid, plan["name"], plan["slug"], now, now))
+                    conn.execute("INSERT INTO lr_repos (id, name, slug, locked, created_at, updated_at, ref_no) "
+                                 "VALUES (?,?,?,1,?,?,?)",
+                                 (rid, plan["name"], plan["slug"], now, now, _next_ref(conn)))
                     repo = _repo_by_slug(conn, plan["slug"])
                 conn.execute("UPDATE lr_syncs SET repo_id=? WHERE id=?", (repo["id"], plan_id))
+                # Files missing from this drop, by fingerprint: an uploaded "new" file
+                # with one of these fingerprints is really a move (caught here when the
+                # browser couldn't fingerprint before uploading, e.g. plain http).
+                pool = {}
+                for rel_ in plan["missing"]:
+                    r_ = conn.execute("SELECT sha256 FROM lr_files WHERE repo_id=? AND path=? AND status='active'",
+                                      (repo["id"], rel_)).fetchone()
+                    if r_:
+                        pool.setdefault(r_["sha256"], []).append(rel_)
+            ctx = {"pool": pool, "consumed": set()}
             mirror = REPOS_DIR / repo["slug"]
             mirror.mkdir(parents=True, exist_ok=True)
             hist = HISTORY_DIR / repo["slug"] / stamp
@@ -1136,7 +1268,7 @@ def _commit_sync(plan_id: str):
             done = 0
             for rel, m in plan["files"].items():
                 try:
-                    _apply_one(repo, rel, m, stage, mirror, hist, now, res)
+                    _apply_one(repo, rel, m, stage, mirror, hist, now, res, ctx)
                 except Exception as e:
                     res["errors"].append(f"{rel}: {e}")
                     log.warning("Living Repos: %s failed: %s", rel, e)
@@ -1145,8 +1277,12 @@ def _commit_sync(plan_id: str):
                     with _db() as conn:
                         conn.execute("UPDATE lr_syncs SET progress_done=? WHERE id=?", (done, plan_id))
 
+            if res["moved"]:
+                _prune_empty_dirs(mirror)            # folders that were renamed away
             with _db() as conn:
                 for rel in plan["missing"]:
+                    if rel in ctx["consumed"]:
+                        continue                     # it moved — not missing
                     n = conn.execute("UPDATE lr_files SET status='removed', removed_at=? "
                                      "WHERE repo_id=? AND path=? AND status='active'",
                                      (now, repo["id"], rel)).rowcount
@@ -1182,9 +1318,10 @@ def _write_sync_log(repo, sync_no: int, stamp: str, res: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     paths = res["paths"]
     out = ["═" * 72,
-           f"Sync #{sync_no} · {datetime.now():%a %d %b %Y, %H:%M} · {repo['name']}",
+           f"Sync #{sync_no} · {datetime.now():%a %d %b %Y, %H:%M} · repo #{repo['ref_no']} {repo['name']}",
            f"  + {res['added']} new   ~ {res['changed']} changed   - {res['removed']} missing from the drop (kept)"
            f"   = {res['unchanged'] + res['same_content']} unchanged"
+           + (f"   ↪ {res['moved']} moved/renamed" if res["moved"] else "")
            + (f"   ↺ {res['restored']} back again" if res["restored"] else "")]
     if paths["changed"]:
         out.append(f"  Old versions of changed files: repo-history/{repo['slug']}/{stamp}/")
@@ -1192,6 +1329,7 @@ def _write_sync_log(repo, sync_no: int, stamp: str, res: dict) -> None:
     out += [f"  ~ {x}" for x in paths["changed"]]
     out += [f"  - {x}   (still in living-repos, flagged 'removed')" for x in paths["removed"]]
     out += [f"  ↺ {x}" for x in paths["restored"]]
+    out += [f"  ↪ {x}" for x in paths["moved"]]
     out += [f"  ! {e}" for e in res["errors"]]
     try:
         with open(p, "a", encoding="utf-8") as f:
@@ -1200,11 +1338,76 @@ def _write_sync_log(repo, sync_no: int, stamp: str, res: dict) -> None:
         log.warning("sync log write failed: %s", e)
 
 
-def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
+def _prune_empty_dirs(root: Path) -> None:
+    """Remove folders left empty inside a repo copy (e.g. a folder that was renamed).
+    Only empty folders — never a file."""
+    for dirpath, _, _ in os.walk(root, topdown=False):
+        d = Path(dirpath)
+        if d != root:
+            try:
+                left = [x for x in d.iterdir() if x.name != ".DS_Store"]
+                if not left:
+                    for x in d.iterdir():
+                        x.unlink()
+                    d.rmdir()
+            except OSError:
+                pass
+
+
+def _archive(src: Path, hist: Path, rel: str) -> Path:
+    """Move a repo file into this sync's history folder (never delete it)."""
+    archived = _inside(hist, rel)
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    _fs_unlock(src)
+    shutil.move(str(src), str(archived))
+    _fs_lock(archived)
+    return archived
+
+
+def _move_file(conn, repo, srow, rel, m, mirror, hist, now, res, staged=None):
+    """The same file (same fingerprint) now lives at a new path: move it there and
+    update its row — it keeps its id, first-seen date, history and 'latest' date."""
+    src, dest = _inside(mirror, srow["path"]), _inside(mirror, rel)
+    if dest.exists():
+        _archive(dest, hist, rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if staged is not None:                    # an identical copy was uploaded anyway
+        shutil.move(str(staged), str(dest))
+        if src.exists():
+            _archive(src, hist, srow["path"])
+    else:
+        _fs_unlock(src)
+        shutil.move(str(src), str(dest))
+    _set_original_mtime(dest, m.get("mtime") or srow["mtime"] or "")
+    _fs_lock(dest)
+    text, is_text = _read_text(dest, rel)
+    fac = path_facets(rel)
+    hint = date_hint(rel, text)
+    rec = max(srow["recency"], hint) if hint else srow["recency"]     # a rename isn't new work
+    conn.execute(
+        "UPDATE lr_files SET path=?, mtime=?, status='active', removed_at=NULL, env=?, product=?, "
+        "item=?, version=?, version_key=?, title=?, date_hint=?, recency=?, is_text=? WHERE id=?",
+        (rel, m.get("mtime") or srow["mtime"], fac["env"], fac["product"], fac["item"], fac["version"],
+         fac["version_key"], _title_of(text, rel), hint, rec, int(is_text), srow["id"]))
+    _index_file(conn, srow["id"], repo["id"], rel, text, is_text)
+    res["moved"] += 1
+    res["paths"]["moved"].append(f"{srow['path']}  →  {rel}")
+
+
+def _apply_one(repo, rel, m, stage, mirror, hist, now, res, ctx=None):
+    ctx = ctx if ctx is not None else {"pool": {}, "consumed": set()}
     cls = m["cls"]
     with _db() as conn:
         old = conn.execute("SELECT * FROM lr_files WHERE repo_id=? AND path=?",
                            (repo["id"], rel)).fetchone()
+        if cls == "moved":
+            srow = conn.execute("SELECT * FROM lr_files WHERE repo_id=? AND path=?",
+                                (repo["id"], m["from"])).fetchone()
+            if not srow or not _inside(mirror, m["from"]).exists():
+                raise RuntimeError(f"moved from {m['from']}, but that file is no longer there — drop again")
+            _move_file(conn, repo, srow, rel, m, mirror, hist, now, res)
+            ctx["consumed"].add(m["from"])
+            return
         if cls == "unchanged":
             res["unchanged"] += 1
             return
@@ -1216,6 +1419,15 @@ def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
 
         staged = stage / rel
         sha = _sha256_file(staged)
+        if not old and ctx["pool"].get(sha):
+            src_rel = _best_move_source(rel, ctx["pool"][sha])
+            ctx["pool"][sha].remove(src_rel)
+            srow = conn.execute("SELECT * FROM lr_files WHERE repo_id=? AND path=?",
+                                (repo["id"], src_rel)).fetchone()
+            if srow:
+                _move_file(conn, repo, srow, rel, m, mirror, hist, now, res, staged=staged)
+                ctx["consumed"].add(src_rel)
+                return
         if old and old["sha256"] == sha:
             # Same content as we already have (only the timestamp differed):
             # keep the file's "latest" date — nothing new was written in it.
@@ -1227,11 +1439,7 @@ def _apply_one(repo, rel, m, stage, mirror, hist, now, res):
         dest = _inside(mirror, rel)
         if dest.exists():
             # Never overwrite: the current copy goes to repo-history first.
-            archived = _inside(hist, rel)
-            archived.parent.mkdir(parents=True, exist_ok=True)
-            _fs_unlock(dest)
-            shutil.move(str(dest), str(archived))
-            _fs_lock(archived)
+            archived = _archive(dest, hist, rel)
             if old:
                 conn.execute("INSERT INTO lr_file_versions (id, file_id, sha256, size, mtime, archived_path, "
                              "replaced_at) VALUES (?,?,?,?,?,?,?)",
@@ -1288,7 +1496,7 @@ def api_repos_list():
                 "FROM lr_files WHERE repo_id=?", (r["id"],)).fetchone()
             pend = conn.execute("SELECT COUNT(*) FROM lr_chunks WHERE repo_id=? AND embedding IS NULL",
                                 (r["id"],)).fetchone()[0]
-            out.append({"name": r["name"], "slug": r["slug"], "locked": bool(r["locked"]),
+            out.append({"name": r["name"], "slug": r["slug"], "ref": r["ref_no"], "locked": bool(r["locked"]),
                         "files": c["active"] or 0, "removed": c["removed"] or 0,
                         "envs": c["envs"] or 0, "products": c["products"] or 0,
                         "last_sync_at": r["last_sync_at"], "sync_count": r["sync_count"],
@@ -1328,7 +1536,7 @@ def api_repo_overview(slug):
                 "versions": [v for _, v in sorted({v for _, d in items for v in d["versions"]})],
             })
         envs.append({"env": env, "products": prods})
-    return jsonify({"repo": repo["name"], "envs": envs})
+    return jsonify({"repo": repo["name"], "ref": repo["ref_no"], "envs": envs})
 
 
 @bp.route("/api/repos/<slug>/verify", methods=["GET"])
@@ -1357,13 +1565,49 @@ def api_repo_verify(slug):
             locked += _fs_is_locked(p)
     hist_ok = sum(1 for v in versions if (HISTORY_DIR / v["archived_path"]).is_file())
     return jsonify({
-        "repo": repo["name"], "checked": len(files), "intact": ok,
+        "repo": repo["name"], "ref": repo["ref_no"], "checked": len(files), "intact": ok,
         "changed_outside_app": changed[:50], "missing_on_disk": missing[:50],
         "removed_but_kept": sum(1 for f in files if f["status"] == "removed"),
         "old_versions": len(versions), "old_versions_on_disk": hist_ok,
         "finder_locked": locked, "lock_supported": bool(_IMMUTABLE and hasattr(os, "chflags")),
         "folder": str(mirror),
     })
+
+
+@bp.route("/api/repos/<slug>/rename", methods=["POST"])
+def api_repo_rename(slug):
+    """Give a living repo a new name (e.g. the source folder was renamed).
+    Its number, files, history and search index stay exactly the same; its
+    folders in living-repos/ and repo-history/ are renamed to match."""
+    data = request.get_json(silent=True) or {}
+    new_name = (data.get("name") or "").strip()
+    new_slug = _slug(new_name)
+    if not new_slug:
+        return jsonify({"error": "Give a name (letters, digits, - _ .)"}), 400
+    with _SYNC_LOCK:                                   # never while a sync is being applied
+        with _db() as conn:
+            repo = _repo_by_slug(conn, _slug(slug))
+            if not repo:
+                return jsonify({"error": "no such repo"}), 404
+            other = _repo_by_slug(conn, new_slug)
+            if other and other["id"] != repo["id"]:
+                return jsonify({"error": f"Living repo #{other['ref_no']} is already called '{other['name']}'."}), 409
+            old_slug = repo["slug"]
+            if new_slug != old_slug:
+                for base in (REPOS_DIR, HISTORY_DIR):
+                    if (base / new_slug).exists():
+                        return jsonify({"error": f"A folder '{new_slug}' already exists in {base}."}), 409
+                for base in (REPOS_DIR, HISTORY_DIR):
+                    if (base / old_slug).exists():
+                        os.rename(str(base / old_slug), str(base / new_slug))   # locked files can stay locked
+                conn.execute(
+                    "UPDATE lr_file_versions SET archived_path = ? || substr(archived_path, ?) "
+                    "WHERE archived_path LIKE ? AND file_id IN (SELECT id FROM lr_files WHERE repo_id=?)",
+                    (new_slug, len(old_slug) + 1, old_slug + "/%", repo["id"]))
+            conn.execute("UPDATE lr_repos SET name=?, slug=?, updated_at=? WHERE id=?",
+                         (new_name, new_slug, _now(), repo["id"]))
+    log.info("Living Repos: repo #%s renamed '%s' → '%s'", repo["ref_no"], repo["name"], new_name)
+    return jsonify({"ok": True, "ref": repo["ref_no"], "name": new_name, "slug": new_slug})
 
 
 @bp.route("/api/repos/<slug>/lock", methods=["POST"])
