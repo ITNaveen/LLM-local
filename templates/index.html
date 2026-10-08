@@ -268,6 +268,8 @@ a{color:var(--accentH)}
 .lr-item{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:7px 8px;margin-bottom:5px}
 .lr-top{display:flex;align-items:center;gap:6px}
 .lr-lock{font-size:12px;cursor:pointer;flex-shrink:0}
+.lr-ref{font-size:10px;font-weight:700;color:var(--accentH);background:var(--bg2);border:1px solid var(--border2);
+  border-radius:5px;padding:0 4px;flex-shrink:0;font-variant-numeric:tabular-nums}
 .lr-name{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--text);cursor:pointer;
   overflow-wrap:anywhere;line-height:1.3}
 .lr-name:hover{color:var(--accentH)}
@@ -312,6 +314,7 @@ a{color:var(--accentH)}
 .lr-choice input[type=radio]{margin-top:3px}
 .lr-choice b{color:var(--text)}
 .lr-choice:has(input:checked){border-color:var(--accent)}
+#lr-ref{padding:3px 7px;border-radius:6px;background:var(--bg);border:1px solid var(--border2);font-size:12px;color:var(--text)}
 #lr-name{width:100%;margin-top:6px;padding:7px 9px;border-radius:7px;background:var(--bg);border:1px solid var(--border2);font-size:12px;color:var(--text)}
 .lr-actions{display:flex;gap:8px;margin-top:12px}
 .lr-actions .go{flex:1;padding:9px;background:var(--accent);color:#fff;border-radius:8px;font-size:13px;font-weight:500}
@@ -2756,7 +2759,7 @@ async function lrWalk(dirEntry, prefix) {
   }
   return out;
 }
-// 📁 Folder button (target = null) or ⟳ Sync on a repo (target = that repo's name)
+// 📁 Folder button (target = null) or ⟳ Sync on a repo (target = {ref, name})
 function dbxPickFolder(target) {
   S.syncTarget = target;
   document.getElementById("dbx-dir").click();
@@ -2778,15 +2781,38 @@ function dbxDirPicked(e) {
   });
   folderReady(root, list, target);
 }
+// Fingerprint every file once; reused for "is this a repo I already have?" and the sync plan.
+async function lrManifest(list, status) {
+  var manifest = [];
+  for (var i = 0; i < list.length; i++) {
+    var x = list[i], sha = "";
+    try { sha = await lrHash(x.file); } catch (e) { sha = ""; }
+    manifest.push({path: x.rel, size: x.file.size, mtime: x.file.lastModified, sha256: sha});
+    if (status && i % 25 === 0) status("Fingerprinting " + (i + 1) + " / " + list.length + "…");
+  }
+  return manifest;
+}
 async function folderReady(rootName, list, target) {
   if (!list.length) { dbxStatus("That folder has no files (or only ignored ones like .git).", "err"); return; }
   dbxStatus("");
-  if (target) return lrStartSync(target, list);
+  S.lrPending = {root: rootName, list: list, manifest: null};
+  if (target) return lrStartSync(target);                         // ⟳ Sync on a repo
   var r = await api("/api/repos");
-  var match = (r.repos || []).find(function(x) { return x.slug === lrSlug(rootName); });
-  if (match) return lrStartSync(match.name, list);     // same name → it's the weekly re-drop
+  var repos = r.repos || [];
+  S.lrRepoList = repos;
+  var same = repos.find(function(x) { return x.slug === lrSlug(rootName); });
+  if (same) return lrStartSync({ref: same.ref, name: same.name});   // same name → the weekly re-drop
   var total = list.reduce(function(a, x) { return a + x.file.size; }, 0);
-  lrShowChoice(rootName, list, total);
+  var cands = [];
+  if (repos.length) {
+    // A new name — but is it one of your living repos renamed at the source?
+    lrModal('<h3>&#128193; “' + esc(rootName) + '”</h3><p>Checking whether this is one of your living repos ' +
+            'under a new name…</p><div id="lr-modal-status"></div>');
+    S.lrPending.manifest = await lrManifest(list, lrModalStatus);
+    var m = await api("/api/repos/match", "POST", {files: S.lrPending.manifest});
+    cands = m.candidates || [];
+  }
+  lrShowChoice(rootName, list, total, cands);
 }
 
 // ── modal helpers ──
@@ -2801,29 +2827,52 @@ function lrModalClose() {
 }
 function lrModalStatus(t) { var s = document.getElementById("lr-modal-status"); if (s) s.textContent = t; }
 
-function lrShowChoice(rootName, list, total) {
-  S.lrPending = {root: rootName, list: list};
-  lrModal(
-    '<h3>&#128193; “' + esc(rootName) + '” &mdash; ' + list.length + ' files, ' + fmtBytes(total) + '</h3>' +
-    '<p>How should the Dropbox keep this folder?</p>' +
-    '<label class="lr-choice"><input type="radio" name="lr-kind" value="repo" checked/><span>' +
-      '<b>&#129504; Living repo</b> &mdash; one repo that keeps growing. Drop the same folder again any time: ' +
-      'only new and changed files are added, nothing is ever deleted, and it is locked against accidental ' +
-      'removal. Your Local AI answers from it.' +
-      '<input id="lr-name" value="' + esc(rootName) + '" placeholder="Repo name — its sync identity"/></span></label>' +
-    '<label class="lr-choice"><input type="radio" name="lr-kind" value="plain"/><span>' +
-      '<b>&#128193; Normal folder</b> &mdash; just keep a copy with its sub-folders (like Google Drive). ' +
-      'Not searched by the AI.</span></label>' +
-    '<div class="lr-actions"><button class="go" onclick="lrChoiceGo()">Continue</button>' +
-    '<button class="no" onclick="lrModalClose()">Cancel</button></div><div id="lr-modal-status"></div>');
+function lrShowChoice(rootName, list, total, cands) {
+  var best = (cands || [])[0];
+  // "Strong" = a real share of the files match (not just a README or two)
+  var strong = !!best && best.score >= Math.max(3, 0.3 * Math.min(list.length, best.files || list.length));
+  S.lrCandidate = best || null;
+  function choice(value, checked, body) {
+    return '<label class="lr-choice"><input type="radio" name="lr-kind" value="' + value + '"' +
+           (checked ? ' checked' : '') + '/><span>' + body + '</span></label>';
+  }
+  function pick(v) { return ' onfocus="document.querySelector(\'input[name=lr-kind][value=' + v + ']\').checked=true"'; }
+  var h = '<h3>&#128193; “' + esc(rootName) + '” &mdash; ' + list.length + ' files, ' + fmtBytes(total) + '</h3>' +
+          '<p>How should the Dropbox keep this folder?</p>';
+  if (best) {
+    var how = best.same_content
+      ? best.same_content + ' of the ' + list.length + ' files here are identical to it'
+      : best.same_path + ' of the ' + list.length + ' file paths are the same';
+    h += choice("match", strong, '<b>&#128257; Sync into living repo #' + best.ref + ' “' + esc(best.name) + '”</b> &mdash; ' +
+                how + (strong ? '. It looks like the same repo under a new name.' : '.'));
+  }
+  h += choice("ref", false, '<b>&#128290; Sync into living repo number</b> ' +
+              '<input id="lr-ref" type="number" min="1" placeholder="#" style="width:70px;margin-left:4px"' + pick("ref") + '/>' +
+              '<br/><small>Every living repo has a fixed number (shown next to it). Use it when the source folder was renamed.</small>');
+  h += choice("repo", !strong, '<b>&#129504; New living repo</b> &mdash; one repo that keeps growing. Drop the same folder again ' +
+              'any time: only new and changed files are added, nothing is ever deleted, and it is locked against ' +
+              'accidental removal. Your Local AI answers from it.' +
+              '<input id="lr-name" value="' + esc(rootName) + '" placeholder="Repo name"' + pick("repo") + '/>');
+  h += choice("plain", false, '<b>&#128193; Normal folder</b> &mdash; just keep a copy with its sub-folders (like Google Drive). ' +
+              'Not searched by the AI.');
+  h += '<div class="lr-actions"><button class="go" onclick="lrChoiceGo()">Continue</button>' +
+       '<button class="no" onclick="lrModalClose()">Cancel</button></div><div id="lr-modal-status"></div>';
+  lrModal(h);
 }
 function lrChoiceGo() {
   var p = S.lrPending; if (!p) return;
   var kind = document.querySelector('input[name="lr-kind"]:checked').value;
   if (kind === "plain") { lrModalClose(); return dbxUploadFolderPlain(p.root, p.list); }
+  if (kind === "match" && S.lrCandidate) return lrStartSync({ref: S.lrCandidate.ref, name: S.lrCandidate.name});
+  if (kind === "ref") {
+    var n = parseInt(document.getElementById("lr-ref").value, 10);
+    var hit = (S.lrRepoList || []).find(function(x) { return x.ref === n; });
+    if (!hit) { lrModalStatus(n ? "There is no living repo #" + n + "." : "Type the repo number, e.g. 1."); return; }
+    return lrStartSync({ref: hit.ref, name: hit.name});
+  }
   var name = document.getElementById("lr-name").value.trim();
   if (!lrSlug(name)) { lrModalStatus("Give the repo a name (letters, digits, - _ .)."); return; }
-  lrStartSync(name, p.list);
+  lrStartSync({name: name});
 }
 
 // ── SYNC step 1: fingerprint locally, ask the Mac what is new/changed/missing ──
@@ -2834,19 +2883,17 @@ async function lrHash(file) {
   var h = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
   return Array.from(new Uint8Array(h)).map(function(b) { return b.toString(16).padStart(2, "0"); }).join("");
 }
-async function lrStartSync(name, list) {
-  S.lrPending = {name: name, list: list};
-  lrModal('<h3>&#129504; ' + esc(name) + '</h3><p>Comparing ' + list.length +
-          ' files with what the Mac already has…</p><div id="lr-modal-status"></div>');
-  var manifest = [];
-  for (var i = 0; i < list.length; i++) {
-    var x = list[i], sha = "";
-    try { sha = await lrHash(x.file); } catch (e) { sha = ""; }
-    manifest.push({path: x.rel, size: x.file.size, mtime: x.file.lastModified, sha256: sha});
-    if (i % 25 === 0) lrModalStatus("Fingerprinting " + (i + 1) + " / " + list.length + "…");
-  }
+// target = {ref, name} for an existing repo (matched by its NUMBER), or {name} for a new one
+async function lrStartSync(target) {
+  var p = S.lrPending;
+  p.target = target;
+  lrModal('<h3>&#129504; ' + (target.ref ? '#' + target.ref + ' ' : '') + esc(target.name) + '</h3><p>Comparing ' +
+          p.list.length + ' files with what the Mac already has…</p><div id="lr-modal-status"></div>');
+  if (!p.manifest) p.manifest = await lrManifest(p.list, lrModalStatus);
   lrModalStatus("Asking the Mac…");
-  var plan = await api("/api/repos/plan", "POST", {name: name, files: manifest});
+  var body = {files: p.manifest};
+  if (target.ref) body.ref = target.ref; else body.name = target.name;
+  var plan = await api("/api/repos/plan", "POST", body);
   if (plan.error) {
     lrModal('<h3>Could not prepare the sync</h3><p>' + esc(plan.error) + '</p>' +
             '<div class="lr-actions"><button class="no" onclick="lrModalClose()">Close</button></div>');
@@ -2858,11 +2905,13 @@ async function lrStartSync(name, list) {
 
 // ── SYNC step 2: show the preview; nothing changes until "Apply" ──
 function lrShowPlan(plan) {
-  var c = plan.counts, repo = plan.repo;
+  var c = plan.counts, repo = plan.repo, root = S.lrPending.root || "";
   var bytes = 0, want = {};
   plan.upload.forEach(function(r) { want[r] = 1; });
   S.lrPending.list.forEach(function(x) { if (want[x.rel]) bytes += x.file.size; });
-  var nothing = !plan.upload.length && !c.missing && !c.restored;
+  var nothing = !plan.upload.length && !c.missing && !c.restored && !c.moved;
+  // Dropped under a different name than the repo → offer to rename the repo to match the source
+  var offerRename = repo.exists && root && lrSlug(root) && lrSlug(root) !== repo.slug;
   function box(cls, label, n, hint) {
     return '<div class="lr-count ' + cls + '"><b>' + n + '</b>' + label + (hint ? '<br/><small>' + hint + '</small>' : '') + '</div>';
   }
@@ -2872,7 +2921,8 @@ function lrShowPlan(plan) {
       arr.map(function(p) { return '<li>' + esc(p) + '</li>'; }).join("") +
       (total > arr.length ? '<li>… and ' + (total - arr.length) + ' more</li>' : '') + '</ul></details>';
   }
-  var h = '<h3>' + (repo.exists ? '&#129504; Sync “' + esc(repo.name) + '”' : '&#129504; Create living repo “' + esc(repo.name) + '”') + '</h3>';
+  var h = '<h3>' + (repo.exists ? '&#129504; Sync #' + repo.ref + ' “' + esc(repo.name) + '”'
+                                : '&#129504; Create living repo “' + esc(repo.name) + '”') + '</h3>';
   h += '<p>' + (repo.exists
         ? 'Compared with the ' + repo.files_before + ' files the Mac already has. Nothing is changed until you press Apply.'
         : 'First drop — everything is new. Next time, drop the same folder again and only the changes travel.') + '</p>';
@@ -2882,23 +2932,37 @@ function lrShowPlan(plan) {
        box("chg", "&#9998; Changed", c.changed, c.changed ? "old version kept in history" : "") +
        box("", "= Unchanged", c.unchanged) +
        box("miss", "&#9888; Missing from this drop", c.missing, c.missing ? "kept &amp; flagged, never deleted" : "") +
+       (c.moved ? box("new", "&#8618; Moved / renamed", c.moved, "same content, new place — not uploaded again") : "") +
        (c.check ? box("", "? To compare", c.check, "no fingerprint over plain http — the Mac checks after upload") : "") +
        (c.restored ? box("new", "&#8634; Back again", c.restored) : "") +
        '</div>';
+  if (plan.renames && plan.renames.length) {
+    h += '<details open><summary>Renamed folders / files (' + plan.renames.length + ')</summary><ul>' +
+         plan.renames.map(function(g) {
+           return '<li>' + esc(g.from) + ' &nbsp;&rarr;&nbsp; ' + esc(g.to) + (g.files > 1 ? ' (' + g.files + ' files)' : '') + '</li>';
+         }).join("") + '</ul></details>';
+  }
   h += list("New files", plan.samples["new"], c["new"]) + list("Changed files", plan.samples.changed, c.changed) +
+       list("Moved / renamed files", plan.samples.moved, c.moved) +
        list("Missing from this drop (kept)", plan.samples.missing, c.missing) +
        list("To compare", plan.samples.check, c.check);
   if (plan.skipped && plan.skipped.length) {
     h += '<details><summary>Skipped (' + plan.skipped.length + ')</summary><ul>' +
          plan.skipped.map(function(s) { return '<li>' + esc(s.path) + ' — ' + esc(s.why) + '</li>'; }).join("") + '</ul></details>';
   }
+  if (offerRename) {
+    h += '<label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--text2);margin-top:10px;cursor:pointer">' +
+         '<input type="checkbox" id="lr-rename" style="margin-top:2px"/><span>Also rename #' + repo.ref + ' from “' +
+         esc(repo.name) + '” to “' + esc(root) + '” (the folder\'s new name). Its number, files and history stay the same.</span></label>';
+  }
   if (nothing) {
     h += '<p style="margin-top:10px"><b>Already up to date &#10003;</b> — nothing to upload.</p>' +
-         '<div class="lr-actions"><button class="no" onclick="lrCancel()">Close</button></div>';
+         '<div class="lr-actions">' + (offerRename ? '<button class="go" onclick="lrRenameOnly()">Rename only</button>' : '') +
+         '<button class="no" onclick="lrCancel()">Close</button></div>';
   } else {
     h += '<p style="margin-top:10px">' + (plan.upload.length
           ? 'Only <b>' + plan.upload.length + '</b> file(s) (' + fmtBytes(bytes) + ') will be uploaded.'
-          : 'No upload needed — only flags change.') + '</p>' +
+          : 'No upload needed — only flags and file places change.') + '</p>' +
          '<div class="lr-actions"><button class="go" id="lr-apply" onclick="lrApply()">Apply sync</button>' +
          '<button class="no" onclick="lrCancel()">Cancel</button></div>';
   }
@@ -2910,11 +2974,25 @@ async function lrCancel() {
   S.lrPlan = null;
   lrModalClose();
 }
+async function lrRename(slug, newName) {
+  var r = await api("/api/repos/" + slug + "/rename", "POST", {name: newName});
+  if (r.error) { toast("Rename failed: " + r.error); return false; }
+  toast("#" + r.ref + " is now called “" + r.name + "”");
+  return true;
+}
+async function lrRenameOnly() {
+  var plan = S.lrPlan;
+  var box = document.getElementById("lr-rename");
+  if (box && !box.checked) { lrModalStatus("Tick the rename box first."); return; }
+  if (await lrRename(plan.repo.slug, S.lrPending.root)) { lrCancel(); lrLoad(); }
+}
 
 // ── SYNC step 3: upload only what the plan asked for, then commit ──
 async function lrApply() {
   var plan = S.lrPlan, pend = S.lrPending;
   var btn = document.getElementById("lr-apply");
+  var renameBox = document.getElementById("lr-rename");
+  var doRename = !!(renameBox && renameBox.checked);
   if (btn) btn.disabled = true;
   var byRel = {};
   pend.list.forEach(function(x) { byRel[x.rel] = x.file; });
@@ -2951,10 +3029,13 @@ async function lrApply() {
     var res = st.result || {}, parts = [];
     if (res.added) parts.push(res.added + " new");
     if (res.changed) parts.push(res.changed + " changed");
+    if (res.moved) parts.push(res.moved + " moved/renamed");
     if (res.removed) parts.push(res.removed + " flagged missing (kept)");
     if (res.restored) parts.push(res.restored + " back again");
+    var label = plan.repo.ref ? "#" + plan.repo.ref + " " + plan.repo.name : plan.repo.name;
+    if (doRename) { await lrRename(plan.repo.slug, pend.root); label = "#" + plan.repo.ref + " " + pend.root; }
     lrModalClose();
-    dbxStatus("✓ " + plan.repo.name + " synced — " + (parts.join(", ") || "no content changes") +
+    dbxStatus("✓ " + label + " synced — " + (parts.join(", ") || "no content changes") +
               ". Indexing for search in the background.", "ok");
     if (res.errors && res.errors.length) toast("⚠ " + res.errors.length + " file(s) had problems — see server.log");
     S.lrPlan = null;
@@ -3051,6 +3132,7 @@ async function lrLoad() {
     return '<div class="lr-item"><div class="lr-top">' +
       '<span class="lr-lock" title="' + (x.locked ? 'Locked — click to unlock' : 'Unlocked — click to lock') +
         '" onclick="lrLockToggle(\'' + s + '\')">' + (x.locked ? '&#128274;' : '&#128275;') + '</span>' +
+      '<span class="lr-ref" title="This repo\'s permanent number — use it to sync a renamed folder">#' + x.ref + '</span>' +
       '<span class="lr-name" onclick="lrOverview(\'' + s + '\')" title="Show what the app understood">' + esc(x.name) + '</span>' +
       '<button class="lr-btn" onclick="lrSync(\'' + s + '\')" title="Pick the updated folder — only changes are applied">&#10227; Sync</button>' +
       '<button class="lr-btn" onclick="lrVerify(\'' + s + '\')" title="Verify: re-check every file against its fingerprint">&#10003;</button>' +
@@ -3064,7 +3146,7 @@ async function lrLoad() {
   }).join("");
   if (r.dir) document.getElementById("dbx-path").textContent = r.dir;
 }
-function lrSync(slug) { var x = S.lrRepos[slug]; if (x) dbxPickFolder(x.name); }
+function lrSync(slug) { var x = S.lrRepos[slug]; if (x) dbxPickFolder({ref: x.ref, name: x.name}); }
 async function lrLockToggle(slug) {
   var x = S.lrRepos[slug]; if (!x) return;
   var r;

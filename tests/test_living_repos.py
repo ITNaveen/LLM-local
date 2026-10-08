@@ -124,7 +124,7 @@ class LivingReposTest(unittest.TestCase):
         cls.c = A.app.test_client()
 
     # ── helpers ──────────────────────────────────────────────────────────────
-    def drop(self, name, files, with_sha=True):
+    def drop(self, name, files, with_sha=True, ref=None):
         """Do what the browser does: plan → upload the files it asks for → commit."""
         manifest = []
         for path, (text, date) in files.items():
@@ -133,7 +133,8 @@ class LivingReposTest(unittest.TestCase):
             if with_sha:
                 entry["sha256"] = hashlib.sha256(raw).hexdigest()
             manifest.append(entry)
-        plan = self.c.post("/api/repos/plan", json={"name": name, "files": manifest}).get_json()
+        body = {"files": manifest, **({"ref": ref} if ref else {"name": name})}
+        plan = self.c.post("/api/repos/plan", json=body).get_json()
         self.assertIn("plan_id", plan, plan)
         if plan["upload"]:
             data = {"plan_id": plan["plan_id"],
@@ -345,6 +346,87 @@ class LivingReposTest(unittest.TestCase):
             archived = next(R.HISTORY_DIR.joinpath("lock-test").rglob("notes.md"))
             self.assertIn(str(archived.resolve()), locked)                       # old version locked
             self.assertEqual(archived.read_text(), "# v1\n")
+
+    def test_renamed_source_and_renamed_folders(self):
+        """The source repo '5x' becomes '29x', and inside it dev/kafka-a becomes
+        dev/kafka-strimzi. Same repo number, files MOVE (no re-upload), history kept."""
+        v1 = {"dev/kafka-a/notes.md": ("# Kafka A notes\nKRaft, 3 controllers.\n", "2026-03-01"),
+              "dev/kafka-a/values.yaml": ("replicas: 3\n", "2026-03-01"),
+              "dev/grafana/otel.md": ("# OTel\nmemory_limiter fix\n", "2026-04-01"),
+              "prod/nexus/upgrade.md": ("# Nexus upgrade\n3.68 to 3.95\n", "2026-05-01")}
+        plan1, _ = self.drop("5x", v1)
+        ref = plan1["repo"]["ref"]
+        self.assertIsNone(ref)                                     # new repo → number given at commit
+        repo = next(x for x in self.c.get("/api/repos").get_json()["repos"] if x["slug"] == "5x")
+        ref = repo["ref"]
+        self.assertIsInstance(ref, int)
+
+        # The renamed folder is recognised by its CONTENT
+        v2 = {k.replace("dev/kafka-a/", "dev/kafka-strimzi/"): v for k, v in v1.items()}
+        v2["dev/grafana/otel.md"] = ("# OTel\nmemory_limiter fix\nUPDATE: batch processor too\n", "2026-06-01")
+        manifest = [{"path": p_, "size": len(t.encode()), "sha256": hashlib.sha256(t.encode()).hexdigest()}
+                    for p_, (t, _) in v2.items()]
+        m = self.c.post("/api/repos/match", json={"files": manifest}).get_json()
+        self.assertEqual(m["candidates"][0]["ref"], ref)
+        self.assertEqual(m["candidates"][0]["same_content"], 3)    # 3 of 4 identical
+
+        with A.get_db() as conn:
+            before = {r["path"]: (r["id"], r["first_seen"]) for r in conn.execute(
+                "SELECT path, id, first_seen FROM lr_files WHERE repo_id=(SELECT id FROM lr_repos WHERE ref_no=?)",
+                (ref,))}
+        plan2, res2 = self.drop("29x", v2, ref=ref)                # synced by NUMBER, not name
+        self.assertEqual(plan2["repo"]["ref"], ref)
+        self.assertEqual(plan2["counts"]["moved"], 2)
+        self.assertEqual(plan2["counts"]["changed"], 1)
+        self.assertEqual(plan2["counts"]["missing"], 0)
+        self.assertEqual(plan2["counts"]["new"], 0)
+        self.assertEqual(plan2["upload"], ["dev/grafana/otel.md"])  # only the edited file travels
+        self.assertEqual(plan2["renames"], [{"from": "dev/kafka-a", "to": "dev/kafka-strimzi", "files": 2}])
+        self.assertEqual(res2["moved"], 2)
+
+        mirror = R.REPOS_DIR / "5x"
+        self.assertTrue((mirror / "dev/kafka-strimzi/notes.md").exists())
+        self.assertFalse((mirror / "dev/kafka-a").exists())         # emptied folder tidied
+        with A.get_db() as conn:
+            after = {r["path"]: (r["id"], r["first_seen"]) for r in conn.execute(
+                "SELECT path, id, first_seen FROM lr_files WHERE repo_id=(SELECT id FROM lr_repos WHERE ref_no=?)",
+                (ref,))}
+        self.assertEqual(after["dev/kafka-strimzi/notes.md"], before["dev/kafka-a/notes.md"])  # same file, same history
+        self.assertNotIn("dev/kafka-a/notes.md", after)
+        log_txt = (R.HISTORY_DIR / "5x" / "SYNC-LOG.txt").read_text()
+        self.assertIn(f"repo #{ref} 5x", log_txt)
+        self.assertIn("↪ dev/kafka-a/notes.md  →  dev/kafka-strimzi/notes.md", log_txt)
+        r = self.ask("kafka strimzi notes")
+        self.assertIn("dev/kafka-strimzi/notes.md", r["context"])  # search sees the new path
+
+        # Rename the living repo to match the source: number, files, history unchanged
+        r = self.c.post("/api/repos/5x/rename", json={"name": "29x"}).get_json()
+        self.assertEqual((r["ref"], r["slug"]), (ref, "29x"))
+        self.assertTrue((R.REPOS_DIR / "29x" / "dev/kafka-strimzi/notes.md").exists())
+        self.assertFalse((R.REPOS_DIR / "5x").exists())
+        v = self.c.get("/api/repos/29x/verify").get_json()
+        self.assertEqual(v["intact"], 4)
+        self.assertEqual(v["old_versions_on_disk"], v["old_versions"])  # history paths followed the rename
+        self.assertEqual(v["old_versions"], 1)
+        plan3 = self.c.post("/api/repos/plan", json={"name": "29x", "files": manifest}).get_json()
+        self.assertEqual(plan3["repo"]["ref"], ref)                 # the new name now finds it directly
+        self.c.post("/api/repos/cancel", json={"plan_id": plan3["plan_id"]})
+
+        # Without fingerprints (plain http): the move is caught after upload instead
+        v3 = {k.replace("prod/nexus/", "prod/nexus-ha/"): val for k, val in v2.items()}
+        plan4, res4 = self.drop("29x", v3, with_sha=False, ref=ref)
+        self.assertEqual(res4["moved"], 1)
+        self.assertEqual(res4["removed"], 0)
+        self.assertEqual(res4["added"], 0)
+
+        # Wrong numbers are refused clearly; numbers are never reused
+        self.assertEqual(self.c.post("/api/repos/plan", json={"ref": 999, "files": manifest}).status_code, 404)
+        self.assertEqual(self.c.post("/api/repos/plan", json={"ref": "abc", "files": manifest}).status_code, 400)
+        self.c.post("/api/repos/29x/lock", json={"locked": False, "confirm": "29x"})
+        self.c.post("/api/repos/29x/delete", json={"confirm": "29x"})
+        self.drop("brand-new", {"a.md": ("hello\n", "2026-01-01")})
+        newest = next(x for x in self.c.get("/api/repos").get_json()["repos"] if x["slug"] == "brand-new")
+        self.assertGreater(newest["ref"], ref)
 
     def test_stale_uploads_are_tidied(self):
         junk = R.STAGING_DIR / ("f" * 32)
