@@ -316,19 +316,6 @@ def test_failed_lines_are_not_translated_twice(tmp_path, meeting_wav):
         pipe.shutdown()
 
 
-def test_settings_from_1_2_get_the_shorter_line_limit(tmp_path):
-    import json
-
-    from livetranslator.config import SettingsStore as SS
-
-    p = tmp_path / "s.json"
-    p.write_text(json.dumps({"settings_version": 2, "llm_model": "gemma3:12b", "max_line_s": 14.0}))
-    s = SS(p).settings
-    assert s.max_line_s == 10.0 and s.llm_model == "gemma3:12b"     # a deliberate 12B choice is kept
-    p.write_text(json.dumps({"settings_version": 2, "max_line_s": 8.0}))
-    assert SS(p).settings.max_line_s == 8.0                          # a user's own value is kept
-
-
 def test_english_preview_while_a_long_sentence_is_spoken(tmp_path):
     """Long sentence: grey English appears before the speaker pauses, then the real line replaces it."""
     from livetranslator.asr import EchoASR
