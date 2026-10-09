@@ -187,7 +187,7 @@ def test_slow_loading_big_model_is_abandoned_quickly(tmp_path, meeting_wav):
         t0 = time.time()
 
         def tune(p):   # real clocks: switch after 20 s, wait up to 150 s for a model that is loading
-            p.WAIT_SWITCH_S, p.WAIT_LOADING_S, p.RETRY_EVERY_S = 1.0, 10.0, 1.0
+            p.WAIT_SWITCH_S, p.WAIT_LOADING_S, p.RETRY_FIRST_S = 1.0, 10.0, 1.0
 
         pipe, events, finals = run_meeting(tmp_path, fo, meeting_wav, before_start=tune)
         assert pipe.translator.model == "gemma3:4b"
@@ -216,7 +216,7 @@ def test_failed_lines_are_retried_automatically(tmp_path, meeting_wav):
         threading.Timer(6.0, lambda: setattr(fo, "fail", False)).start()
 
         def tune(p):
-            p.RETRY_EVERY_S = 1.0
+            p.RETRY_FIRST_S = 1.0
 
         cfg_extra = {"llm_model": "gemma3:4b", "llm_fallback": "gemma3:4b"}
         pipe, events, finals = run_meeting(tmp_path, fo, meeting_wav, settings=cfg_extra, before_start=tune)
@@ -298,7 +298,7 @@ def test_failed_lines_are_not_translated_twice(tmp_path, meeting_wav):
         threading.Timer(4.0, lambda: setattr(fo, "fail", False)).start()
 
         def tune(p):
-            p.RETRY_EVERY_S = 0.5
+            p.RETRY_FIRST_S = 0.5
 
         pipe, events, finals = run_meeting(tmp_path, fo, meeting_wav,
                                            settings={"llm_model": "gemma3:4b", "llm_fallback": "gemma3:4b"},

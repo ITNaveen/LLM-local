@@ -96,8 +96,10 @@ at any time (the folder is renamed). Meetings stay until you delete them. An emp
 1. **Listening**: microphone → resampling → 80 Hz rumble filter → automatic gain →
    **Silero VAD** (neural voice detector) decides speech / not speech every 32 ms.
 2. **Lines**: a line ends as soon as the speaker pauses (0.5 s). Long monologues are split
-   regularly (shorter pauses are accepted the longer a line gets, and at ~20 s it cuts at the
-   quietest point between words) so you never wait long.
+   regularly (shorter pauses are accepted the longer a line gets, and at ~14 s it cuts at the
+   quietest point between words) so you never wait long. While a long sentence is still being
+   spoken, a grey German preview - and after ~4 s a grey English preview - shows what is said
+   so far; the real line replaces it when the speaker pauses.
 3. **German text**: each line is loudness-normalised (quiet words lifted, loud bursts tamed)
    and transcribed by **Whisper large-v3-turbo** on the Mac's GPU (MLX), with your glossary and
    the previous sentence as context. Typical Whisper hallucinations ("Untertitel im Auftrag des
@@ -107,6 +109,8 @@ at any time (the folder is renamed). Meetings stay until you delete them. An emp
    come at the very end, or in the next line. It is told to keep numbers, dates, names and
    negations exact and to fix obvious mis-hearings from context. The English is streamed word by
    word. Speech recognition of the next line runs while the previous one is being translated.
+   If a translation fails (Ollama busy, out of memory), the German is saved and the line is
+   retried automatically in the background - new lines always go first.
 
 Measured in the test suite (simulated laptop speaker + room echo + noise + volume swings,
 240 sentences, 5 voices): every sentence detected, **no lines from noise/typing/hum**, line closed

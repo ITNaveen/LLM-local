@@ -150,14 +150,26 @@ class MeetingStore:
             if len(m.lines) % 20 == 0:
                 self._write_meta(m)
 
+    def _folder_is(self, m: Meeting) -> bool:
+        """The folder on disk still belongs to this meeting (not deleted / renamed under us)."""
+        try:
+            return json.loads((m.folder / "meta.json").read_text("utf-8")).get("id") == m.id
+        except Exception:  # noqa: BLE001
+            return False
+
     def set_translation(self, m: Meeting, line_id: int, en: str, ok: bool = True) -> Line | None:
         with self._lock:
+            if not self._folder_is(m):
+                folder = self.find(m.id)        # renamed through another copy: follow it; deleted: drop
+                if folder is None:
+                    return None
+                m.folder = folder
             ln = next((x for x in reversed(m.lines) if x.id == line_id), None)
             if ln is None:
                 return None
             first = not ln.done
+            self._append_jsonl(m, {"update": line_id, "en": en, "ok": ok})   # saved first: a failed write stays retryable
             ln.en, ln.ok, ln.done = en, ok, True
-            self._append_jsonl(m, {"update": line_id, "en": en, "ok": ok})
             if first and all(x.done for x in m.lines if x.id < line_id):
                 with open(m.folder / "transcript.md", "a", encoding="utf-8") as f:
                     f.write(f"**{ln.time}**  \nDE: {ln.de}  \nEN: {en if en else '(translation unavailable)'}\n\n")

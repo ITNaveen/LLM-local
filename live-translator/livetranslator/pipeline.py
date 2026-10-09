@@ -41,6 +41,10 @@ from .vad import SileroVAD
 log = logging.getLogger("lt.pipeline")
 
 
+class _GiveWay(Exception):
+    """A finished line is waiting: an English preview or a background retry stops at once."""
+
+
 @dataclass
 class Session:
     meeting: Meeting
@@ -104,12 +108,14 @@ class Pipeline:
         self._recovery_done_at = 0.0
         self._mic_blocked = False   # macOS blocked every microphone this run -> go straight to the browser
         self._source_gen = 0        # bumped whenever the audio source is replaced; cancels a stale recovery
-        self._tr_busy = False       # translator is working on a line right now
+        self._tr_busy = False       # translator is working on a live line right now
         self._slow_strikes = 0      # consecutive lines on which the translation model was too slow
         self._fallback_lock = threading.Lock()
-        self._retry_at: dict = {}   # (meeting id, line id) -> last automatic retry
-        self._queued: set = set()   # (meeting id, line id) queued or being translated by a retry
-        self._queued_lock = threading.Lock()
+        # failed lines waiting for an automatic retry: (meeting id, line id) -> {sess, ln, next_at, attempts}.
+        # Retries never enter the live queue: the translator takes one only when no live line waits.
+        self._retry_pending: dict = {}
+        self._retry_lock = threading.Lock()
+        self._last_tr_fail = 0.0
         self._replaced_model = ""   # model replaced by an automatic fallback (unloaded when seen)
         self._auto_pulled = False
         self._last_session: Session | None = None   # just stopped: its missing translations are still filled in
@@ -155,7 +161,11 @@ class Pipeline:
             s = self.settings
             now = datetime.now()
             if continue_id:
-                meeting = self.store.load(continue_id)
+                last = self._last_session
+                if last is not None and last.meeting.id == continue_id:
+                    meeting, self._last_session = last.meeting, None   # same object: no stale copy
+                else:
+                    meeting = self.store.load(continue_id)
                 if meeting is None:
                     raise RuntimeError("Meeting not found")
                 self.store.reopen(meeting)
@@ -176,6 +186,8 @@ class Pipeline:
                 sess.prev_text = meeting.lines[-1].de
             self.session = sess
             self.partial = {"text": "", "start": None}
+            if continue_id:
+                self._adopt_retries(sess)
             # drop stale audio
             while not self._audio_q.empty():
                 try:
@@ -289,10 +301,32 @@ class Pipeline:
             if self.state == "listening":
                 self._swap_source()
 
+    def meeting_object(self, meeting_id: str):
+        """The in-memory meeting the app is still writing to (live, or just stopped and still
+        receiving retried translations) - everyone must use this object, not a fresh copy."""
+        sess = self.session
+        if sess is not None and sess.meeting.id == meeting_id:
+            return sess.meeting
+        last = self._last_session
+        if last is not None and last.meeting.id == meeting_id:
+            return last.meeting
+        return None
+
+    def forget_meeting(self, meeting_id: str) -> None:
+        """The meeting is being deleted: stop writing to it."""
+        last = self._last_session
+        if last is not None and last.meeting.id == meeting_id:
+            self._last_session = None
+        with self._retry_lock:
+            for key in [k for k in self._retry_pending if k[0] == meeting_id]:
+                del self._retry_pending[key]
+
     def retranslate(self, meeting_id: str, line_id: int) -> bool:
         with self._lock:
             if self.session and self.session.meeting.id == meeting_id:
                 sess = self.session
+            elif self._last_session is not None and self._last_session.meeting.id == meeting_id:
+                sess = self._last_session
             else:
                 m = self.store.load(meeting_id)
                 if m is None:
@@ -668,7 +702,17 @@ class Pipeline:
     def _run_preview_english(self, sess: Session, start: float, text: str) -> None:
         if sess is not self.session or self._cur_seg_start != start:
             return      # the line is finished already: its real translation is on the way
-        res = self.translator.translate(text, record=False, first_token_timeout=8.0, max_gen_s=6.0)
+        if self.llm_state.get("speed") == "slow" or (self.llm_state.get("first_s") or 0) > 2.0:
+            return      # the translator is busy enough with the real lines
+
+        def give_way(_t: str) -> None:
+            if self._tr_q.qsize() or self._cur_seg_start != start:
+                raise _GiveWay()            # a finished line is waiting: drop the preview at once
+
+        try:
+            res = self.translator.translate(text, give_way, record=False, first_token_timeout=3.0, max_gen_s=6.0)
+        except _GiveWay:
+            return
         if res.ok and res.text and sess is self.session and self._cur_seg_start == start:
             self.publish({"type": "partial_en", "text": res.text, "start": start})
 
@@ -710,16 +754,6 @@ class Pipeline:
         self._tr_q.put(("line", sess, ln, True, ln_meta))
 
     # ================================================================ translation
-    def _enqueue(self, sess: Session, ln: Line, origin: str) -> None:
-        """Queue a line for (re)translation; a line is never queued twice at the same time."""
-        key = (sess.meeting.id, ln.id)
-        with self._queued_lock:
-            if key in self._queued:
-                return
-            self._queued.add(key)
-        self._tr_q.put(("line", sess, ln, False, None, origin))
-        self._safe_set_llm(queue=self._lines_waiting())
-
     def _tr_loop(self) -> None:
         while not self._shutdown.is_set():
             try:
@@ -731,6 +765,16 @@ class Pipeline:
                         self._run_preview_english(*pj)
                     except Exception:  # noqa: BLE001
                         log.exception("English preview failed")
+                    continue
+                due = self._next_due_retry()
+                if due is not None:     # (_tr_busy stays off: the live German preview keeps going meanwhile)
+                    try:
+                        self._safe_set_llm(busy=True)
+                        self._translate_job(due["sess"], due["ln"], False, None, "auto")
+                    except Exception:  # noqa: BLE001
+                        log.exception("retry failed")
+                    finally:
+                        self._safe_set_llm(busy=False, queue=self._lines_waiting())
                 continue
             if job[0] == "barrier":
                 job[1].set()
@@ -743,8 +787,6 @@ class Pipeline:
             except Exception:  # noqa: BLE001
                 log.exception("translation job failed")
             finally:
-                with self._queued_lock:
-                    self._queued.discard((job[1].meeting.id, job[2].id))
                 self._tr_busy = False
                 self._safe_set_llm(busy=False, queue=self._lines_waiting())
 
@@ -764,6 +806,7 @@ class Pipeline:
         from .translate import TranslationResult
 
         if origin == "auto" and ln.done and ln.ok:
+            self._note_retry(sess, ln, True)
             return      # translated meanwhile: an automatic retry must never overwrite a good line
         last = [0.0]
 
@@ -777,10 +820,24 @@ class Pipeline:
             # known to be down: don't make every line wait for a time-out; these
             # lines are translated automatically once Ollama is back
             res = TranslationResult("", False, error="Ollama is not running")
+        elif origin == "auto":
+            def give_way(t: str) -> None:
+                if self._tr_q.qsize():
+                    raise _GiveWay()
+                on_delta(t)
+
+            try:
+                res = self._translate_retry(ln.de, give_way, record)
+            except _GiveWay:        # a live line arrived: it goes first, this retry comes back later
+                self._retry_later(sess, ln)
+                self.publish({"type": "tr", "id": ln.id, "meeting": sess.meeting.id, "en": ln.en, "final": True,
+                              "ok": ln.ok})
+                return
         else:
             res = self._translate_with_watchdog(ln.de, on_delta, record)
         if not res.ok and ln.done and ln.ok and origin != "live":
             return      # keep the good translation a line already has
+        self._note_retry(sess, ln, res.ok)
         if res.ok:
             if self._llm_fail_noticed:
                 self._llm_fail_noticed = False
@@ -793,7 +850,10 @@ class Pipeline:
                 hint = ("Ollama did not answer in time." if res.timeout else f"{res.error}.")
                 self._notice("error", f"Translation failed: {hint} The German is saved; the app keeps retrying "
                                       "these lines automatically (or click a line's ↻).")
-        self.store.set_translation(sess.meeting, ln.id, res.text, res.ok)
+        # only a complete translation is saved; a failed / cut-off one is retried
+        en = res.text if res.ok else ""
+        if res.ok or not ln.done:          # a line that failed before and failed again: nothing new to save
+            self.store.set_translation(sess.meeting, ln.id, en, res.ok)
         lat = {"tr_first_s": round(res.first_token_s, 2), "tr_total_s": round(res.total_s, 2)}
         if res.stats:
             lat["tok_s"] = res.stats.get("tok_s")
@@ -802,8 +862,96 @@ class Pipeline:
             sess.stats["tr_total_s"].append(res.total_s)
             sess.stats["close_lag_s"].append(meta["closed"] - meta["speech_end"])
             lat["asr_s"] = meta["asr_s"]
-        self.publish({"type": "tr", "id": ln.id, "meeting": sess.meeting.id, "en": res.text, "final": True,
+        self.publish({"type": "tr", "id": ln.id, "meeting": sess.meeting.id, "en": en, "final": True,
                       "ok": res.ok, "lat": lat})
+
+    # --------------------------------------------------------------- automatic retries
+    RETRY_FIRST_S = 10.0
+    RETRY_MAX_S = 300.0
+    RETRY_MAX_ATTEMPTS = 10
+
+    def _note_retry(self, sess: Session, ln: Line, ok: bool) -> None:
+        key = (sess.meeting.id, ln.id)
+        with self._retry_lock:
+            if ok:
+                self._retry_pending.pop(key, None)
+                return
+            self._last_tr_fail = time.monotonic()
+            e = self._retry_pending.get(key)
+            if e is None:
+                e = self._retry_pending[key] = {"sess": sess, "ln": ln, "attempts": 0}
+            else:
+                e["attempts"] += 1
+            # back off: 10 s, 20 s, 40 s ... up to 5 min; give up after RETRY_MAX_ATTEMPTS (↻ still works)
+            if e["attempts"] >= self.RETRY_MAX_ATTEMPTS:
+                del self._retry_pending[key]
+            else:
+                e["next_at"] = time.monotonic() + min(self.RETRY_MAX_S, self.RETRY_FIRST_S * (2 ** e["attempts"]))
+
+    RETRY_FIRST_TOKEN_S = 8.0
+
+    def _translate_retry(self, german: str, on_delta, record: bool):
+        """A background retry: short time limit, no second attempt, no model switching - it must
+        never hold up a live line for long (live lines make those decisions)."""
+        model = self.translator.model
+        loaded = self._model_loaded(model)
+        if not loaded and self.state == "listening":
+            raise _GiveWay()        # loading the model is the next live line's job; retry afterwards
+        # Ollama abandons a load when the request gives up, so a model that still has to load gets
+        # the full time (only after Stop, when no live line can be waiting behind it)
+        limit = self.RETRY_FIRST_TOKEN_S if loaded else self.WAIT_LOADING_S
+        res = self.translator.translate(german, on_delta, record=record, first_token_timeout=limit, model=model)
+        if res.ok:
+            self._record_speed(res, loaded, model)
+        return res
+
+    def _retry_later(self, sess: Session, ln: Line) -> None:
+        with self._retry_lock:
+            e = self._retry_pending.get((sess.meeting.id, ln.id))
+            if e is not None:
+                e["next_at"] = time.monotonic() + 1.0
+
+    def _adopt_retries(self, sess: Session) -> None:
+        """A continued meeting: its untranslated lines are retried as part of the new session."""
+        now = time.monotonic()
+        with self._retry_lock:
+            for ln in sess.meeting.lines:
+                if ln.done and not ln.ok:
+                    key = (sess.meeting.id, ln.id)
+                    e = self._retry_pending.get(key)
+                    if e is None:
+                        self._retry_pending[key] = {"sess": sess, "ln": ln, "attempts": 0,
+                                                    "next_at": now + self.RETRY_FIRST_S}
+                    else:
+                        e["sess"], e["ln"] = sess, ln
+
+    def _retry_soon(self) -> None:
+        """Something changed for the better (Ollama back, faster model): retry waiting lines now."""
+        now = time.monotonic()
+        with self._retry_lock:
+            for e in self._retry_pending.values():
+                e["next_at"] = now
+                e["attempts"] = 0
+
+    def _next_due_retry(self):
+        if (self.state == "stopping" or self._summary_busy or not self.llm_state.get("running")
+                or not self.llm_state.get("model_ready") or self._tr_q.qsize()):
+            return None
+        now = time.monotonic()
+        if self.llm_state.get("stuck") and now - self._last_tr_fail < self.RETRY_FIRST_S:
+            return None     # still failing: one probe at a time, not a burst of requests
+        if self.state == "listening" and not self.llm_state.get("loaded"):
+            return None     # the model is (re)loading: the next live line does that, retries wait
+        live = set(id(x) for x in self._sessions_for_retry())
+        with self._retry_lock:
+            for key in [k for k, e in self._retry_pending.items() if id(e["sess"]) not in live]:
+                del self._retry_pending[key]      # meeting no longer active (stopped > 10 min ago, deleted)
+            due = [e for e in self._retry_pending.values() if e["next_at"] <= now]
+            if not due:
+                return None
+            e = min(due, key=lambda x: x["next_at"])
+            e["next_at"] = now + self.RETRY_MAX_S      # in flight; _note_retry sets the real next time
+            return e
 
     def _translate_with_watchdog(self, german: str, on_delta, record: bool):
         """One translation with a time limit, speed bookkeeping and automatic fallback.
@@ -893,9 +1041,7 @@ class Pipeline:
                              "(Settings → Translation to change the default.)")
         # free the memory the slow model was using (repeated by the health check if it is still loading now)
         threading.Thread(target=self.translator.unload, args=(old,), daemon=True).start()
-        for sess in self._sessions_for_retry():
-            for ln in [x for x in sess.meeting.lines if x.done and not x.ok]:
-                self._enqueue(sess, ln, "auto")
+        self._retry_soon()
 
     def _pull_then_switch(self, fb: str, cur: str) -> None:
         try:
@@ -994,9 +1140,7 @@ class Pipeline:
             prev.get("running") and prev.get("model_ready")) and prev.get("checked")
         self.llm_state.update(new)
         if recovered:
-            for sess in self._sessions_for_retry():
-                for ln in [x for x in sess.meeting.lines if x.done and not x.ok]:
-                    self._enqueue(sess, ln, "auto")
+            self._retry_soon()
         # a model replaced by the fallback that finished loading anyway: free its memory
         if self._replaced_model and self.llm_state.get("fallback_active") and h["running"]:
             if any(m["name"] in (self._replaced_model, self._replaced_model + ":latest")
@@ -1011,21 +1155,6 @@ class Pipeline:
         if changed or force_publish:
             self.publish(self.status())
 
-    RETRY_EVERY_S = 10.0
-
-    def _retry_failed_lines(self) -> None:
-        """Lines whose translation failed are tried again automatically while the meeting runs."""
-        if self._tr_busy or self._lines_waiting() or not self.llm_state.get("running") \
-                or not self.llm_state.get("model_ready"):
-            return
-        now = time.monotonic()
-        for sess in self._sessions_for_retry():
-            for ln in [x for x in sess.meeting.lines if x.done and not x.ok]:
-                key = (sess.meeting.id, ln.id)
-                if now - self._retry_at.get(key, 0.0) >= self.RETRY_EVERY_S:
-                    self._retry_at[key] = now
-                    self._enqueue(sess, ln, "auto")
-
     def _sessions_for_retry(self) -> list:
         out = [self.session] if self.session is not None else []
         if self._last_session is not None and time.monotonic() - self._last_session_end < 600 \
@@ -1038,7 +1167,6 @@ class Pipeline:
         while not self._shutdown.is_set():
             try:
                 self._refresh_llm()
-                self._retry_failed_lines()
             except Exception:  # noqa: BLE001
                 log.exception("Ollama health check failed")
             if (self.llm_state["running"] and not self.llm_state["model_ready"]

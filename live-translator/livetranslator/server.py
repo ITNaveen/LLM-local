@@ -300,10 +300,7 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
         return await asyncio.to_thread(store.list)
 
     def _load(mid: str):
-        p = P()
-        if p.session and p.session.meeting.id == mid:
-            return p.session.meeting
-        m = store.load(mid)
+        m = P().meeting_object(mid) or store.load(mid)   # the app's own object while it still writes to it
         if m is None:
             raise HTTPException(404, "Meeting not found")
         return m
@@ -329,6 +326,7 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
         p = P()
         if p.session and p.session.meeting.id == mid:
             raise HTTPException(409, "Stop this meeting before deleting it")
+        p.forget_meeting(mid)
         m = await asyncio.to_thread(_load, mid)
         await asyncio.to_thread(store.delete, m)
         hub.publish({"type": "meetings_changed"})
