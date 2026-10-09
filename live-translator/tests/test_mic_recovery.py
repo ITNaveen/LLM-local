@@ -209,3 +209,16 @@ def test_blocked_memory_is_cleared_when_a_microphone_works_again(mac, tmp_path):
         pipe.apply_settings(old, cfg.update({"input_device": "External USB Mic"}))
         assert not pipe._mic_blocked
         pipe.shutdown()
+
+
+def test_settings_change_racing_stop_opens_nothing(mac, tmp_path):
+    fake = mac({})
+    with FakeOllama() as fo:
+        pipe, cfg, events = _pipeline(tmp_path, fo)
+        pipe.start(name="t")
+        pipe.stop(wait=True)
+        old = cfg.settings
+        pipe.apply_settings(old, cfg.update({"input_device": "External USB Mic"}))   # arrives just after Stop
+        time.sleep(0.5)
+        assert fake.live == [] and pipe.source is None
+        pipe.shutdown()

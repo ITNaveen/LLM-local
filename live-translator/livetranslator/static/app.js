@@ -153,7 +153,7 @@ function waitingText(line) {
   const llm = (S.status && S.status.llm) || {};
   let why = "";
   if (secs >= 12) {
-    if (llm.warming || llm.loaded === false) why = " - the translation model is still loading";
+    if (llm.warming || llm.loaded === false) why = secs >= 15 ? " - still loading the translation model (low on memory? close other apps)" : " - loading the translation model";
     else if (llm.queue > 1) why = ` - translator is ${llm.queue} lines behind`;
     else why = " - the translator is slow right now";
   }
@@ -257,7 +257,8 @@ function applyStatus(st) {
   else if (llm.running && llm.model_ready) {
     const speed = llm.tok_s ? ` · ${llm.tok_s} tok/s` : "";
     const fb = llm.fallback_active ? " (fast model - the main one was too slow on this Mac)" : "";
-    if (llm.warming && !llm.loaded) { cls = "warn"; tip = `Loading translation model ${llm.model}…`; }
+    if (llm.stuck) { cls = "err"; tip = `Translation is not answering right now - retrying automatically (${llm.model})${fb}`; }
+    else if ((llm.warming || llm.busy) && !llm.loaded) { cls = "warn"; tip = `Loading translation model ${llm.model}…`; }
     else if (llm.speed === "slow") { cls = "warn"; tip = `${llm.model} is slow on this Mac right now${speed}${fb}`; }
     else if ((llm.queue || 0) > 2) { cls = "warn"; tip = `Translator is ${llm.queue} lines behind${speed}${fb}`; }
     else { cls = "ok"; tip = `Translating with ${llm.model}${speed}${fb}`; }
@@ -705,8 +706,18 @@ function waitRunning(ctx, ms = 2000) {
 }
 
 async function startBrowserAudio(kind, automatic) {
-  // an automatic start only in the tab the user is looking at (several tabs may be open)
-  if (automatic && document.visibilityState !== "visible") return;
+  // an automatic start only in the tab the user is looking at (several tabs may be open);
+  // a hidden tab starts as soon as the user looks at it again
+  if (automatic && document.visibilityState !== "visible") {
+    const later = () => {
+      if (document.visibilityState !== "visible") return;
+      document.removeEventListener("visibilitychange", later);
+      const st = S.status;
+      if (st && st.state === "listening" && st.source_kind === "browser" && !BA.ctx) startBrowserAudio(kind, true);
+    };
+    document.addEventListener("visibilitychange", later);
+    return;
+  }
   stopBrowserAudio();
   const gen = ++BA.gen;
   const stale = () => gen !== BA.gen || !(S.status && S.status.state === "listening");
@@ -764,12 +775,15 @@ async function startBrowserAudio(kind, automatic) {
     $("#baState").textContent = sending;
     stream.getAudioTracks()[0].onended = stopBrowserAudio;
     ws.onclose = () => { if (BA.ws === ws) stopBrowserAudio(); };
-    if (!(await waitRunning(ctx))) {
+    const running = await waitRunning(ctx);
+    if (gen !== BA.gen || BA.ctx !== ctx) return;   // superseded meanwhile
+    if (!running) {
       // the browser wants a click before audio may run
       $("#baState").textContent = "▶ click anywhere on this page to start the microphone";
       toast("warn", "Click anywhere on this page to start the browser microphone.");
       const go = () => {
         ctx.resume().catch(() => {});   // first statement inside the click: counts as a user gesture
+        if (BA.ctx !== ctx) { document.removeEventListener("click", go, true); return; }
         waitRunning(ctx, 1500).then((ok) => {
           if (ok && BA.ctx === ctx) { $("#baState").textContent = sending; document.removeEventListener("click", go, true); }
         });

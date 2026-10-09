@@ -175,7 +175,7 @@ def cmd_doctor(_a) -> int:
                   f"context {m['context_length']}")
         return lm
 
-    show_loaded()
+    before = {m["name"] for m in show_loaded()}
     rc = 0
     for model in [s.llm_model] + ([s.llm_fallback] if s.llm_fallback and s.llm_fallback != s.llm_model
                                   and s.llm_fallback in h["models"] else []):
@@ -195,6 +195,10 @@ def cmd_doctor(_a) -> int:
         lm = [m for m in show_loaded() if m["name"] == model]
         if lm and lm[0]["gpu_share"] < 0.9 and platform.system() == "Darwin":
             print(f"  ⚠ {model} does not fit in GPU memory - it will be slow. Use {s.llm_fallback}.")
+    # leave Ollama's memory as we found it
+    for m in t.loaded_models():
+        if m["name"] not in before:
+            t.unload(m["name"])
     print("\n" + "=" * 60)
     print("All good." if rc == 0 else "Problems found - see above.")
     return rc

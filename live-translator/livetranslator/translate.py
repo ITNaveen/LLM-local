@@ -110,6 +110,7 @@ class TranslationResult:
     total_s: float = 0.0
     error: str = ""
     timeout: bool = False       # Ollama sent nothing within the time limit
+    truncated: bool = False     # generation was cut off (far too slow) - not a usable translation
     stats: dict = field(default_factory=dict)   # Ollama's own timings (load, prompt, generation)
 
     @property
@@ -213,7 +214,7 @@ class OllamaTranslator:
         return 0 < len(english) <= 3 * len(german) + 80
 
     def translate(self, german: str, on_delta: Callable[[str], None] | None = None, record: bool = True,
-                  first_token_timeout: float = 60.0, max_total_s: float = 90.0,
+                  first_token_timeout: float = 60.0, max_gen_s: float = 45.0,
                   model: str | None = None) -> TranslationResult:
         """Translate one line. Gives up if Ollama sends nothing for `first_token_timeout`
         seconds (model stuck loading / machine out of memory) instead of waiting forever."""
@@ -263,9 +264,12 @@ class OllamaTranslator:
                     if obj.get("done"):
                         stats = _ollama_stats(obj)
                         break
-                    if time.perf_counter() - t0 > max_total_s:
-                        log.warning("translation took longer than %.0fs - keeping what we have", max_total_s)
-                        break
+                    if first and time.perf_counter() - t0 - first > max_gen_s:
+                        # writing one line for this long: the machine is overloaded - give up on this attempt
+                        log.warning("translate [%s]: still writing after %.0fs - cut off", model, max_gen_s)
+                        return TranslationResult(clean_translation(raw, german), False, first,
+                                                 time.perf_counter() - t0, "translation far too slow",
+                                                 truncated=True)
         except httpx.TimeoutException as e:
             secs = time.perf_counter() - t0
             log.warning("translate [%s]: no answer from Ollama after %.1fs (%s)", model, secs, type(e).__name__)
@@ -306,32 +310,42 @@ class OllamaTranslator:
             return ""
 
     # ------------------------------------------------------------- summary
-    def summarize(self, transcript: str, on_delta: Callable[[str], None] | None = None) -> str:
-        """Meeting notes in English from the bilingual transcript (long meetings are chunked)."""
+    SUMMARY_CHUNK_CHARS = 8000   # ~2k tokens: fits NUM_CTX together with the instructions and the answer
+
+    @classmethod
+    def _chunks(cls, text: str) -> list[str]:
         chunks, cur = [], ""
-        for line in transcript.splitlines(keepends=True):
-            if len(cur) + len(line) > 12000 and cur:
+        for line in text.splitlines(keepends=True):
+            if len(cur) + len(line) > cls.SUMMARY_CHUNK_CHARS and cur:
                 chunks.append(cur)
                 cur = ""
             cur += line
         if cur:
             chunks.append(cur)
+        return chunks
+
+    def summarize(self, transcript: str, on_delta: Callable[[str], None] | None = None) -> str:
+        """Meeting notes in English from the bilingual transcript. Long meetings are condensed in
+        rounds (parts -> notes -> notes of notes) so every request fits the model's context."""
         instr = ("Below is the transcript of a business meeting (German original with English translation). "
                  "Write concise meeting notes in English for the listener, a non-native German speaker:\n"
                  "1. **Summary** - 3-6 bullet points.\n2. **Decisions**.\n3. **Action items / what is expected from me** "
                  "(who, what, deadline).\n4. **Open questions**.\nOnly use what is in the transcript. Keep names, numbers and dates exact.")
-        if len(chunks) > 1:
+        body = transcript
+        for _round in range(4):
+            chunks = self._chunks(body)
+            if len(chunks) <= 1:
+                break
             notes = []
             for i, c in enumerate(chunks, 1):
                 notes.append(self._chat_once(
-                    f"Part {i} of {len(chunks)} of a meeting transcript. List every important point, decision, number, "
-                    f"date and action item from this part as short English bullet points.\n\n{c}", num_ctx=8192))
+                    f"Part {i} of {len(chunks)} of a meeting record. List every important point, decision, number, "
+                    f"date and action item from this part as short English bullet points.\n\n{c}"))
             body = "Notes from consecutive parts of the meeting:\n\n" + "\n\n".join(notes)
-        else:
-            body = chunks[0] if chunks else ""
-        return self._chat_once(f"{instr}\n\n---\n{body}", num_ctx=8192, on_delta=on_delta)
+        return self._chat_once(f"{instr}\n\n---\n{body[:self.SUMMARY_CHUNK_CHARS + 2000]}", on_delta=on_delta)
 
-    def _chat_once(self, prompt: str, num_ctx: int = 8192, on_delta: Callable[[str], None] | None = None) -> str:
+    # the same context size as live translation: a different one makes Ollama reload the model
+    def _chat_once(self, prompt: str, num_ctx: int = NUM_CTX, on_delta: Callable[[str], None] | None = None) -> str:
         body = {"model": self.model, "messages": [{"role": "user", "content": prompt}], "stream": True,
                 "keep_alive": KEEP_ALIVE, "options": {"temperature": 0.2, "num_ctx": num_ctx}}
         if _thinking_model(self.model):

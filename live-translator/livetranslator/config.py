@@ -55,10 +55,11 @@ ASR_MODELS = {
 
 # Translation models offered in Settings (any installed Ollama model also works).
 RECOMMENDED_LLMS = [
-    {"name": "gemma3:12b", "label": "Gemma 3 12B - best quality (recommended for 24 GB)"},
-    {"name": "gemma3:4b", "label": "Gemma 3 4B - fastest, good quality"},
-    {"name": "qwen2.5:14b", "label": "Qwen 2.5 14B - alternative high quality"},
+    {"name": "gemma3:4b", "label": "Gemma 3 4B - fast and reliable (recommended)"},
+    {"name": "gemma3:12b", "label": "Gemma 3 12B - higher quality, needs ~10 GB free memory"},
+    {"name": "qwen2.5:14b", "label": "Qwen 2.5 14B - alternative, needs ~11 GB free memory"},
 ]
+SETTINGS_VERSION = 2
 
 SENSITIVITY = {
     # speech-probability thresholds for the voice detector
@@ -83,22 +84,25 @@ class Settings:
     language: str = "de"
     # translation
     ollama_url: str = "http://127.0.0.1:11434"
-    llm_model: str = "gemma3:12b"
+    llm_model: str = "gemma3:4b"         # fast enough on any M-series Mac, even next to Whisper
     llm_fallback: str = "gemma3:4b"      # used automatically when llm_model is too slow on this machine
     auto_fallback: bool = True
+    free_ollama_memory: bool = True      # unload other chat models from Ollama while a meeting runs
     context_lines: int = 8               # previous lines the translator sees (at least; up to +10)
     # help for both models
     glossary: str = ""                   # names, products, abbreviations (comma or newline)
     topic: str = ""                      # optional: what the meeting is about
     # display (also stored server-side so every browser shows the same)
+    settings_version: int = SETTINGS_VERSION
     font_scale: float = 1.0
     show_german: bool = True
     theme: str = "auto"
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
+        d = migrate(dict(d or {}))
         known = {f.name for f in fields(cls)}
-        s = cls(**{k: v for k, v in (d or {}).items() if k in known})
+        s = cls(**{k: v for k, v in d.items() if k in known})
         s.validate()
         return s
 
@@ -141,6 +145,20 @@ class Settings:
         return self.asr_model  # custom repo id or local folder
 
 
+def migrate(d: dict) -> dict:
+    """Bring settings saved by an older version up to date."""
+    v = int(d.get("settings_version") or 1)
+    if v < 2:
+        # 1.x defaulted to Gemma 3 12B, which on a 24 GB Mac next to Whisper can take a minute
+        # to load or not fit at all: the translation never arrived. 4B is the default now.
+        if d.get("llm_model") in (None, "gemma3:12b"):
+            d["llm_model"] = "gemma3:4b"
+        if int(d.get("context_lines") or 8) > 8:
+            d["context_lines"] = 8
+        d["settings_version"] = 2
+    return d
+
+
 class SettingsStore:
     def __init__(self, path: Path | None = None):
         self.path = path or (home_dir() / "settings.json")
@@ -149,9 +167,16 @@ class SettingsStore:
 
     def _load(self) -> Settings:
         try:
-            return Settings.from_dict(json.loads(self.path.read_text("utf-8")))
+            raw = json.loads(self.path.read_text("utf-8"))
         except Exception:
             return Settings()
+        s = Settings.from_dict(raw)
+        if int(raw.get("settings_version") or 1) < SETTINGS_VERSION:
+            try:   # persist the migration
+                self.path.write_text(json.dumps(s.to_dict(), indent=2, ensure_ascii=False), "utf-8")
+            except Exception:  # noqa: BLE001
+                pass
+        return s
 
     def update(self, changes: dict) -> Settings:
         with self._lock:

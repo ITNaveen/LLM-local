@@ -48,7 +48,8 @@ def main():
     behaviour = {"gemma3:12b": {"first_s": 4.0}} if a.slow_llm else {}
     fake = FakeOllama(models=["gemma3:12b", "gemma3:4b"], token_delay=a.token_delay, behaviour=behaviour).start()
     settings = SettingsStore(Path(home) / "settings.json")
-    settings.update({"ollama_url": fake.url, "input_source": a.source, "live_preview": False})
+    settings.update({"ollama_url": fake.url, "input_source": a.source, "live_preview": False,
+                     "llm_model": "gemma3:12b" if a.slow_llm else "gemma3:4b", "llm_fallback": "gemma3:4b"})
     texts = [de for de, _ in SENTENCES] * 50
 
     def factory(st, store, publish):

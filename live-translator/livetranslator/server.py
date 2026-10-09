@@ -244,13 +244,17 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
     async def get_settings():
         return settings.settings.to_dict()
 
+    settings_lock = asyncio.Lock()
+
     @app.post("/api/settings")
     async def set_settings(changes: dict):
-        old = settings.settings
-        new = settings.update(changes)
-        await asyncio.to_thread(P().apply_settings, old, new)   # may open a microphone: keep the loop free
-        hub.publish({"type": "settings", "settings": new.to_dict()})
-        return new.to_dict()
+        async with settings_lock:   # one change at a time, applied in order
+            old = settings.settings
+            new = settings.update(changes)
+            await asyncio.to_thread(P().apply_settings, old, new)   # may open a microphone: keep the loop free
+            cur = settings.settings.to_dict()
+        hub.publish({"type": "settings", "settings": cur})
+        return cur
 
     @app.get("/api/devices")
     async def devices():

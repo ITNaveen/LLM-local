@@ -30,6 +30,7 @@ class FakeOllama:
         self.fail = fail
         self.behaviour = dict(behaviour or {})   # model -> {load_s, first_s, token_s, hang, gpu_share}
         self.loaded: dict[str, float] = {}       # model -> time it finished loading
+        self.loaded_ctx: dict[str, int] = {}     # model -> context size it was loaded with
         self.requests: list[dict] = []
         self._lock = threading.Lock()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
@@ -82,10 +83,10 @@ class FakeOllama:
                 if self.path == "/api/ps":
                     out = []
                     for m in list(fake.loaded):
-                        size = 8_000_000_000
+                        size = 300_000_000 if "embed" in m else 8_000_000_000
                         share = fake.behaviour.get(m, {}).get("gpu_share", 1.0)
                         out.append({"name": m, "model": m, "size": size, "size_vram": int(size * share),
-                                    "context_length": 4096})
+                                    "context_length": fake.loaded_ctx.get(m, 4096)})
                     return self._json(200, {"models": out})
                 self._json(404, {"error": "not found"})
 
@@ -105,11 +106,14 @@ class FakeOllama:
                         return self._json(200, {"model": model, "response": "", "done": True})
                     t0 = time.monotonic()
                     load_s = 0.0
+                    ctx = int((body.get("options") or {}).get("num_ctx") or 4096)
                     with fake._lock:
-                        if model not in fake.loaded:
+                        # like Ollama: a request with another context size reloads the model
+                        if model not in fake.loaded or fake.loaded_ctx.get(model, ctx) != ctx:
                             load_s = b.get("load_s", 0.0)
                             time.sleep(load_s)
                             fake.loaded[model] = time.monotonic()
+                            fake.loaded_ctx[model] = ctx
                     if b.get("hang"):
                         time.sleep(3600)
                         return
