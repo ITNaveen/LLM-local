@@ -81,7 +81,7 @@ if have_ollama; then
 fi
 
 # ---------------------------------------------------------------- models
-bold "3/4  Models (speech ≈1.6 GB, translation ≈8 GB - downloaded once)"
+bold "3/4  Models (speech ≈1.6 GB, translation ≈3 GB - downloaded once)"
 "$VPY" -m livetranslator download || warn "Model download incomplete - run ./install.sh again or download from Settings in the app."
 
 chmod +x start.sh "Live Translator.command" 2>/dev/null || true

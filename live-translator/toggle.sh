@@ -9,7 +9,7 @@
 #
 #  START: runs the app in the background, opens it in the browser.
 #  STOP : finishes and saves the meeting in progress, stops the app and
-#         unloads the translation model from Ollama (frees ~8 GB of memory).
+#         unloads the translation model from Ollama (frees its memory).
 #         Ollama itself keeps running (LocalLLM uses it too).
 # ═══════════════════════════════════════════════════════════════════════════
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

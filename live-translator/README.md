@@ -21,7 +21,7 @@ cd ~/Downloads; T=$(ls -t live-translator-*.tar.gz 2>/dev/null | head -1); [ -n 
 This
 1. moves the app to **`~/Documents/LiveTranslator`** (and removes the copy in Downloads),
 2. installs it: Python packages, **Ollama** if missing, the speech model (~1.6 GB) and the
-   translation model (~8 GB), then a self-test that measures accuracy and speed on your Mac,
+   translation model (~3 GB), then a self-test that measures accuracy and speed on your Mac,
 3. puts **`Live Translator`** on your **Desktop**.
 
 *If Homebrew is not installed and Ollama is missing, the installer asks you to install
@@ -85,11 +85,11 @@ at any time (the folder is renamed). Meetings stay until you delete them. An emp
 * **Sensitivity**: "High" if the speaker is quiet or far away; "Low" in a noisy room.
 * **Speech model**: *large-v3-turbo* (default) is fast and very good. *large-v3* is slightly more
   accurate but slower - try it if your Mac keeps up (the self-test tells you).
-* **Translation model**: *Gemma 3 12B* (default, best). *Gemma 3 4B* is ~3× faster with slightly
-  lower quality and is installed as the automatic **fast fallback**: if 12B is too slow on your Mac at
-  that moment (memory full, other apps using Ollama, model does not fit on the GPU, no answer within
-  25 s), the app switches to 4B by itself, tells you, and the header shows *Translator (fast)*.
-  You can turn this off or pick another fallback in Settings. Any other Ollama model can be chosen too.
+* **Translation model**: *Gemma 3 4B* (default) loads in seconds and writes ~40 words/s on an M4 -
+  English appears about a second after each line. *Gemma 3 12B* translates a little better but needs
+  ~10 GB of free memory next to Whisper; choose it in Settings only if your Mac has room. If a chosen
+  model is too slow or does not load within 20 s, the app switches back to 4B by itself, tells you, and
+  the header shows *Translator (fast)*. Any other Ollama model can be chosen too.
 
 ## 4. How it works (why it is fast *and* accurate)
 
@@ -102,7 +102,7 @@ at any time (the folder is renamed). Meetings stay until you delete them. An emp
    and transcribed by **Whisper large-v3-turbo** on the Mac's GPU (MLX), with your glossary and
    the previous sentence as context. Typical Whisper hallucinations ("Untertitel im Auftrag des
    ZDF" etc.) and repetition loops are filtered out.
-4. **English**: a local LLM (**Gemma 3 12B** via Ollama) translates each line *with the
+4. **English**: a local LLM (**Gemma 3 4B** via Ollama) translates each line *with the
    conversation so far as context* - essential for German, where the verb and the "nicht" often
    come at the very end, or in the next line. It is told to keep numbers, dates, names and
    negations exact and to fix obvious mis-hearings from context. The English is streamed word by
