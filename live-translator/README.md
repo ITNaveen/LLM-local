@@ -13,27 +13,36 @@ is saved automatically.
 
 ## 1. Install (once, ~15 minutes, mostly downloading)
 
-1. Copy the `live-translator` folder somewhere permanent, e.g. `~/Documents/LiveTranslator`.
-2. Open **Terminal** in that folder and run:
-   ```bash
-   ./install.sh
-   ```
-   It sets up Python, installs the packages, installs **Ollama** (if missing), downloads the
-   speech model (~1.6 GB) and the translation model (~8 GB), and finishes with a self-test
-   that measures accuracy and speed on your Mac.
+Open **Terminal** and paste:
+```bash
+cd ~/Downloads; T=$(ls -t live-translator-*.tar.gz 2>/dev/null | head -1); [ -n "$T" ] && tar -xzf "$T"; bash live-translator/setup-mac.sh
+```
+(It unpacks the newest `live-translator-*.tar.gz` in Downloads and runs the setup.)
+This
+1. moves the app to **`~/Documents/LiveTranslator`** (and removes the copy in Downloads),
+2. installs it: Python packages, **Ollama** if missing, the speech model (~1.6 GB) and the
+   translation model (~8 GB), then a self-test that measures accuracy and speed on your Mac,
+3. puts **`Live Translator`** on your **Desktop**.
 
-   *If Homebrew is not installed and Ollama is missing, the installer asks you to install
-   the Ollama app from <https://ollama.com/download> - then run `./install.sh` again.*
+*If Homebrew is not installed and Ollama is missing, the installer asks you to install
+the Ollama app from <https://ollama.com/download> - then run the setup line again.*
+Running the setup again later (e.g. for an update) is safe: meetings are never touched.
 
 ## 2. Use it
 
-1. Double-click **`Live Translator.command`** (or run `./start.sh`). The browser opens at
-   <http://127.0.0.1:8765>. Keep the Terminal window open while you use it.
-   *The very first time, macOS asks whether Terminal may use the microphone → **Allow**.*
-2. Optional: type a name for the meeting in the top bar (you can also do it later).
-3. Press **Start** when the meeting begins. The green bar shows that it hears the speaker;
+**Desktop → double-click `Live Translator` = START. Double-click it again = STOP.**
+
+* START runs the app in the background and opens it in the browser at <http://127.0.0.1:8765>
+  (the Terminal window that appears can be closed).
+* STOP saves the meeting in progress, stops the app and unloads the translation model, so the
+  Mac gets its memory back. (Ollama itself keeps running for your other apps.)
+* *The very first time, macOS asks whether Terminal may use the microphone → **Allow**.*
+
+In the browser:
+1. Optional: type a name for the meeting in the top bar (you can also do it later).
+2. Press **Start** when the meeting begins. The green bar shows that it hears the speaker;
    the blue dot lights up when it detects speech.
-4. Press **Stop** at the end. The meeting is already saved.
+3. Press **Stop** at the end of the meeting. It is already saved.
 
 | Button | What it does |
 | --- | --- |
@@ -114,6 +123,7 @@ rate and how long German and English take to appear.
 
 | Problem | Fix |
 | --- | --- |
+| Won't start | Look at `~/LiveTranslator/logs/app.log`; `~/Documents/LiveTranslator/toggle.sh status` shows whether it runs. |
 | "The microphone is completely silent" | System Settings → Privacy & Security → Microphone → enable **Terminal**, then restart. |
 | *Translator* pill is red | Start the **Ollama** app. If it says the model is missing: ⚙ Settings → Download model. German is still shown and saved; missing translations are filled in automatically when Ollama is back. |
 | *Speech* pill is red | First start needs internet to download the speech model. Check the log: `~/LiveTranslator/logs/server.log`. |
@@ -153,7 +163,9 @@ Always use `--token` when listening on the network: the transcripts are private.
 
 ```
 live-translator/
-  install.sh / start.sh / Live Translator.command   macOS / Linux
+  setup-mac.sh                                       one-time: move to ~/Documents, install, Desktop icon
+  toggle.sh / Live Translator.command                start ⇄ stop (what the Desktop icon runs)
+  install.sh / start.sh                              install / run in the foreground (macOS / Linux)
   install.bat / start.bat                            Windows
   livetranslator/
     frontend.py   audio in → lines (resample, filter, gain, voice detection, line splitting)

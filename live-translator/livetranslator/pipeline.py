@@ -320,6 +320,7 @@ class Pipeline:
         self.stop(wait=True)
         self._shutdown.set()
         self._keep_awake(False)
+        self.translator.unload()   # give the ~8 GB back to the Mac right away
 
     def wait_idle(self, timeout: float = 60.0) -> bool:
         """Block until all queued lines have been recognised and translated (tests / self-test)."""

@@ -57,7 +57,7 @@ def cmd_serve(a) -> int:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     print(f"\n  Live Translator is running:  {url}\n  (Ctrl+C to stop)\n", flush=True)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", ssl_certfile=a.ssl_certfile,
-                ssl_keyfile=a.ssl_keyfile, ws_max_size=4 * 1024 * 1024)
+                ssl_keyfile=a.ssl_keyfile, ws_max_size=4 * 1024 * 1024, timeout_graceful_shutdown=5)
     return 0
 
 

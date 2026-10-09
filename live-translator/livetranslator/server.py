@@ -341,8 +341,10 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
 
     @app.get("/api/info")
     async def info():
+        p = state["pipeline"]
         return {"app": APP_NAME, "data_dir": str(home_dir()), "meetings_dir": str(store.root),
-                "platform": platform.platform(), "token_required": bool(token)}
+                "platform": platform.platform(), "token_required": bool(token), "pid": os.getpid(),
+                "state": p.state if p is not None else "starting"}
 
     @app.exception_handler(HTTPException)
     async def http_err(_req: Request, exc: HTTPException):

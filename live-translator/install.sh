@@ -92,7 +92,10 @@ if [ "$RUN_TEST" = "1" ]; then
   "$VPY" -m livetranslator selftest || warn "Self-test reported a problem - see above."
 fi
 
+touch "$APP_DIR/.venv/.installed-ok"
+
 bold "Done."
-echo "  Start the app:  double-click 'Live Translator.command'   (or run ./start.sh)"
+echo "  Start / stop:   double-click 'Live Translator' on the Desktop (created by setup-mac.sh)"
+echo "                  or 'Live Translator.command' in this folder"
 echo "  The first time, macOS asks whether Terminal may use the microphone - click Allow."
 echo "  Meetings are saved in: ~/LiveTranslator/Meetings"

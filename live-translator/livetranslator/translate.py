@@ -278,5 +278,12 @@ class OllamaTranslator:
                     break
         return _THINK_RE.sub("", out).strip()
 
+    def unload(self) -> None:
+        """Tell Ollama to drop the model from memory now (instead of after KEEP_ALIVE)."""
+        try:
+            self._client.post(f"{self.base_url}/api/generate", json={"model": self.model, "keep_alive": 0}, timeout=5.0)
+        except Exception:  # noqa: BLE001
+            pass
+
     def close(self) -> None:
         self._client.close()
