@@ -50,11 +50,15 @@ debate"*.
 
 ## Make a video
 
-1. **Topic**: the big keyword (*Prime Minister Modi Operation Sindoor*).
-2. **Story description**: the angle, what should happen, what to show. The clearer this
-   is, the better the video.
-3. Optional: **Your scene outline**. Write the story beats yourself, one per line, and the AI
-   follows them in that order.
+1. **Video title / topic**: what the video is about (*ELON MUSK vs BHARAT — Starlink का Security Test!*).
+2. **Your brief**: write it like you would brief an editor. Include the story, your angle and
+   side, the tone, the footage you want (e.g. satellites, flags, the X posts), what must NOT be
+   claimed, and your closing punchline. StoryMaker turns it into a **story brief**: your angle,
+   5–7 story beats in order, searches for every beat, the visuals, the claims to avoid, and
+   your closing line. Everything after that (search, screening, which passages are used, the
+   order of the film, the pictures) must serve this brief. You see the brief on the job's page.
+3. Optional: **Scene outline**: the beats yourself, one per line; the film follows them in
+   that order. (A paragraph pasted here is read as part of the brief.)
 4. Pick a length (8–15 min), a theme (default **🔥 Hindi news**), and how much narration you
    want: *None* (headlines only), *Light* (about 5 lines), or *More* (about 8 lines). The
    narrator never talks over the clips; the people in the footage carry the story.
@@ -75,8 +79,8 @@ story, and the narrator only sets the base.
 
 | Step | What happens |
 |---|---|
-| 1. Research | The AI turns your topic into 12–16 searches (Hindi, Hinglish, English) aimed at the drama: clashes, लाठीचार्ज, पथराव, families, angry statements, viral clips, and the big Hindi channels' coverage. It reads up to **500 videos' titles, views and channels** and downloads nothing. |
-| 2. Screen | Every shortlisted video is checked. Any angle of the same story counts (backstory, victims, police, courts, raw viral videos). **The audience only hears Hindi**: English speakers, even when their captions are in Hindi letters, are left out or briefly retold by the narrator (max 3 per film). Regional languages are never used. |
+| 1. Brief & research | The AI turns everything you wrote into a story brief (angle, beats, visuals, claims to avoid, closing line), then runs searches for every beat and for the visuals. It reads up to **500 videos' titles, views and channels**, takes the best from every beat, and downloads nothing. Channels on your "never use" list (Settings) are skipped. |
+| 2. Screen | Every shortlisted video is checked against the beats: it must cover one of them. Commentators arguing *against* your angle are rejected; the other side's *own* words (a news report of Musk's statement) are kept, because the film answers them. **The audience only hears Hindi**: English speakers, even when their captions are in Hindi letters, are left out or briefly retold by the narrator (max 3 per film). Regional languages are never used. |
 | 3. Understand | Every transcript is cut into **passages** (complete thoughts of 10–35 s). The AI reads each one: who says what, the emotion, how strong it is, and its single most gripping line. |
 | 4. Plan scenes | Five acts that escalate: buildup → rising anger → explosive climax → ending. The **Hindi clips play back-to-back**. The narrator speaks only to set the base as an act opens, for one reveal at most, and for the closing question. It never describes the picture (it can't see it) and never adds facts. |
 | 5. Editor review | A second AI pass cuts and reorders like a senior editor and scores the film. |

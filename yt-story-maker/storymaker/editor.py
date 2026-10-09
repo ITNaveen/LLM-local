@@ -90,7 +90,7 @@ OFF_TOPIC_TITLE = re.compile(
     r"stand-?up|comedy|comedian|roast|vlog|prank|\breact(s|ion|ing)?\b|eurovision|song contest|"
     r"music video|lyrics|trailer|gameplay|gaming|unboxing|best of 20\d\d|#shorts|meme", re.I)
 KINDS_OK = {"news", "speech", "interview", "debate", "documentary", "explainer",
-            "ground_report", "footage", "press_conference", "analysis"}
+            "ground_report", "footage", "press_conference", "analysis", "opinion"}
 
 
 def clean_text(text, max_words=28):
@@ -191,6 +191,7 @@ def read_videos(source, shortlist, log, progress=None, workers=4):
                 log(f"  [{n}/{len(shortlist)}] skipped a video: {str(e)[:120]}")
                 continue
             d["score"] = cand.get("score", 0.5)
+            d["beats"], d["broll"] = list(cand.get("beats") or []), bool(cand.get("broll"))
             got[cand["id"]] = d
             log(f"  [{n}/{len(shortlist)}] {d['title'][:60]} - language '{d.get('spoken_lang') or '?'}', "
                 f"{len(d.get('captions') or [])} caption lines ({took:.0f}s)")
@@ -216,18 +217,20 @@ def language_role(video):
     return "visual", "no speech/transcript - visuals only"
 
 
-SCREEN_SYSTEM = """You are the researcher of a viral Hindi news YouTube channel. Decide if a
-YouTube video is about the SAME news story as the topic and usable as source footage.
-ANY angle of the same story counts and is valuable: the background and earlier incidents that
-led to it, victims and their families, police, protesters, politicians, courts, statements,
-reactions, ground reports, raw/viral videos of the incident (kind=footage), debates.
-Say relevant=false only for: a different story, comedy/stand-up, music, vlogs, gaming, memes,
-reaction channels, study/jobs/travel videos, or videos that only mention the topic in passing.
-JSON only."""
+SCREEN_SYSTEM = """You choose the source videos for a Hindi news YouTube film with a clear angle.
+A video is relevant ONLY if it covers one of the film's beats: the same people and events (a film
+about Musk vs India needs coverage of Musk and India - or, for a beat about US restrictions on
+Huawei, coverage of those - not Tesla launches or general profiles). News reports, statements,
+press conferences, interviews and debates are good, also when they show the other side's OWN
+words (the film answers them). Reject: commentators and opinion channels that argue AGAINST the
+film's angle, other stories, general content about one of the people, comedy, music, vlogs,
+gaming, memes, reaction channels, and videos that only mention the story in passing. JSON only."""
 
-SCREEN_USER = """Topic: {topic}
-What the film is about: {description}
-
+SCREEN_USER = """Film: {topic}
+The film's angle: {angle}
+Beats:
+{beats}
+{visual_note}
 Video title: {title}
 Channel: {channel}
 Length: {minutes} min
@@ -235,8 +238,23 @@ Video description: {vdesc}
 Transcript excerpt: {excerpt}
 
 Return JSON: {{"relevant": true or false,
- "kind": "news|speech|interview|debate|documentary|explainer|ground_report|press_conference|footage|comedy|vlog|reaction|other",
+ "beat": number of the beat this video serves best (0 if none),
+ "kind": "news|speech|interview|debate|documentary|explainer|ground_report|press_conference|footage|opinion|comedy|vlog|reaction|other",
+ "stance": "supports|neutral|opposes - towards the film's angle",
  "reason": "max 12 words"}}"""
+
+COMMENTARY = {"opinion", "explainer", "analysis", "documentary"}
+
+
+def brief_of(plan, topic, description=""):
+    """The production brief from research (or one made from the topic for older jobs)."""
+    from .research import fallback_brief
+    brief = (plan or {}).get("brief")
+    return brief if isinstance(brief, dict) and brief.get("beats") else fallback_brief(topic, description)
+
+
+def beats_listing(brief):
+    return "\n".join(f"{n}. {b['name']}: {b.get('about', '')}" for n, b in enumerate(brief["beats"], 1))
 
 
 def _excerpt(captions, chars=1400):
@@ -248,10 +266,15 @@ def _excerpt(captions, chars=1400):
     return text[:half] + " ... " + text[mid:mid + half]
 
 
-def screen(llm, topic, description, plan, videos, log, progress=None, trust_topic=False):
-    """trust_topic: skip the topic check (demo mode's synthetic clips can't be on-topic)."""
+def screen(llm, topic, description, plan, videos, log, progress=None, trust_topic=False, avoid=()):
+    """Keep the videos that cover one of the brief's beats and don't argue against the film.
+    trust_topic: skip the topic check (demo mode's synthetic clips can't be on-topic).
+    avoid: channels the creator never wants."""
     kept, rejected = [], []
+    brief = brief_of(plan, topic, description)
     must = [w.lower() for w in (plan or {}).get("must_keywords") or keywords(topic)[:3]]
+    must += [w for w in keywords(" ".join(brief.get("entities") or [])) if w not in must][:8]
+    avoid = [a.lower().strip() for a in avoid if a and a.strip()]
     for i, v in enumerate(videos, 1):
         if progress:
             progress(i / max(1, len(videos)))
@@ -259,18 +282,28 @@ def screen(llm, topic, description, plan, videos, log, progress=None, trust_topi
         if role == "reject":
             rejected.append({"id": v["id"], "title": v["title"], "reason": why})
             continue
+        if any(a in (v.get("channel") or "").lower() for a in avoid):
+            rejected.append({"id": v["id"], "title": v["title"], "reason": "a channel you never want (Settings)"})
+            continue
         if OFF_TOPIC_TITLE.search(v.get("title") or ""):
             rejected.append({"id": v["id"], "title": v["title"], "reason": "comedy/vlog/reaction format"})
             continue
+        visual_for = ""
+        if v.get("broll") and not v.get("beats"):
+            visual_for = next((b["what"] for b in brief.get("broll") or []), "the requested visuals")
         verdict = {"relevant": True, "kind": "news", "reason": "demo"} if trust_topic else None
         if verdict is None and llm.available():
             try:
                 verdict = llm.chat_json(SCREEN_SYSTEM, SCREEN_USER.format(
-                    topic=topic, description=description or "-", title=v["title"],
-                    channel=v.get("channel", ""), minutes=int(v.get("duration", 0) // 60),
+                    topic=topic, angle=brief.get("angle") or description or "-",
+                    beats=beats_listing(brief),
+                    visual_note=(f"\nThis video was found as VISUAL footage for: {visual_for}. Say "
+                                 "relevant=true if it shows that; its pictures are used without sound.\n"
+                                 if visual_for else ""),
+                    title=v["title"], channel=v.get("channel", ""), minutes=int(v.get("duration", 0) // 60),
                     vdesc=(v.get("description") or "")[:300].replace("\n", " "),
                     excerpt=_excerpt(v.get("captions")) or "(no transcript)"), temperature=0.1,
-                    max_tokens=200)
+                    max_tokens=220)
             except LLMError as e:
                 log(f"  AI check failed for '{v['title'][:50]}' ({e}); using keywords")
         if not isinstance(verdict, dict) or "relevant" not in verdict:
@@ -282,13 +315,22 @@ def screen(llm, topic, description, plan, videos, log, progress=None, trust_topi
                        "reason": "keyword match" if (in_title or hits >= 3) else "topic not mentioned"}
         relevant = verdict.get("relevant") in (True, "true", "yes", 1)
         kind = str(verdict.get("kind") or "other").lower().replace(" ", "_")
-        if relevant and kind not in KINDS_OK and kind != "other":
+        stance = str(verdict.get("stance") or "neutral").lower()
+        if relevant and kind not in KINDS_OK and kind not in COMMENTARY and kind != "other":
             relevant = False
+        if relevant and stance.startswith("oppos") and (kind in COMMENTARY or kind == "other"):
+            rejected.append({"id": v["id"], "title": v["title"],
+                             "reason": "argues against the film's angle (commentary)"})
+            continue
         if not relevant:
             rejected.append({"id": v["id"], "title": v["title"],
                              "reason": f"not relevant: {str(verdict.get('reason', ''))[:80]}"})
             continue
-        v["role"], v["kind"], v["role_note"] = role, kind, why
+        beat = _num(verdict.get("beat"), 0) or 0
+        v["beats"] = [beat] if 1 <= beat <= len(brief["beats"]) else (v.get("beats") or [])
+        if visual_for:
+            role, why, kind = "visual", f"visuals: {visual_for}", "footage"
+        v["role"], v["kind"], v["role_note"], v["stance"] = role, kind, why, stance[:10]
         v["lang"] = (v.get("spoken_lang") or v.get("caption_lang") or "hi").lower()
         kept.append(v)
     for r in rejected:
@@ -352,8 +394,10 @@ transcript passages from one source video and judge each one as raw material for
 topic: what is said, how strong it is, and its single most gripping line. Be strict: keep only
 passages that clearly say something about the story. JSON only."""
 
-ANNOTATE_USER = """Topic: {topic}
-Film description: {description}
+ANNOTATE_USER = """Film: {topic}
+The film's angle: {description}
+Beats:
+{beats}
 Source video: {title} ({channel})
 
 Passages:
@@ -362,6 +406,8 @@ Passages:
 For EVERY passage return one item:
 {{"passages": [{{"n": 1, "use": true or false,
   "summary": "max 14 words, English: who says what",
+  "beat": number of the beat this passage serves (0 = none),
+  "relevance": 1-5 (5 = exactly what that beat needs, on the film's side or the other side's own words; 1 = off the story),
   "topic": "1-3 word sub-topic, reuse the same label for the same thread",
   "strength": 1-5 (5 = powerful, emotional, shocking, quotable; 1 = filler),
   "emotion": "anger|grief|fear|shock|pride|defiance|threat|neutral",
@@ -376,9 +422,12 @@ HINDI_FIELD = """,
             invented facts, numbers or quotes"""
 
 
-def annotate(llm, topic, description, video, passages, log):
+def annotate(llm, topic, description, video, passages, log, brief=None):
     if not passages:
         return []
+    from .research import fallback_brief
+    brief = brief if isinstance(brief, dict) and brief.get("beats") else fallback_brief(topic, description)
+    n_beats = len(brief["beats"])
     results = {}
     if llm.available():
         for b in range(0, len(passages), 18):
@@ -388,7 +437,8 @@ def annotate(llm, topic, description, video, passages, log):
             try:
                 english = any(p.get("lang", "hi") not in DIALOGUE_LANGS for p in batch)
                 raw = llm.chat_json(ANNOTATE_SYSTEM, ANNOTATE_USER.format(
-                    topic=topic, description=description or "-", title=video["title"],
+                    topic=topic, description=brief.get("angle") or description or "-",
+                    beats=beats_listing(brief), title=video["title"],
                     channel=video.get("channel", ""), listing=listing,
                     hindi_field=HINDI_FIELD if english else ""), temperature=0.2,
                     max_tokens=4200 if english else 2600)
@@ -405,6 +455,12 @@ def annotate(llm, topic, description, video, passages, log):
         if item:
             use = item.get("use") in (True, "true", "yes", 1)
             strength = clamp(_num(item.get("strength"), 2) or 2, 1, 5)
+            relevance = clamp(_num(item.get("relevance"), 3) or 3, 1, 5)
+            beat = _num(item.get("beat"), 0) or 0
+            beat = beat if 1 <= beat <= n_beats else 0
+            if n_beats > 1 and (relevance < 3 or not beat):
+                use = False                      # off the story or off the film's angle
+            p.update(beat=beat or (video.get("beats") or [1])[0], relevance=relevance)
             p.update(use=use, summary=str(item.get("summary") or p["text"][:90])[:160],
                      subtopic=str(item.get("topic") or "general").lower()[:40],
                      strength=strength, standalone=item.get("standalone") not in (False, "false"),
@@ -419,7 +475,8 @@ def annotate(llm, topic, description, video, passages, log):
             hits = sum(1 for w in topic_words if w in p["text"].lower())
             p.update(use=hits > 0 or p["heat"] > 0.5, summary=p["text"][:100],
                      subtopic=(video.get("title") or "general").lower()[:30],
-                     strength=int(clamp(1 + round(4 * p["heat"]), 1, 5)), standalone=True, ai=False)
+                     strength=int(clamp(1 + round(4 * p["heat"]), 1, 5)), standalone=True, ai=False,
+                     beat=(video.get("beats") or [1])[0], relevance=3)
         p["video_title"] = video.get("title", "")
         p["channel"] = video.get("channel", "")
         p["upload_date"] = video.get("upload_date", "")
@@ -512,13 +569,17 @@ carry the story. Our narrator is only the glue. Rules:
    you tell it, not WHAT happened. Take the side the creator wants.
 JSON only."""
 
-ARCHITECT_USER = """Topic: {topic}
-What the creator wants: {description}
+ARCHITECT_USER = """Film: {topic}
+The film's angle: {description}
+Tone: {tone}
+STORY BEATS - build the film in this order; every passage below is tagged with its beat:
+{beats}
+Never claim: {avoid}
 Theme: {theme}
 Target length: about {minutes} minutes (dialogue passages give most of the runtime)
 Narration: {narration_rule}
 
-DIALOGUE PASSAGES (id | language | source | sub-topic | seconds | strength 1-5 | emotion | what is said):
+DIALOGUE PASSAGES (id | beat | language | source | sub-topic | seconds | strength 1-5 | emotion | what is said):
 {passages}
 
 VISUAL SOURCES for montages (id | what it is):
@@ -605,6 +666,7 @@ sentences, max {max_words} words. A line that is already fine is returned unchan
 cannot be saved, return "". JSON only."""
 
 FACT_USER = """Topic: {topic}
+NEVER CLAIM (the creator's rule - rewrite any line that does): {avoid}
 
 FACTS (from our footage):
 {facts}
@@ -637,7 +699,7 @@ def _draft_lines(scenes, cat, vcat):
     for i, s in enumerate(scenes, 1):
         if s["type"] in ("hook", "dialogue", "voiceover"):
             p = cat[s["pid"]]
-            content, src = f"[{p['subtopic']}] {p['summary']}", _source_label(p)
+            content, src = f"[B{p.get('beat', 0)} {p['subtopic']}] {p['summary']}", _source_label(p)
         elif s["type"] == "montage":
             content, src = "music montage", ", ".join(_source_label(vcat[v])[:30] for v in s["vids"]) or "-"
         else:
@@ -692,16 +754,99 @@ def _extend(llm, topic, outline, cat, vcat, minutes, log):
 
 
 def make_catalog(passages, limit=70, per_video=4):
-    usable = [p for p in passages if p.get("use")]
-    by_video = {}
-    for p in sorted(usable, key=lambda p: (p["strength"], p["heat"]), reverse=True):
-        lst = by_video.setdefault(p["video_id"], [])
-        if len(lst) < per_video:
-            lst.append(p)
-    chosen = sorted((p for lst in by_video.values() for p in lst),
-                    key=lambda p: (p["strength"], p["heat"]), reverse=True)[:limit]
-    chosen.sort(key=lambda p: (p["video_id"], p["start"]))  # sources together, in time order
+    """The passages the editor may use: on the story (relevance 3+), strongest first, with
+    every beat of the brief represented."""
+    usable = [p for p in passages if p.get("use") and p.get("relevance", 3) >= 3]
+    rank = lambda p: (p.get("relevance", 3), p["strength"], p["heat"])   # noqa: E731
+    chosen, lanes, per = [], {}, {}
+    for p in sorted(usable, key=rank, reverse=True):
+        lanes.setdefault(p.get("beat", 0), []).append(p)
+    while len(chosen) < limit:      # every beat in turn (a beat is never starved), max per video
+        took = False
+        for b in sorted(lanes):
+            while lanes[b] and len(chosen) < limit:
+                p = lanes[b].pop(0)
+                if per.get(p["video_id"], 0) < per_video:
+                    per[p["video_id"]] = per.get(p["video_id"], 0) + 1
+                    chosen.append(p)
+                    took = True
+                    break
+        if not took:
+            break
+    chosen.sort(key=lambda p: (p.get("beat", 0), p["video_id"], p["start"]))
     return {f"P{i}": p for i, p in enumerate(chosen, 1)}
+
+
+def cover_beats(scenes, cat, n_beats, log=lambda m: None):
+    """Every beat of the brief gets at least one clip (its strongest on-story passage) - a
+    story beat the creator asked for never silently disappears."""
+    if n_beats < 2:
+        return scenes
+    talk = ("dialogue", "voiceover")
+    have = {cat[s["pid"]].get("beat") for s in scenes if s["type"] in talk and s.get("pid") in cat}
+    used = {s.get("pid") for s in scenes}
+    added = []
+    for b in range(1, n_beats + 1):
+        if b in have:
+            continue
+        for k in sorted((k for k, p in cat.items() if p.get("beat") == b and k not in used),
+                        key=lambda k: (not _speaks_hindi(cat[k]), -cat[k].get("relevance", 3),
+                                       -cat[k].get("strength", 3))):
+            p = cat[k]
+            if _speaks_hindi(p):
+                new = {"type": "dialogue", "pid": k}
+            elif polish_line(p.get("hindi"), VOICEOVER_WORDS):
+                new = {"type": "voiceover", "pid": k, "text": polish_line(p["hindi"], VOICEOVER_WORDS)}
+            else:
+                continue
+            scenes = scenes + [{**new, "act": "buildup", "link": "covers a beat of the brief"}]
+            added.append(b)
+            break
+    if added:
+        log(f"Brief: added clips for beat(s) {', '.join(map(str, added))} the plan had skipped.")
+    return scenes
+
+
+def beat_acts(n):
+    """Which act each beat of the brief falls in: the film follows the beats in order."""
+    out = {}
+    for b in range(1, n + 1):
+        x = (b - 1) / max(1, n - 1)
+        out[b] = "buildup" if x < 0.3 else "rising" if x < 0.6 else "climax" if x < 0.85 else "ending"
+    return out
+
+
+def order_by_beats(scenes, cat, n_beats):
+    """Put the film in the brief's beat order (a coherent story arc, never random jumps).
+    Narration and headlines travel with the clip they introduce; acts follow the beats."""
+    if n_beats < 2:
+        return scenes
+    groups, pending, closing = [], [], []
+    for s in scenes:
+        if s["type"] in ("narration", "text") and s["act"] == "ending" and \
+                not any(x.get("pid") and x["act"] == "ending" for x in scenes[scenes.index(s) + 1:]):
+            closing.append(s)              # the closing words stay the closing words
+            continue
+        if s["type"] in ("narration", "text"):
+            pending.append(s)
+            continue
+        beat = 0 if s["type"] == "hook" else (cat[s["pid"]].get("beat") if s.get("pid") in cat else None)
+        groups.append([beat, pending + [s]])
+        pending = []
+    if pending:
+        groups.append([None, pending])
+    last = 1
+    for g in groups:
+        if g[0] is None:
+            g[0] = last
+        last = max(1, g[0])
+    groups.sort(key=lambda g: g[0])                          # stable: order within a beat kept
+    acts = beat_acts(n_beats)
+    out = []
+    for beat, items in groups:
+        for s in items:
+            out.append({**s, "act": "opening" if beat == 0 else acts.get(beat, "ending")})
+    return out + [{**s, "act": "ending"} for s in closing]
 
 
 def make_visual_catalog(videos, limit=16):
@@ -716,22 +861,29 @@ def _source_label(v_or_p):
 
 
 def plan_story(llm, topic, description, theme, minutes, narration, passages, videos, log,
-               can_text=True, user_outline=""):
+               can_text=True, user_outline="", brief=None):
     for p in passages:     # English captioned in Hindi letters (also in jobs read before this check)
         if (p.get("lang") or "hi") in DIALOGUE_LANGS:
             p["lang"] = speech_language(p.get("text", ""), p.get("lang") or "hi")
+    from .research import fallback_brief
+    brief = brief if isinstance(brief, dict) and brief.get("beats") else \
+        fallback_brief(topic, description, user_outline)
+    n_beats = len(brief["beats"])
     cat = make_catalog(passages, limit=90)
     vcat = make_visual_catalog(videos)
     clip_cap = CLIP_CAP if theme == "sensational" else None
     outline = None
     if llm.available() and cat:
         outline = _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log,
-                             user_outline)
+                             user_outline, brief)
         if outline:
+            outline["scenes"] = order_by_beats(outline["scenes"], cat, n_beats)
             # rules first (they drop repeats / over-used sources), then let the AI fill the gap
             outline["scenes"] = enforce_rules(outline["scenes"], cat, narration, log, can_text)
             outline = _extend(llm, topic, outline, cat, vcat, minutes, log)
-            outline = _critic(llm, topic, description, outline, cat, vcat, log)
+            outline = _critic(llm, topic, f"{brief.get('angle') or description}\nBeats, in order:\n"
+                              f"{beats_listing(brief)}", outline, cat, vcat, log)
+            outline["scenes"] = order_by_beats(outline["scenes"], cat, n_beats)
     if not outline:
         if cat:
             log("Using the built-in story builder (start Ollama for an AI-edited story).")
@@ -739,9 +891,12 @@ def plan_story(llm, topic, description, theme, minutes, narration, passages, vid
     outline["scenes"] = enforce_rules(outline["scenes"], cat, narration, log, can_text)
     outline["scenes"] = fill_to_length(outline["scenes"], cat, minutes, clip_cap, log,
                                        vo_limit=VOICEOVER_LIMITS.get(narration, 2))
-    outline = add_teaser(llm, topic, description, outline, cat, passages, log, narration=narration)
-    outline["scenes"] = add_closing(outline["scenes"], narration)
-    outline = check_facts(llm, topic, description, outline, cat, passages, videos, log)
+    outline["scenes"] = order_by_beats(cover_beats(outline["scenes"], cat, n_beats, log), cat, n_beats)
+    angle = brief.get("angle") or description
+    outline = add_teaser(llm, topic, angle, outline, cat, passages, log, narration=narration)
+    outline["scenes"] = add_closing(outline["scenes"], narration, brief.get("closing_line", ""))
+    outline = check_facts(llm, topic, description, outline, cat, passages, videos, log, brief)
+    outline["brief"] = brief
     outline["scenes"] = space_out_narrator(outline["scenes"])
     outline["catalog"] = {k: p["id"] for k, p in cat.items()}
     outline["clip_cap"] = clip_cap
@@ -750,7 +905,8 @@ def plan_story(llm, topic, description, theme, minutes, narration, passages, vid
     return outline
 
 
-def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log, user_outline=""):
+def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log, user_outline="",
+               brief=None):
     rule = {"none": "NO voice-over at all. Use short on-screen headlines instead (max one per act).",
             "light": f"Narrator only for the hook and a few act openings: max {NARRATION_LIMITS['light']} "
                      "lines in the whole film.",
@@ -758,7 +914,7 @@ def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, lo
                       f"{NARRATION_LIMITS['medium']} lines in the whole film."}[
         narration if narration in NARRATION_LIMITS else "light"]
     plines = "\n".join(
-        f"{pid} | {'HI' if _speaks_hindi(p) else 'EN'} | {_source_label(p)} | {p['subtopic']} | "
+        f"{pid} | B{p.get('beat', 0)} | {'HI' if _speaks_hindi(p) else 'EN'} | {_source_label(p)} | {p['subtopic']} | "
         f"{int(p['end'] - p['start'])}s | {p['strength']} | {p.get('emotion', '-')} | {p['summary']}"
         for pid, p in cat.items())
     vlines = "\n".join(
@@ -766,7 +922,15 @@ def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, lo
         for vid, v in vcat.items())
     avg = min(CLIP_CAP, sum(p["end"] - p["start"] for p in cat.values()) / max(1, len(cat)))
     n_dialogue = int(clamp(minutes * 60 * 0.8 / max(10, avg), 6, 40))
-    prompt = ARCHITECT_USER.format(topic=topic, description=description or "-",
+    from .research import fallback_brief
+    brief = brief or fallback_brief(topic, description, user_outline)
+    lines = [ln for ln in (user_outline or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        user_outline = ""          # prose, not one beat per line: it is already in the brief
+    prompt = ARCHITECT_USER.format(topic=topic, description=brief.get("angle") or description or "-",
+                                   tone=brief.get("tone") or "aggressive, emotional, sarcastic Hinglish",
+                                   beats=beats_listing(brief),
+                                   avoid="; ".join(brief.get("avoid") or []) or "-",
                                    theme=THEMES.get(theme, THEMES["auto"]), minutes=minutes,
                                    narration_rule=rule, passages=plines, visuals=vlines or "(none)",
                                    n_dialogue=n_dialogue, outline_rule=(
@@ -914,6 +1078,14 @@ def enforce_rules(scenes, cat, narration, log=lambda m: None, can_text=True):
     english = sorted(dict.fromkeys(english),
                      key=lambda k: (-cat[k].get("strength", 3), -cat[k].get("heat", 0)))
     allowed_en = set(english[:VOICEOVER_LIMITS.get(narration, 2)])
+    # a beat that only English footage covers keeps its best English clip (retold in Hindi),
+    # so no part of the story disappears
+    hindi_beats = {p.get("beat") for p in cat.values() if _speaks_hindi(p)}
+    for pid in english:
+        b = cat[pid].get("beat")
+        if b and b not in hindi_beats and narration != "none":
+            allowed_en.add(pid)
+            hindi_beats.add(b)
     n_narr = 0
     dropped = {"repeat": 0, "variety": 0, "english": 0, "narration": 0}
     repeats = _Repeats(cat)
@@ -1034,18 +1206,29 @@ def fill_to_length(scenes, cat, minutes, clip_cap=None, log=lambda m: None, vo_l
             per_channel[ch] = per_channel.get(ch, 0) + 1
     repeats = _Repeats(cat)
     n_vo = sum(s["type"] == "voiceover" for s in scenes)
-    pool = sorted((k for k in cat if k not in used),
-                  key=lambda k: (not _speaks_hindi(cat[k]), -cat[k].get("strength", 3), -cat[k].get("heat", 0)))
+    pool = sorted((k for k in cat if k not in used and cat[k].get("relevance", 3) >= 3),
+                  key=lambda k: (not _speaks_hindi(cat[k]), -cat[k].get("relevance", 3),
+                                 -cat[k].get("strength", 3), -cat[k].get("heat", 0)))
     added = 0
+    rank = {k: i for i, k in enumerate(pool)}
+    per_beat = {}
+    for s in scenes:
+        if s["type"] in ("dialogue", "voiceover") and s.get("pid") in cat:
+            b = cat[s["pid"]].get("beat")
+            per_beat[b] = per_beat.get(b, 0) + 1
     for cap_v, cap_c in ((MAX_PER_VIDEO, MAX_PER_CHANNEL), (MAX_PER_VIDEO + 1, MAX_PER_CHANNEL + 2)):
-        for pid in pool:
-            if have >= target:
+        skipped = set()
+        while have < target:
+            # the thinnest beat first, so the film stays balanced across the creator's story
+            todo = sorted((k for k in pool if k not in used and k not in skipped),
+                          key=lambda k: (per_beat.get(cat[k].get("beat"), 0), rank[k]))
+            if not todo:
                 break
-            if pid in used:
-                continue
+            pid = todo[0]
             p = cat[pid]
             vid, ch = p["video_id"], p.get("channel") or p["video_id"]
             if per_video.get(vid, 0) >= cap_v or per_channel.get(ch, 0) >= cap_c or repeats(pid, used):
+                skipped.add(pid)
                 continue
             if _speaks_hindi(p):
                 new = {"type": "dialogue", "pid": pid, "link": "continues this thread"}
@@ -1054,12 +1237,18 @@ def fill_to_length(scenes, cat, minutes, clip_cap=None, log=lambda m: None, vo_l
                        "link": "continues this thread"}
                 n_vo += 1
             else:
+                skipped.add(pid)
                 continue
             idx = None
             for i, sc in enumerate(scenes):          # after this speaker's earlier passage
                 q = cat.get(sc.get("pid"))
                 if q and sc["act"] != "opening" and q["video_id"] == vid and q["start"] < p["start"]:
                     idx = i
+            if idx is None and p.get("beat"):        # at the end of its own beat
+                for i, sc in enumerate(scenes):
+                    q = cat.get(sc.get("pid"))
+                    if q and sc["act"] != "opening" and q.get("beat") == p["beat"]:
+                        idx = i
             if idx is None:                          # after the same thread
                 for i, sc in enumerate(scenes):
                     q = cat.get(sc.get("pid"))
@@ -1076,6 +1265,7 @@ def fill_to_length(scenes, cat, minutes, clip_cap=None, log=lambda m: None, vo_l
             used.append(pid)
             per_video[vid] = per_video.get(vid, 0) + 1
             per_channel[ch] = per_channel.get(ch, 0) + 1
+            per_beat[p.get("beat")] = per_beat.get(p.get("beat"), 0) + 1
             added += 1
     if added:
         log(f"Length: added {added} more scenes from unused material (about {have / 60:.1f} min planned).")
@@ -1096,8 +1286,9 @@ def add_teaser(llm, topic, description, outline, cat, passages, log, max_bites=4
     hook_id = next((cat[s["pid"]]["id"] for s in scenes if s["type"] == "hook" and s.get("pid") in cat), None)
     used = {cat[s["pid"]]["id"] for s in scenes if s.get("pid") in cat and s["type"] != "hook"}
     cands = []
+    best_rel = 4 if any(p.get("relevance", 3) >= 4 for p in passages if p.get("use")) else 3
     for p in passages:
-        if not p.get("use") or not _speaks_hindi(p) or p["id"] in used:
+        if not p.get("use") or not _speaks_hindi(p) or p["id"] in used or p.get("relevance", 3) < best_rel:
             continue
         span = best_punch(p)
         if not span or speech_language(span["t"]) != "hi" or not 1.5 <= span["e"] - span["s"] <= 8.0:
@@ -1174,7 +1365,7 @@ def space_out_narrator(scenes):
         if s["type"] == "voiceover" and ((out and out[-1]["type"] in talk) or nxt in talk):
             continue
         if s["type"] == "narration" and out and out[-1]["type"] == "narration":
-            if CTA_LINE in s.get("text", ""):
+            if CTA_LINE in s.get("text", "") or s.get("creator"):
                 out[-1] = s
             continue
         if s["type"] == "text" and ((out and out[-1]["type"] == "narration") or nxt == "narration"):
@@ -1183,10 +1374,22 @@ def space_out_narrator(scenes):
     return out
 
 
-def add_closing(scenes, narration):
-    """Indian YouTube closes by asking the viewer: the last narrator line ends with the
-    comment call, or it gets its own short line."""
-    if narration == "none" or not scenes:
+def add_closing(scenes, narration, closing_line=""):
+    """The creator's own punchline ends the film, word for word. Without one, the last narrator
+    line ends with the comment call (Indian YouTube closes by asking the viewer)."""
+    if not scenes:
+        return scenes
+    closing = polish_line(closing_line, 60) if closing_line else ""
+    if closing:
+        line = {"act": "ending", "type": "narration" if narration != "none" else "text",
+                "text": closing, "creator": True, "link": "the creator's punchline"}
+        last = len(scenes) - 1
+        if scenes[last]["type"] == "narration" and scenes[last]["act"] == "ending":
+            scenes[last] = line
+        else:
+            scenes.append(line)
+        return scenes
+    if narration == "none":
         return scenes
     last = max((i for i, s in enumerate(scenes) if s["type"] == "narration"), default=None)
     if last is not None and scenes[last]["act"] == "ending" and CTA_LINE not in scenes[last]["text"]:
@@ -1198,7 +1401,7 @@ def add_closing(scenes, narration):
     return scenes
 
 
-def check_facts(llm, topic, description, outline, cat, passages, videos, log):
+def check_facts(llm, topic, description, outline, cat, passages, videos, log, brief=None):
     """Every narrator line is checked against what our footage actually says: the AI rewrites
     lines that add facts or describe the picture, then lines that still name a number or a big
     name the sources never mention are cut."""
@@ -1206,7 +1409,8 @@ def check_facts(llm, topic, description, outline, cat, passages, videos, log):
         f"{p.get('text', '')} {p.get('hindi', '')} {p.get('summary', '')} {p.get('video_title', '')}"
         for p in passages] + [v.get("title", "") for v in videos]).lower()
     scenes = outline["scenes"]
-    idx = [i for i, s in enumerate(scenes) if s["type"] in ("narration", "text")]
+    avoid = "; ".join((brief or {}).get("avoid") or []) or "-"
+    idx = [i for i, s in enumerate(scenes) if s["type"] in ("narration", "text") and not s.get("creator")]
     if llm.available() and idx:
         used = [cat[s["pid"]] for s in scenes if s.get("pid") in cat]
         extra = sorted((p for p in cat.values() if p not in used), key=lambda p: -p.get("strength", 3))
@@ -1214,7 +1418,7 @@ def check_facts(llm, topic, description, outline, cat, passages, videos, log):
         listing = "\n".join(f"{k}. {scenes[i]['text']}" for k, i in enumerate(idx, 1))
         try:
             raw = llm.chat_json(FACT_SYSTEM.format(max_words=NARRATION_WORDS), FACT_USER.format(
-                topic=topic, facts=facts, lines=listing), temperature=0.2, max_tokens=2500)
+                topic=topic, facts=facts, lines=listing, avoid=avoid), temperature=0.2, max_tokens=2500)
             fixed = 0
             for item in raw.get("lines") or [] if isinstance(raw, dict) else []:
                 k = _num(item.get("n")) if isinstance(item, dict) else None
@@ -1234,7 +1438,7 @@ def check_facts(llm, topic, description, outline, cat, passages, videos, log):
             log(f"Fact check by the AI skipped ({e}).")
     keep = []
     for s in scenes:
-        if s["type"] in ("narration", "text", "voiceover") and s.get("text"):
+        if s["type"] in ("narration", "text", "voiceover") and s.get("text") and not s.get("creator"):
             why = unsupported_claim(s["text"], corpus)
             if why:
                 log(f"  cut a narrator line that the footage doesn't support ({why}): {s['text'][:60]}")
@@ -1309,7 +1513,16 @@ class Assembler:
         for lst in self.by_video.values():
             lst.sort(key=lambda p: p["start"])
         self.videos = {v["id"]: v for v in videos}
-        self.visuals = sorted(visuals, key=lambda m: m["peak"], reverse=True)
+        # Pictures only from videos that tell this story: never from commentary channels or
+        # from videos arguing the other side (no stranger's face over someone else's words).
+        ok = {v["id"] for v in videos if v.get("kind") not in COMMENTARY
+              and not str(v.get("stance") or "").startswith("oppos")}
+        self.visuals = sorted((m for m in visuals if m["video_id"] in ok), key=lambda m: m["peak"],
+                              reverse=True)
+        self.beat_videos = {}
+        for v in videos:
+            for b in v.get("beats") or ([0] if v.get("broll") else []):
+                self.beat_videos.setdefault(b, set()).add(v["id"])
         for m in self.visuals:      # how much a moment looks like action footage (not a studio)
             v = self.videos.get(m["video_id"], {})
             title = f"{m.get('video_title', '')} {v.get('title', '')}"
@@ -1350,13 +1563,19 @@ class Assembler:
             return p["start"], min(p["end"], p["start"] + hi), p["text"]
         return best[1], best[2], best[3]
 
-    def broll(self, seconds, prefer=(), avoid_vid=None, shot=3.0, action=False, exclude=()):
+    def broll(self, seconds, prefer=(), avoid_vid=None, shot=3.0, action=False, exclude=(), beat=None):
+        """Pictures for narration, cutaways and montages. With a beat: that beat's videos first,
+        then the visuals the creator asked for (satellites, flags...), then the rest."""
         clips, total, last = [], 0.0, avoid_vid
-        if action:      # clashes, crowds, barricades first; studio talk last
+        if action:      # footage first; studio talk last
             quiet = sorted(self.visuals, key=lambda m: -m.get("action", 0))
         else:
             quiet = sorted(self.visuals, key=lambda m: (m.get("talk", 0) > 0.4, -m["peak"]))
         quiet = [m for m in quiet if m["video_id"] not in exclude]
+        if beat:
+            tiers = (self.beat_videos.get(beat, set()), self.beat_videos.get(0, set()))
+            quiet = sorted(quiet, key=lambda m: 0 if m["video_id"] in tiers[0] else
+                           1 if m["video_id"] in tiers[1] else 2)
         pool = [m for m in quiet if m["video_id"] in prefer] + \
                [m for m in quiet if m["video_id"] not in prefer]
         for m in pool:
@@ -1386,7 +1605,8 @@ class Assembler:
                 self.take(next_p["video_id"], s, e)
                 return [self.clip(next_p["video_id"], s, e)]
         prefer = (next_p["video_id"],) if next_p else ()
-        return self.broll(seconds, prefer=prefer, shot=seconds if single else 3.0, action=True)
+        return self.broll(seconds, prefer=prefer, shot=seconds if single else 3.0, action=True,
+                          beat=next_p.get("beat") if next_p else None)
 
     # -- main
     def build(self, outline, narration_seconds, theme):
@@ -1516,7 +1736,8 @@ class Assembler:
                     span = min(length - head, 0.55 * length)
                     if length - head - span < 1.5:
                         span = length - head        # don't return to the speaker for a blink
-                    shots = self.broll(span, shot=3.0, action=True, exclude=(c["video_id"],))
+                    shots = self.broll(span, shot=3.0, action=True, exclude=(c["video_id"],),
+                                       beat=(p or {}).get("beat"))
                     if not shots:
                         new.append(c)
                         continue
@@ -1591,9 +1812,17 @@ class Assembler:
             self.log(msg)
 
         # Too long: drop the weakest build-up/rising dialogue (with its bridge), never hook/climax.
+        def beat_of(b):
+            return (self.passages.get(b.get("passage_id")) or {}).get("beat")
         while total() > self.total * 1.08:
+            per_beat = {}
+            for a in story["acts"]:
+                for b in a["beats"]:
+                    if b["kind"] in ("dialogue", "voiceover"):
+                        per_beat[beat_of(b)] = per_beat.get(beat_of(b), 0) + 1
             cands = [(a, i, b) for a in story["acts"] if a["key"] in ("buildup", "rising", "ending")
-                     for i, b in enumerate(a["beats"]) if b["kind"] == "dialogue"]
+                     for i, b in enumerate(a["beats"]) if b["kind"] == "dialogue"
+                     and (beat_of(b) is None or per_beat.get(beat_of(b), 0) > 1)]
             if len(cands) <= 2:
                 break
             act, i, b = min(cands, key=lambda t: (t[2].get("strength", 3), -beat_seconds(t[2])))

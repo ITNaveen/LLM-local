@@ -103,8 +103,8 @@ def create_job():
         minutes = min(15.0, max(8.0, minutes))
     req = {
         "topic": topic[:200],
-        "description": (data.get("description") or "").strip()[:3000],
-        "outline": (data.get("outline") or "").strip()[:3000],
+        "description": (data.get("description") or "").strip()[:5000],
+        "outline": (data.get("outline") or "").strip()[:5000],
         "minutes": minutes,
         "theme": data.get("theme") if data.get("theme") in style_mod.THEMES else "sensational",
         "narration": data.get("narration") if data.get("narration") in ("none", "light", "medium") else "medium",
@@ -149,6 +149,7 @@ def _research_summary(job):
     if not res:
         return None
     return {"total": res.get("total_candidates"), "queries": res["plan"]["queries"],
+            "brief": res["plan"].get("brief"),
             "shortlist": [{"id": c["id"], "title": c["title"], "channel": c.get("channel"),
                            "views": c.get("views"), "score": c.get("score")}
                           for c in res["shortlist"]]}

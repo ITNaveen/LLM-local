@@ -103,6 +103,12 @@ def test_research_with_llm_and_diversity(settings, fake_llm):
         per_channel[c["channel"]] = per_channel.get(c["channel"], 0) + 1
     assert max(per_channel.values()) <= 3
     assert "virat kohli century" in res["plan"]["queries"]
+    brief = res["plan"]["brief"]
+    assert [b["name"] for b in brief["beats"]] == ["Pressure", "The century", "Celebration"]
+    # the searches go round the beats, so a time limit never leaves a beat uncovered
+    assert res["plan"]["queries"][:3] == ["virat kohli century", "विराट कोहली शतक", "kohli celebration crowd"]
+    assert "stadium crowd cheering" in res["plan"]["queries"]           # the requested visuals
+    assert all(c.get("beats") or c.get("broll") for c in res["shortlist"])
 
 
 def test_research_runs_searches_in_parallel_with_time_limit(settings, fake_llm):

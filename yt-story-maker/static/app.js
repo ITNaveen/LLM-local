@@ -215,6 +215,15 @@ async function refreshDetail() {
   }
   if (d.story) html += storyboard(d.story, st.status === "awaiting_review");
   if (st.status === "awaiting_review") html += `<button class="primary" data-act="approve">🎬 Render video</button>`;
+  const brief = d.research && d.research.brief;
+  if (brief && brief.beats) {
+    html += `<details open><summary><b>Story brief</b> – what the editor understood</summary>
+      <p>${esc(brief.angle || "")}${brief.tone ? ` <span class="muted">(${esc(brief.tone)})</span>` : ""}</p>
+      <ol>${brief.beats.map((b) => `<li><b>${esc(b.name)}</b> – ${esc(b.about || "")}</li>`).join("")}</ol>
+      ${(brief.broll || []).length ? `<p class="muted">Visuals: ${brief.broll.map((b) => esc(b.what)).join(" · ")}</p>` : ""}
+      ${(brief.avoid || []).length ? `<p class="muted">Never claim: ${brief.avoid.map(esc).join(" · ")}</p>` : ""}
+      ${brief.closing_line ? `<p class="muted">Closing line: “${esc(brief.closing_line)}”</p>` : ""}</details>`;
+  }
   if (d.research) {
     html += `<details><summary>Research: looked at ${d.research.total} videos, studied ${d.research.shortlist.length}</summary>
       <p class="muted">Searches: ${d.research.queries.map(esc).join(" · ")}</p>

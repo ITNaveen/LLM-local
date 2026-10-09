@@ -139,7 +139,8 @@ def run_job(job, settings, source=None, llm=None):
         res = read_json(job.path("research.json"))
         if not res:
             log(f"Topic: {topic}")
-            res = research.research(source, llm, topic, desc, settings, log, progress=sub)
+            res = research.research(source, llm, topic, desc, settings, log, progress=sub,
+                                    outline=req.get("outline", ""))
             write_json(job.path("research.json"), res)
         finish(share)
 
@@ -163,7 +164,8 @@ def run_job(job, settings, source=None, llm=None):
             outline = editor.plan_story(llm, topic, desc, req.get("theme", "auto"), minutes,
                                         req.get("narration", "light"), mom["passages"],
                                         mom["videos"], log, can_text=can_text,
-                                        user_outline=req.get("outline", ""))
+                                        user_outline=req.get("outline", ""),
+                                        brief=editor.brief_of(res.get("plan"), topic, desc))
             write_json(job.path("outline.json"), outline)
         finish(share)
 
@@ -320,12 +322,15 @@ def understand_videos(source, llm, topic, desc, res, settings, log, sub):
     log("Checking every video: on-topic? understandable language?")
     kept, rejected = editor.screen(llm, topic, desc, res.get("plan"), details, log,
                                    progress=lambda f: sub(0.3 + 0.2 * f),
-                                   trust_topic=isinstance(source, FixtureSource) and not llm.available())
+                                   trust_topic=isinstance(source, FixtureSource) and not llm.available(),
+                                   avoid=settings.get("avoid_channels") or ())
     if not kept:
         raise RuntimeError("None of the videos found were on-topic and in Hindi/English. "
                            "Try a more specific topic or description.")
     speech = [v for v in kept if v["role"] == "speech"]
-    topic_words = keywords(f"{topic} {desc}")
+    brief = editor.brief_of(res.get("plan"), topic, desc)
+    topic_words = keywords(" ".join([topic, desc, " ".join(brief.get("entities") or []),
+                                     " ".join(b["name"] + " " + b.get("about", "") for b in brief["beats"])]))
     passages, visuals = [], []
     for v in kept:
         visuals += editor.visual_moments(v)
@@ -334,7 +339,8 @@ def understand_videos(source, llm, topic, desc, res, settings, log, sub):
         allp = editor.build_passages(v)
         chosen = {p["id"] for p in editor.preselect(allp, topic_words)}
         annotated = {p["id"]: p for p in editor.annotate(
-            llm, topic, desc, v, [p for p in allp if p["id"] in chosen], log)}
+            llm, topic, desc, v, [p for p in allp if p["id"] in chosen], log,
+            brief=brief)}
         for p in allp:
             p = annotated.get(p["id"], p)
             p.setdefault("video_title", v.get("title", ""))

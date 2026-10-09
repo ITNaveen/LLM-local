@@ -48,20 +48,35 @@ class FakeLLM:
         from storymaker import editor, publish, research
         self.calls.append(system[:40])
         if system == research.QUERY_SYSTEM:
-            return {"queries": ["virat kohli century", "विराट कोहली शतक", "kohli press conference"],
-                    "must_keywords": ["kohli"], "nice_keywords": ["century", "west indies"],
-                    "years": ["2026"]}
+            return {"angle": "Kohli silenced his critics with a century.", "tone": "proud, punchy",
+                    "entities": ["Virat Kohli", "विराट कोहली", "West Indies"],
+                    "beats": [{"name": "Pressure", "about": "two low scores, media doubts",
+                               "queries": ["virat kohli century", "kohli press conference"]},
+                              {"name": "The century", "about": "the match-winning hundred",
+                               "queries": ["विराट कोहली शतक", "kohli century highlights"]},
+                              {"name": "Celebration", "about": "crowd and dressing room",
+                               "queries": ["kohli celebration crowd"]}],
+                    "broll": [{"what": "stadium crowd", "query": "stadium crowd cheering"}],
+                    "avoid": ["claims that Kohli will retire"],
+                    "closing_line": "विराट ने फिर साबित कर दिया - बल्ला बोलता है!",
+                    "must_keywords": ["kohli"], "years": ["2026"]}
         if system == research.RERANK_SYSTEM:
             n = len(re.findall(r"^\d+\. ", user, flags=re.M))
             return {"keep": list(range(n, 0, -1))}
         if system == editor.SCREEN_SYSTEM:
             title = re.search(r"Video title: (.*)", user).group(1)
             ok = "comedy" not in title.lower()
-            return {"relevant": ok, "kind": "news" if ok else "comedy", "reason": "test verdict"}
+            opinion = "expert analysis" in title.lower()          # a commentator against the angle
+            beat = 1 + sum(map(ord, title)) % 3
+            return {"relevant": ok, "beat": beat, "kind": "opinion" if opinion else ("news" if ok else "comedy"),
+                    "stance": "opposes" if opinion else "neutral", "reason": "test verdict"}
         if system == editor.ANNOTATE_SYSTEM:
             items = re.findall(r"^(\d+)\. \[\d+s\] (.*)$", user, flags=re.M)
             english = "only hears Hindi" in user
+            beats = len(re.findall(r"^\d+\. \w", user.split("Source video:")[0], flags=re.M))
             return {"passages": [{"n": int(k), "use": True, "summary": f"speaker makes point {k}",
+                                  "beat": 1 + int(k) % max(1, beats),
+                                  "relevance": 2 if int(k) % 7 == 0 else 4,
                                   "topic": "result" if int(k) <= len(items) // 2 else "reaction",
                                   "strength": 3 + int(k) % 3, "standalone": True,
                                   "emotion": ["anger", "pride", "shock"][int(k) % 3],

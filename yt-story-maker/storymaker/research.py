@@ -10,78 +10,131 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from .llm import LLMError
 from .util import keywords, tokens
 
-QUERY_SYSTEM = """You are the research assistant of a viral Hindi news YouTube channel. Given a
-topic and a story description, produce YouTube search queries that find the most DRAMATIC raw
-material for this story: clashes, lathicharge (लाठीचार्ज), stone pelting (पथराव), हंगामा, बवाल,
-emotional interviews of victims and families, angry statements, threats and warnings, press
-conferences, heated debates, viral videos, ground reports, CCTV, and the big Hindi channels'
-coverage (Aaj Tak, ABP News, Zee News, News18 India, TV9 Bharatvarsh, NDTV India, The Lallantop).
-Cover the whole story: the background and earlier incidents too. Mix Hindi (Devanagari),
-Hinglish and English the way Indians actually search. Never just repeat a slogan from the topic -
-search for the events and people behind it. Return JSON only."""
+QUERY_SYSTEM = """You are the producer of a viral Hindi news YouTube channel. The creator
+describes the video they want. Turn it into the production brief the whole team follows: the
+argument and the side the film takes, the story beats in order, and exactly which YouTube
+coverage to search for each beat. Everything must be about THIS story - no generic material
+(a story about Musk vs India needs Musk-India coverage, not Tesla launches). Searches name the
+specific people, companies and events, the way Indians search (Hindi, Hinglish, English). If the
+story is about violence, search for the clashes; if it is about a statement or a policy, search
+for that statement, the reactions, the press conferences and the debates on Indian channels.
+JSON only."""
 
-QUERY_USER = """Topic: {topic}
-Story description: {description}
+QUERY_USER = """Video title: {topic}
+What the creator wants:
+{description}
 
 Return JSON:
 {{
-  "queries": ["12 to 14 diverse YouTube search queries: at least half in Hindi/Hinglish, several aimed at dramatic footage"],
-  "must_keywords": ["2-4 words that a relevant video title almost always contains"],
-  "nice_keywords": ["6-12 related words: people, places, events, years"],
-  "years": ["relevant years as strings, e.g. 2024"]
-}}"""
+  "angle": "2-3 sentences: what the film argues and whose side it takes",
+  "tone": "a few words",
+  "entities": ["the 4-10 key people, companies, countries and events of this story, each ALSO in Devanagari, e.g. 'Elon Musk', 'एलन मस्क'"],
+  "beats": [{{"name": "short English name", "about": "one sentence: what this part shows or argues",
+             "queries": ["3 YouTube searches for news coverage / footage of exactly this"]}}],
+  "broll": [{{"what": "a visual the creator asked for, e.g. Starlink satellites in orbit",
+             "query": "a YouTube search for that footage"}}],
+  "avoid": ["claims the film must NOT make (e.g. allegations the creator warned about)"],
+  "closing_line": "the creator's final punchline if they wrote one: the same words, in Devanagari (English terms may stay English); else empty",
+  "must_keywords": ["2-4 words almost every relevant video title contains"],
+  "years": ["relevant years as strings"]
+}}
+5 to 7 beats in story order (trigger -> context -> conflict -> the other side -> climax -> ending),
+0 to 4 broll items."""
 
-RERANK_SYSTEM = """You select raw footage for a cinematic Hindi YouTube story video. Prefer
-original footage (speeches, highlights, news coverage, crowd moments) that directly matches
-the story. Reject reaction videos, compilations of unrelated topics, podcasts, explainers
-with only a talking head, clickbait that does not match, and anything off-topic. JSON only."""
+RERANK_SYSTEM = """You pick the source videos for a Hindi news YouTube film with a clear angle.
+Keep only videos that cover one of the film's beats: news coverage, statements, press
+conferences, interviews, debates and footage of exactly these events. Reject: other stories,
+general content about one of the people, commentators who argue AGAINST the film's angle,
+reaction videos, podcasts, compilations, clickbait. Make sure every beat has some videos. JSON only."""
 
-RERANK_USER = """Topic: {topic}
-Story: {description}
+RERANK_USER = """Film: {topic}
+Angle: {angle}
+Beats:
+{beats}
 
-Candidate videos:
+Candidate videos (number | beat it was found for | title | channel | length | views):
 {listing}
 
-Return JSON: {{"keep": [list of the numbers of the {k} best videos, best first]}}"""
+Return JSON: {{"keep": [numbers of up to {k} videos to study, best first]}}"""
 
 SUFFIXES = ["", "full video", "highlights", "speech", "news", "hindi", "best moments",
             "crowd reaction", "interview", "ground report"]
 
 
-def make_queries(llm, topic, description, log):
+def _strs(xs, n=20, size=160):
+    return [str(x).strip()[:size] for x in (xs or []) if isinstance(x, (str, int, float)) and str(x).strip()][:n]
+
+
+def fallback_brief(topic, description="", outline=""):
+    """The brief without the AI: beats from the outline lines (or just the topic)."""
+    lines = [re.sub(r"^\s*(\d+[.)]|[-*•])\s*", "", ln).strip() for ln in (outline or "").splitlines()]
+    lines = [ln for ln in lines if len(ln.split()) >= 2][:8]
+    base = topic.strip()
+    if len(base.split()) > 6:
+        base = " ".join(keywords(f"{description} {topic}")[:4]) or base
+    beats = [{"name": ln[:60], "about": ln, "queries": [ln[:80]]} for ln in lines] or \
+        [{"name": base[:60], "about": description[:200] or base, "queries": [base]}]
+    return {"angle": (description or topic)[:400], "tone": "", "entities": keywords(topic)[:6],
+            "beats": beats, "broll": [], "avoid": [], "closing_line": ""}
+
+
+def make_queries(llm, topic, description, log, outline=""):
+    """The production brief (angle, beats, footage, things to avoid) and the searches for it.
+    Everything the creator wrote - description and outline - goes in."""
+    text = "\n".join(x for x in ((description or "").strip(), (outline or "").strip()) if x) or "-"
     plan = None
     if llm.available():
         try:
-            plan = llm.chat_json(QUERY_SYSTEM, QUERY_USER.format(
-                topic=topic, description=description or "-"), temperature=0.5)
+            plan = llm.chat_json(QUERY_SYSTEM, QUERY_USER.format(topic=topic, description=text),
+                                 temperature=0.4, max_tokens=3500)
         except LLMError as e:
-            log(f"LLM query planning failed, using keyword queries ({e})")
-    kw = keywords(f"{topic} {description}")
-    years = re.findall(r"\b(?:19|20)\d{2}\b", f"{topic} {description}")
+            log(f"AI brief failed, using keyword searches ({e})")
     if not isinstance(plan, dict):
         plan = {}
-    queries = [q.strip() for q in plan.get("queries") or [] if isinstance(q, str) and q.strip()]
-    base = topic.strip()
-    detail = " ".join(kw[:6])
-    fallback = []
-    if len(base.split()) > 6:        # a long slogan finds nothing on YouTube: search its keywords
-        fallback, base = [base], " ".join(keywords(f"{description} {topic}")[:4]) or base
-    fallback += [f"{base} {s}".strip() for s in SUFFIXES]
-    if detail and detail.lower() != base.lower():
-        fallback += [f"{base} {detail}", detail]
-    seen, merged = set(), []
-    for q in queries + fallback:
-        key = q.lower()
-        if key not in seen:
-            seen.add(key)
-            merged.append(q)
+    brief = fallback_brief(topic, description, outline)
+    beats = []
+    for b in plan.get("beats") or []:
+        if isinstance(b, dict) and str(b.get("name") or "").strip():
+            beats.append({"name": str(b["name"]).strip()[:80], "about": str(b.get("about") or "")[:300],
+                          "queries": _strs(b.get("queries"), 4, 100)})
+    if len(beats) >= 2:
+        brief.update(beats=beats[:8])
+    for key, n in (("entities", 12), ("avoid", 8)):
+        if plan.get(key):
+            brief[key] = _strs(plan[key], n)
+    for key in ("angle", "tone", "closing_line"):
+        if isinstance(plan.get(key), str) and plan[key].strip():
+            brief[key] = plan[key].strip()[:600]
+    brief["broll"] = [{"what": str(b.get("what") or "")[:100], "query": str(b.get("query") or "")[:100]}
+                      for b in plan.get("broll") or [] if isinstance(b, dict) and b.get("query")][:4]
+
+    # searches: round-robin over the beats, so a time limit never leaves a beat uncovered
+    tagged, seen = [], set()
+
+    def add(q, beat, broll=False):
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            tagged.append({"q": q, "beat": beat, "broll": broll})
+    for i in range(4):
+        for n, b in enumerate(brief["beats"], 1):
+            if i < len(b["queries"]):
+                add(b["queries"][i], n)
+    for b in brief["broll"]:
+        add(b["query"], 0, broll=True)
+    kw = keywords(f"{topic} {description}")
+    if len(tagged) < 8:                               # no AI: generic searches around the topic
+        base = brief["beats"][0]["queries"][0]
+        for suffix in SUFFIXES:
+            add(f"{base} {suffix}".strip(), 1)
+    years = re.findall(r"\b(?:19|20)\d{2}\b", f"{topic} {description} {outline}")
     must = [w.lower() for w in plan.get("must_keywords") or [] if isinstance(w, str)]
-    nice = [w.lower() for w in plan.get("nice_keywords") or [] if isinstance(w, str)]
-    topic_kw = keywords(topic)
+    ent_words = keywords(" ".join(brief["entities"]))
     return {
-        "queries": merged[:16],
-        "must_keywords": must or topic_kw[:3],
-        "nice_keywords": nice or kw[:12],
+        "queries": [t["q"] for t in tagged][:20],
+        "tagged": tagged[:20],
+        "brief": brief,
+        "must_keywords": must or keywords(topic)[:3],
+        "nice_keywords": (ent_words or kw)[:16],
         "years": [str(y) for y in (plan.get("years") or years)][:4],
     }
 
@@ -119,9 +172,15 @@ def score_candidate(c, plan):
     return round((0.65 * relevance + 0.35 * popularity) * shape * quality, 4)
 
 
-def research(source, llm, topic, description, settings, log, progress=None):
-    plan = make_queries(llm, topic, description, log)
+def research(source, llm, topic, description, settings, log, progress=None, outline=""):
+    plan = make_queries(llm, topic, description, log, outline)
+    brief = plan["brief"]
+    log(f"Story brief: {brief['angle'][:200]}")
+    for n, b in enumerate(brief["beats"], 1):
+        log(f"  beat {n}: {b['name']}")
     queries = plan["queries"]
+    beat_of = {t["q"]: t for t in plan.get("tagged", [])}
+    avoid = [a.lower() for a in settings.get("avoid_channels") or [] if a.strip()]
     workers = max(1, int(settings.get("search_workers", 4)))
     budget = float(settings.get("research_minutes", 6)) * 60
     log(f"Searching YouTube with {len(queries)} queries ({workers} at a time)...")
@@ -147,10 +206,19 @@ def research(source, llm, topic, description, settings, log, progress=None):
                 log(f"  search failed: {str(e)[:200]}")
                 continue
             new = 0
+            tag = beat_of.get(q, {"beat": 1, "broll": False})
             for r in results:
+                if any(a in (r.get("channel") or "").lower() for a in avoid):
+                    continue                          # a channel the creator never wants
                 if r["id"] not in candidates:
-                    candidates[r["id"]] = r
+                    candidates[r["id"]] = dict(r, beats=[], broll=False)
                     new += 1
+                c = candidates[r["id"]]
+                if tag["broll"]:
+                    c["broll"] = c["broll"] or not c["beats"]
+                elif tag["beat"] not in c["beats"]:
+                    c["beats"].append(tag["beat"])
+                    c["broll"] = False
             log(f"  '{q}': {len(results)} results, {new} new (total {len(candidates)}) in {took:.0f}s")
             if took > 60:
                 log("  (YouTube is answering slowly - see 'force IPv4' in Settings)")
@@ -176,10 +244,10 @@ def research(source, llm, topic, description, settings, log, progress=None):
     pool.sort(key=lambda c: c["score"], reverse=True)
 
     k = settings["shortlist_size"]
-    shortlist = _diverse_top(pool, k * 2)
+    shortlist = balanced_top(pool, k * 2, len(brief["beats"]))
     if llm.available() and shortlist:
-        shortlist = _llm_rerank(llm, topic, description, shortlist, k, log)
-    shortlist = _diverse_top(shortlist, k)
+        shortlist = _llm_rerank(llm, topic, brief, shortlist, k, log)
+    shortlist = balanced_top(shortlist, k, len(brief["beats"]))
     log(f"Shortlisted {len(shortlist)} of {len(candidates)} videos.")
     return {"plan": plan, "total_candidates": len(candidates),
             "candidates": pool[:200], "shortlist": shortlist}
@@ -198,21 +266,49 @@ def _diverse_top(pool, k, per_channel=3):
     return out
 
 
-def _llm_rerank(llm, topic, description, shortlist, k, log):
+def balanced_top(pool, k, n_beats, per_channel=3, broll_slots=4):
+    """Best videos, taken in turn from every beat (and a few for the requested visuals), so
+    each part of the story has material. Pool order = preference."""
+    lanes = {n: [c for c in pool if n in (c.get("beats") or [])] for n in range(1, n_beats + 1)}
+    lanes[0] = [c for c in pool if c.get("broll") and not c.get("beats")][:broll_slots]
+    untagged = [c for c in pool if not c.get("beats") and not c.get("broll")]
+    counts, out, ids = {}, [], set()
+
+    def take(c):
+        ch = c.get("channel") or c["id"]
+        if c["id"] in ids or counts.get(ch, 0) >= per_channel:
+            return False
+        counts[ch] = counts.get(ch, 0) + 1
+        ids.add(c["id"])
+        out.append(c)
+        return True
+    while len(out) < k and any(lanes.values()):
+        for n in list(lanes):
+            while lanes[n] and len(out) < k:
+                if take(lanes[n].pop(0)):
+                    break
+    for c in untagged:
+        if len(out) >= k:
+            break
+        take(c)
+    return out
+
+
+def _llm_rerank(llm, topic, brief, shortlist, k, log):
     listing = "\n".join(
-        f"{i + 1}. {c['title'][:110]} | {c.get('channel', '')[:30]} | "
-        f"{int(c['duration'] // 60)} min | {c.get('views', 0):,} views"
-        for i, c in enumerate(shortlist))
+        f"{i + 1} | {'visual' if c.get('broll') else ','.join(map(str, c.get('beats') or [])) or '-'} | "
+        f"{c['title'][:100]} | {c.get('channel', '')[:28]} | {int(c['duration'] // 60)} min | "
+        f"{c.get('views', 0):,} views" for i, c in enumerate(shortlist))
+    beats = "\n".join(f"{n}. {b['name']}: {b['about']}" for n, b in enumerate(brief["beats"], 1))
     try:
         res = llm.chat_json(RERANK_SYSTEM, RERANK_USER.format(
-            topic=topic, description=description or "-", listing=listing, k=k), temperature=0.2)
+            topic=topic, angle=brief["angle"], beats=beats, listing=listing, k=k), temperature=0.2)
         keep = [int(x) - 1 for x in res.get("keep", []) if str(x).strip().isdigit()]
         keep = [i for i in dict.fromkeys(keep) if 0 <= i < len(shortlist)]
         if len(keep) >= max(4, k // 3):
-            chosen = [shortlist[i] for i in keep]
-            rest = [c for i, c in enumerate(shortlist) if i not in set(keep)]
-            log(f"  AI picked {len(chosen)} videos as the most relevant.")
-            return chosen + rest
+            log(f"  AI picked {len(keep)} videos that cover the story beats.")
+            return [shortlist[i] for i in keep]      # the rejected ones are NOT used as filler
+        log("  AI picked too few videos - keeping the search ranking.")
     except (LLMError, AttributeError, TypeError, ValueError) as e:
         log(f"  AI re-ranking skipped ({e})")
     return shortlist

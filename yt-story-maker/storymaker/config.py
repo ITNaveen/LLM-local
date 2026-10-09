@@ -31,6 +31,7 @@ DEFAULTS = {
     "force_ipv4": True,           # fixes very slow YouTube on many home networks
     "search_workers": 4,          # searches / video reads running at the same time
     "research_minutes": 6,        # stop searching after this long and go with what we have
+    "avoid_channels": ["Dhruv Rathee"],   # channels never used (any video whose channel contains these)
     # Voice
     "tts_engine": "auto",         # auto | parler | edge | piper | say | silent
     "parler_speaker": "Rohit",    # emotional voice: Rohit / Aman (male), Divya / Rani (female)

@@ -18,15 +18,15 @@
   <section class="col-left">
     <form class="card" id="new-form">
       <h2>New video</h2>
-      <label>Topic <span class="hint">the big keyword</span>
-        <input name="topic" required maxlength="200" placeholder="e.g. Virat Kohli West Indies tour 2026">
+      <label>Video title / topic <span class="hint">what the video is about</span>
+        <input name="topic" required maxlength="200" placeholder="e.g. ELON MUSK vs BHARAT — Starlink का Security Test!">
       </label>
-      <label>Story description <span class="hint">what it should show, the story you want</span>
-        <textarea name="description" rows="5" maxlength="3000" placeholder="e.g. Kohli comes under pressure after two low scores, the media doubts him, then he scores a match-winning century in the final Test. Show his celebration, the crowd and the press conference."></textarea>
+      <label>Your brief <span class="hint">the story, your angle, tone, the footage you want, what NOT to claim, your closing line</span>
+        <textarea name="description" rows="8" maxlength="5000" placeholder="e.g. Expose Elon Musk's double standards over Starlink in India. Musk asked if Mukesh Ambani runs India; the government says all operators must pass the same security checks. America restricted Huawei for national security - why can't India check Starlink? Footage: Musk's X posts, government response, Starlink satellites, Huawei ban. Tone: sarcastic, patriotic Hinglish. Don't claim Starlink spies on India. End with: 'Bharat kisi billionaire ke pressure mein nahi chalega!'"></textarea>
       </label>
 
-      <label>Your scene outline <span class="hint">optional — one story beat per line, the AI follows this order</span>
-        <textarea name="outline" rows="4" maxlength="3000" placeholder="e.g.&#10;1. America ka shock decision: Green Card band&#10;2. JD Vance ne Indians ko kya kaha&#10;3. Lakhon Indian engineers par asar&#10;4. India ko kya karna chahiye"></textarea>
+      <label>Scene outline <span class="hint">optional — one story beat per line; the film follows them in this order</span>
+        <textarea name="outline" rows="4" maxlength="5000" placeholder="e.g.&#10;1. America ka shock decision: Green Card band&#10;2. JD Vance ne Indians ko kya kaha&#10;3. Lakhon Indian engineers par asar&#10;4. India ko kya karna chahiye"></textarea>
       </label>
       <label>Length: <b id="minutes-out">10</b> minutes
         <input type="range" name="minutes" min="8" max="15" step="1" value="10">
@@ -124,6 +124,7 @@
     <label>Videos to study closely <input name="shortlist_size" type="number" min="6" max="60"></label>
     <label class="toggle"><input type="checkbox" name="force_ipv4"> Force IPv4 for YouTube (fixes very slow searches)</label>
     <label>Search time limit, minutes <input name="research_minutes" type="number" min="1" max="30"></label>
+    <label>Never use these channels <span class="hint">comma separated, e.g. Dhruv Rathee</span><input name="avoid_channels"></label>
     <label>Use YouTube cookies from browser <span class="hint">only if YouTube asks to sign in</span>
       <select name="cookies_from_browser"><option value="">Off</option><option>chrome</option><option>safari</option><option>firefox</option><option>brave</option><option>edge</option></select></label>
     <h3>Render</h3>
