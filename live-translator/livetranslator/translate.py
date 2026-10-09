@@ -21,7 +21,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 import httpx
@@ -29,6 +29,22 @@ import httpx
 log = logging.getLogger("lt.translate")
 
 KEEP_ALIVE = "8h"
+NUM_CTX = 4096     # enough for the system prompt + ~15 lines of conversation
+
+
+def _ollama_stats(done: dict) -> dict:
+    """Ollama's own timings from the final stream message (durations are in nanoseconds)."""
+    ns = 1e9
+    gen_tokens = int(done.get("eval_count") or 0)
+    gen_s = float(done.get("eval_duration") or 0) / ns
+    return {
+        "load_s": round(float(done.get("load_duration") or 0) / ns, 3),
+        "prompt_tokens": int(done.get("prompt_eval_count") or 0),
+        "prompt_s": round(float(done.get("prompt_eval_duration") or 0) / ns, 3),
+        "gen_tokens": gen_tokens,
+        "gen_s": round(gen_s, 3),
+        "tok_s": round(gen_tokens / gen_s, 1) if gen_s > 0 and gen_tokens >= 3 else 0.0,
+    }
 
 SYSTEM_PROMPT = """You are an expert German-to-English interpreter working live in a business meeting.
 
@@ -93,6 +109,12 @@ class TranslationResult:
     first_token_s: float = 0.0
     total_s: float = 0.0
     error: str = ""
+    timeout: bool = False       # Ollama sent nothing within the time limit
+    stats: dict = field(default_factory=dict)   # Ollama's own timings (load, prompt, generation)
+
+    @property
+    def tok_s(self) -> float:
+        return float(self.stats.get("tok_s") or 0.0)
 
 
 class OllamaError(RuntimeError):
@@ -142,9 +164,10 @@ class OllamaTranslator:
         want = self.model if ":" in self.model else self.model + ":latest"
         return {"running": True, "models": models, "model_ready": want in models or self.model in models}
 
-    def warmup(self) -> None:
+    def warmup(self, model: str | None = None, first_token_timeout: float = 180.0) -> TranslationResult:
         """Load the model into memory and prime the prompt cache with the system prompt."""
-        self.translate("Guten Morgen zusammen.", record=False)
+        return self.translate("Guten Morgen zusammen.", record=False, model=model,
+                              first_token_timeout=first_token_timeout)
 
     def pull(self, model: str, on_progress: Callable[[dict], None]) -> None:
         with self._client.stream("POST", f"{self.base_url}/api/pull", json={"model": model, "stream": True},
@@ -166,28 +189,46 @@ class OllamaTranslator:
         msgs.append({"role": "user", "content": german})
         return msgs
 
+    MAX_HISTORY_CHARS = 6000   # ~1.8k tokens: system prompt + history + line + answer stay well inside NUM_CTX
+
     def _trim_history(self) -> None:
         # Trim in big steps: the conversation prefix then stays identical for
         # many lines in a row, which is what makes Ollama's prompt cache hit.
         keep = self.context_lines
         if keep <= 0:
             self.history = []
-        elif len(self.history) > keep + max(4, keep // 2):
+            return
+        # Every trim makes Ollama re-read the whole conversation once (seconds on a big model),
+        # so trim rarely: let it grow by 10 lines, then cut back to `keep`.
+        if len(self.history) > keep + 10:
             self.history = self.history[-keep:]
+        # hard size cap (long monologue lines): drop the oldest half until it fits
+        while len(self.history) > 1 and sum(len(d) + len(e) for d, e in self.history) > self.MAX_HISTORY_CHARS:
+            self.history = self.history[len(self.history) // 2:]
 
-    def translate(self, german: str, on_delta: Callable[[str], None] | None = None, record: bool = True) -> TranslationResult:
+    @staticmethod
+    def plausible(german: str, english: str) -> bool:
+        """A translation that is far longer than its German (rambling, an echoed prompt)
+        must not become context for the next lines - it would derail and slow them."""
+        return 0 < len(english) <= 3 * len(german) + 80
+
+    def translate(self, german: str, on_delta: Callable[[str], None] | None = None, record: bool = True,
+                  first_token_timeout: float = 60.0, max_total_s: float = 90.0,
+                  model: str | None = None) -> TranslationResult:
+        """Translate one line. Gives up if Ollama sends nothing for `first_token_timeout`
+        seconds (model stuck loading / machine out of memory) instead of waiting forever."""
         german = german.strip()
         if not german:
             return TranslationResult("", True)
         with self._lock:
             msgs = self._messages(german)
-            model = self.model
+            model = model or self.model
         body = {
             "model": model,
             "messages": msgs,
             "stream": True,
             "keep_alive": KEEP_ALIVE,
-            "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": 4096,
+            "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": NUM_CTX,
                         "num_predict": max(64, min(600, len(german) * 2))},
         }
         if _thinking_model(model):
@@ -195,8 +236,10 @@ class OllamaTranslator:
         t0 = time.perf_counter()
         first = 0.0
         raw = ""
+        stats: dict = {}
+        timeout = httpx.Timeout(connect=3.0, read=first_token_timeout, write=10.0, pool=10.0)
         try:
-            with self._client.stream("POST", f"{self.base_url}/api/chat", json=body) as r:
+            with self._client.stream("POST", f"{self.base_url}/api/chat", json=body, timeout=timeout) as r:
                 if r.status_code != 200:
                     r.read()
                     try:
@@ -218,15 +261,49 @@ class OllamaTranslator:
                         if on_delta:
                             on_delta(clean_translation(raw, german))
                     if obj.get("done"):
+                        stats = _ollama_stats(obj)
                         break
+                    if time.perf_counter() - t0 > max_total_s:
+                        log.warning("translation took longer than %.0fs - keeping what we have", max_total_s)
+                        break
+        except httpx.TimeoutException as e:
+            secs = time.perf_counter() - t0
+            log.warning("translate [%s]: no answer from Ollama after %.1fs (%s)", model, secs, type(e).__name__)
+            return TranslationResult(clean_translation(raw, german), False, first, secs,
+                                     f"no answer from Ollama within {first_token_timeout:.0f} s", timeout=True)
         except (httpx.HTTPError, OllamaError, json.JSONDecodeError) as e:
+            log.warning("translate [%s] failed: %s", model, e)
             return TranslationResult(clean_translation(raw, german), False, first, time.perf_counter() - t0, str(e))
         text = clean_translation(raw, german)
-        if record and text:
+        total = time.perf_counter() - t0
+        log.info("translate [%s]: first word %.2fs, done %.2fs (load %.2fs, read %s tok in %.2fs, wrote %s tok @ %.1f tok/s)",
+                 model, first, total, stats.get("load_s", 0), stats.get("prompt_tokens", "?"), stats.get("prompt_s", 0),
+                 stats.get("gen_tokens", "?"), stats.get("tok_s", 0))
+        if record and text and self.plausible(german, text):
             with self._lock:
                 self.history.append((german, text))
                 self._trim_history()
-        return TranslationResult(text, True, first, time.perf_counter() - t0)
+        return TranslationResult(text, True, first, total, stats=stats)
+
+    def loaded_models(self) -> list[dict]:
+        """What Ollama has in memory right now, and how much of it sits on the GPU."""
+        try:
+            r = self._client.get(f"{self.base_url}/api/ps", timeout=2.0)
+            r.raise_for_status()
+            out = []
+            for m in r.json().get("models", []):
+                size, vram = int(m.get("size") or 0), int(m.get("size_vram") or 0)
+                out.append({"name": m.get("name") or m.get("model", ""), "size": size, "size_vram": vram,
+                            "gpu_share": (vram / size) if size else 0.0, "context_length": m.get("context_length")})
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
+    def version(self) -> str:
+        try:
+            return self._client.get(f"{self.base_url}/api/version", timeout=2.0).json().get("version", "")
+        except Exception:  # noqa: BLE001
+            return ""
 
     # ------------------------------------------------------------- summary
     def summarize(self, transcript: str, on_delta: Callable[[str], None] | None = None) -> str:
@@ -278,10 +355,11 @@ class OllamaTranslator:
                     break
         return _THINK_RE.sub("", out).strip()
 
-    def unload(self) -> None:
+    def unload(self, model: str | None = None) -> None:
         """Tell Ollama to drop the model from memory now (instead of after KEEP_ALIVE)."""
         try:
-            self._client.post(f"{self.base_url}/api/generate", json={"model": self.model, "keep_alive": 0}, timeout=5.0)
+            self._client.post(f"{self.base_url}/api/generate", json={"model": model or self.model, "keep_alive": 0},
+                              timeout=5.0)
         except Exception:  # noqa: BLE001
             pass
 

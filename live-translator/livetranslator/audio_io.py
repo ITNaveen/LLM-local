@@ -28,6 +28,27 @@ _VIRTUAL_HINTS = ("teams", "zoom", "blackhole", "loopback", "soundflower", "kris
 _BUILTIN_HINTS = ("macbook", "built-in", "internal", "imac", "mac mini", "mac studio", "studio display")
 # a PortAudio call must never run while another one re-initialises the library
 _PA_LOCK = threading.RLock()
+# microphone streams currently open; a device re-scan (Pa_Terminate) would kill them,
+# so it is skipped while this is > 0. Only changed while holding _PA_LOCK.
+_OPEN_STREAMS = 0
+
+
+def _reinit_portaudio(sd) -> bool:
+    """Re-scan devices. Never while a stream is open; never leave PortAudio uninitialised."""
+    if _OPEN_STREAMS > 0:
+        return False
+    try:
+        sd._terminate()
+    except Exception:  # noqa: BLE001
+        pass
+    for attempt in range(3):
+        try:
+            sd._initialize()
+            return True
+        except Exception as e:  # noqa: BLE001
+            log.warning("PortAudio re-init failed (%s), retrying", e)
+            time.sleep(0.2 * (attempt + 1))
+    return False
 
 
 def classify_device(name: str) -> str:
@@ -64,8 +85,7 @@ def list_input_devices(refresh: bool = False) -> list[dict]:
     with _PA_LOCK:
         try:
             if refresh:
-                sd._terminate()
-                sd._initialize()
+                _reinit_portaudio(sd)
             default_in = _default_input_index(sd)
             out = []
             for i, d in enumerate(sd.query_devices()):
@@ -194,24 +214,28 @@ class MicSource:
             mono = indata[:, 0] if channels == 1 else indata.mean(axis=1)
             self.on_audio(mono.astype(np.float32, copy=True), self.rate)
 
+        global _OPEN_STREAMS
         with _PA_LOCK:
             self.stream = sd.InputStream(device=dev["index"], channels=channels, samplerate=self.rate,
                                          dtype="float32", blocksize=int(self.rate * 0.02), latency="low", callback=cb)
             self.stream.start()
+            _OPEN_STREAMS += 1
         self.device = dev
         log.info("microphone: %s @ %d Hz (%s%s)", dev["name"], self.rate, dev.get("kind"),
                  ", system default" if dev.get("default") else "")
         return dev["name"]
 
     def stop(self) -> None:
+        global _OPEN_STREAMS
         s, self.stream = self.stream, None
         if s is not None:
-            try:
-                with _PA_LOCK:
+            with _PA_LOCK:
+                _OPEN_STREAMS = max(0, _OPEN_STREAMS - 1)
+                try:
                     s.stop()
                     s.close()
-            except Exception:  # noqa: BLE001
-                pass
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 class PushSource:

@@ -5,6 +5,7 @@
 #  Double-click (Desktop icon)  → starts it if it is off, stops it if it is on.
 #  toggle.sh start | stop | status   for scripts.
 #  toggle.sh mictest                 which microphones really hear sound
+#  toggle.sh doctor                  check Ollama / translation speed, print a report
 #
 #  START: runs the app in the background, opens it in the browser.
 #  STOP : finishes and saves the meeting in progress, stops the app and
@@ -52,7 +53,18 @@ do_start() {
     echo "First start - installing Live Translator (one time)…"
     "$APP_DIR/install.sh" --no-test || { echo "✗ Installation failed - see above."; exit 1; }
   fi
+  # an update may have brought new Python packages
+  want="$(shasum "$APP_DIR/requirements.txt" 2>/dev/null | cut -d' ' -f1)"
+  if [ -n "$want" ] && [ "$want" != "$(cat "$APP_DIR/.venv/.installed-ok" 2>/dev/null)" ]; then
+    echo "• Updating Python packages…"
+    "$VPY" -m pip install -q -r "$APP_DIR/requirements.txt" && echo "$want" > "$APP_DIR/.venv/.installed-ok"
+  fi
   banner "Live Translator - Starting…"
+
+  # microphone permission: ask now, while this window is in front (not later in the background)
+  if [ "$(uname -s)" = "Darwin" ]; then
+    (cd "$APP_DIR" && "$VPY" -m livetranslator micperm) || true
+  fi
 
   # Ollama (translation) - the app also retries on its own
   if ! curl -s -m 2 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
@@ -94,7 +106,7 @@ do_start() {
   echo "  Meetings: $DATA/Meetings"
   echo ""
   echo "  ▶ Double-click the Desktop icon again to STOP."
-  echo "  (You can close this window - the app keeps running.)"
+  echo "  (You can close this window. Don't quit Terminal with ⌘Q while you use it.)"
   echo ""
 }
 
@@ -139,6 +151,7 @@ case "${1:-toggle}" in
   stop)   do_stop ;;
   status) if running; then echo "running (pid $(server_pid)) - $URL"; else echo "stopped"; exit 1; fi ;;
   mictest) cd "$APP_DIR" && exec "$VPY" -m livetranslator mictest ;;
+  doctor)  cd "$APP_DIR" && exec "$VPY" -m livetranslator doctor ;;
   toggle) if running; then do_stop; else do_start; fi ;;
-  *) echo "usage: $0 [start|stop|status|mictest]"; exit 2 ;;
+  *) echo "usage: $0 [start|stop|status|mictest|doctor]"; exit 2 ;;
 esac

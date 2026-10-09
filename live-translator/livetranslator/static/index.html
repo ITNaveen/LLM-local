@@ -133,6 +133,10 @@
         <progress id="pullProgress" max="100" value="0" hidden></progress>
         <span id="pullText" class="muted"></span>
       </div>
+      <label class="check"><input type="checkbox" name="auto_fallback"> If it is too slow on this Mac, switch automatically to:</label>
+      <label>Fast model
+        <select name="llm_fallback" id="llmFallbackSelect"></select>
+      </label>
       <label>Lines of context the translator sees
         <input type="number" name="context_lines" min="0" max="40">
       </label>

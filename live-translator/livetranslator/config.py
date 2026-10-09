@@ -84,7 +84,9 @@ class Settings:
     # translation
     ollama_url: str = "http://127.0.0.1:11434"
     llm_model: str = "gemma3:12b"
-    context_lines: int = 12              # previous lines the translator sees
+    llm_fallback: str = "gemma3:4b"      # used automatically when llm_model is too slow on this machine
+    auto_fallback: bool = True
+    context_lines: int = 8               # previous lines the translator sees (at least; up to +10)
     # help for both models
     glossary: str = ""                   # names, products, abbreviations (comma or newline)
     topic: str = ""                      # optional: what the meeting is about

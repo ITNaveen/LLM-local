@@ -25,6 +25,7 @@ def main():
     ap.add_argument("--source", default="browser")
     ap.add_argument("--token-delay", type=float, default=0.06)
     ap.add_argument("--fake-mics", default="", help="simulate Mac inputs: all-silent | default-silent | ok")
+    ap.add_argument("--slow-llm", action="store_true", help="gemma3:12b answers late (simulated busy Mac)")
     a = ap.parse_args()
     home = a.home or tempfile.mkdtemp(prefix="lt-demo-")
     os.environ["LT_HOME"] = home
@@ -44,13 +45,17 @@ def main():
     from livetranslator.simulate import SENTENCES
     from livetranslator.storage import MeetingStore
 
-    fake = FakeOllama(token_delay=a.token_delay).start()
+    behaviour = {"gemma3:12b": {"first_s": 4.0}} if a.slow_llm else {}
+    fake = FakeOllama(models=["gemma3:12b", "gemma3:4b"], token_delay=a.token_delay, behaviour=behaviour).start()
     settings = SettingsStore(Path(home) / "settings.json")
     settings.update({"ollama_url": fake.url, "input_source": a.source, "live_preview": False})
     texts = [de for de, _ in SENTENCES] * 50
 
     def factory(st, store, publish):
-        return Pipeline(st, store, publish, asr_factory=lambda s: ScriptedASR(texts, delay=0.25))
+        p = Pipeline(st, store, publish, asr_factory=lambda s: ScriptedASR(texts, delay=0.25))
+        if a.slow_llm:   # same logic, shorter clock than on a real Mac (8 s)
+            p.SLOW_FIRST_S = 1.5
+        return p
 
     app = create_app(pipeline_factory=factory, store=MeetingStore(Path(home) / "Meetings"), settings=settings,
                      start_ollama=False)

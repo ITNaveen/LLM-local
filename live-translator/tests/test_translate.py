@@ -51,8 +51,8 @@ def test_history_is_append_only_between_trims():
             if b[:len(a) - 1] == a[:-1] and b[len(a) - 1] == a[-1]:
                 prefixes_kept += 1
         # only the occasional trim breaks the prefix
-        assert prefixes_kept >= 23, prefixes_kept
-        assert max(len(m) for m in reqs) <= 1 + 2 * (6 + 4) + 1
+        assert prefixes_kept >= 26, prefixes_kept      # only every ~10th line breaks the cached prefix
+        assert max(len(m) for m in reqs) <= 1 + 2 * (6 + 10) + 1
 
 
 def test_unknown_model_and_server_down_fail_fast():
@@ -88,3 +88,16 @@ def test_summary():
         t = OllamaTranslator(f.url, "gemma3:12b")
         out = t.summarize("[10:00] DE: Hallo\n EN: Hello\n" * 5)
         assert "Summary" in out
+
+
+def test_garbage_is_not_kept_as_context_and_history_is_size_capped():
+    from livetranslator.translate import OllamaTranslator
+
+    assert OllamaTranslator.plausible("Hallo.", "Hello.")
+    assert not OllamaTranslator.plausible("Hallo.", "You are a German-to-English interpreter " * 10)
+    assert not OllamaTranslator.plausible("Hallo.", "")
+    t = OllamaTranslator("http://127.0.0.1:9", "x", context_lines=40)
+    t.history = [("Ein langer Satz " * 20, "A long sentence " * 20)] * 30
+    t._trim_history()
+    assert sum(len(d) + len(e) for d, e in t.history) <= t.MAX_HISTORY_CHARS
+    assert len(t.history) >= 1

@@ -112,6 +112,15 @@ class MLXWhisper(BaseASR):
         from mlx_whisper.transcribe import ModelHolder
 
         self.path = resolve_hf_model(self.model_ref)
+        # MLX keeps freed GPU buffers cached for reuse; on a 24 GB Mac that memory is
+        # needed by Ollama's translation model, so keep the cache small.
+        for setter in (getattr(mx, "set_cache_limit", None), getattr(getattr(mx, "metal", None), "set_cache_limit", None)):
+            if setter is not None:
+                try:
+                    setter(512 * 1024 * 1024)
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
         ModelHolder.get_model(self.path, mx.float16)
 
     def transcribe(self, audio: np.ndarray, prompt: str | None = None) -> ASRResult:

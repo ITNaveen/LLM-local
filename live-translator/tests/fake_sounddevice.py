@@ -34,6 +34,8 @@ class FakeSoundDevice:
         self.behaviour = behaviour          # name -> "noise" | "zeros" | "zeros_first_open"
         self.opened = []                    # names in the order they were opened
         self.reinits = 0
+        self.live = []                      # streams currently running
+        self.killed = []                    # streams killed by a re-init (real Pa_Terminate does that)
         fake = self
 
         class default:
@@ -55,6 +57,8 @@ class FakeSoundDevice:
                 self._t = None
 
             def start(self):
+                fake.live.append(self)
+
                 def run():
                     rng = np.random.default_rng(len(fake.opened))
                     while not self._stop.is_set():
@@ -70,7 +74,9 @@ class FakeSoundDevice:
 
             def stop(self):
                 self._stop.set()
-                if self._t:
+                if self in fake.live:
+                    fake.live.remove(self)
+                if self._t and self._t is not threading.current_thread():
                     self._t.join(1)
 
             def close(self):
@@ -88,7 +94,11 @@ class FakeSoundDevice:
         return infos
 
     def _terminate(self):
+        # like Pa_Terminate: every open stream dies
         self.reinits += 1
+        for st in list(self.live):
+            self.killed.append(st.name)
+            st.stop()
 
     def _initialize(self):
         pass

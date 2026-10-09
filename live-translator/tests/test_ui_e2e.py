@@ -231,3 +231,52 @@ def test_mic_test_panel(tmp_path):
     finally:
         proc.terminate()
         proc.wait(10)
+
+
+def test_slow_translator_is_visible_and_recovers(tmp_path, meeting_wav):
+    """Your situation: English does not come. The page must say why, count the waiting time,
+    switch to the fast model by itself, and every line must end up translated."""
+    port = free_port()
+    proc = subprocess.Popen([sys.executable, str(ROOT / "tools" / "demo_server.py"), "--port", str(port),
+                             "--home", str(tmp_path), "--slow-llm"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(100):
+            try:
+                urlopen(url + "/api/info", timeout=1)
+                break
+            except Exception:  # noqa: BLE001
+                time.sleep(0.2)
+        with pw.sync_playwright() as p:
+            kw = {"executable_path": CHROME} if Path(CHROME).exists() else {}
+            browser = p.chromium.launch(args=[
+                "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+                f"--use-file-for-fake-audio-capture={meeting_wav}"], **kw)
+            page = browser.new_page(viewport={"width": 1280, "height": 820})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(url)
+            page.wait_for_selector("#startBtn:not([disabled])")
+            page.wait_for_selector("#asrPill.ok")
+            page.click("#startBtn")
+            page.wait_for_selector("#browserAudio:not([hidden])")
+            page.click("#baMic")
+            # a waiting line shows how long it has been waiting
+            page.wait_for_function("[...document.querySelectorAll('#liveFeed .en.waiting')]"
+                                   ".some(e => /translating… [0-9]+ s/.test(e.textContent))", timeout=60000)
+            # the app switches to the fast model and says so
+            page.wait_for_selector(".toast:has-text('Switched to the faster model gemma3:4b')", timeout=60000)
+            page.wait_for_function("document.querySelector('#llmPill b').textContent.includes('fast')", timeout=15000)
+            page.wait_for_function("document.querySelectorAll('#liveFeed .line').length >= 4", timeout=90000)
+            page.wait_for_function(
+                "[...document.querySelectorAll('#liveFeed .line .en')].every(e => !e.classList.contains('pending'))"
+                " && [...document.querySelectorAll('#liveFeed .line .en')].filter(e => e.classList.contains('failed')).length === 0",
+                timeout=60000)
+            page.screenshot(path=str(SHOTS / "08-slow-translator.png"))
+            assert "fast model" in page.get_attribute("#llmPill", "title")
+            assert not errors, errors
+            browser.close()
+    finally:
+        proc.terminate()
+        proc.wait(10)

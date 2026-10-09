@@ -143,3 +143,69 @@ def test_mictest_cli(mac, capsys):
     out = capsys.readouterr().out
     assert "MacBook Pro Microphone [system default]" in out and "SILENT" in out
     assert "External USB Mic" in out and "hears sound" in out
+
+
+# ----------------------------------------------------------------- races found in review
+def test_device_rescan_never_kills_an_open_microphone(mac):
+    fake = mac({})
+    src = audio_io.MicSource("", lambda x, r: None)
+    src.start()
+    audio_io.list_input_devices(refresh=True)      # e.g. Settings opened while listening
+    assert fake.killed == [] and len(fake.live) == 1
+    src.stop()
+    audio_io.list_input_devices(refresh=True)      # nothing open: re-scan allowed
+    assert fake.reinits >= 2
+
+
+def test_changing_microphone_during_recovery_leaves_nothing_open(mac, tmp_path):
+    # recovery would pick "External USB Mic"; the user picks the (working) Teams device meanwhile
+    fake = mac({"MacBook Pro Microphone": "zeros", "iPhone Microphone": "zeros"})
+    with FakeOllama() as fo:
+        pipe, cfg, events = _pipeline(tmp_path, fo)
+        pipe.start(name="t")
+        assert wait_for(lambda: any(e["type"] == "mic_check" for e in events))
+        old = cfg.settings
+        pipe.apply_settings(old, cfg.update({"input_device": "Microsoft Teams Audio"}))
+        time.sleep(6)                                             # recovery finishes its probes
+        assert pipe.source_name == "Microsoft Teams Audio"       # the user's choice wins
+        assert cfg.settings.input_device == "Microsoft Teams Audio"
+        assert [st.name for st in fake.live] == ["Microsoft Teams Audio"]
+        pipe.stop(wait=True)
+        time.sleep(0.3)
+        assert fake.live == [], [st.name for st in fake.live]     # no orphaned stream after Stop
+        pipe.shutdown()
+
+
+def test_stale_recovery_does_not_touch_the_next_meeting(mac, tmp_path, monkeypatch):
+    import livetranslator.pipeline as pl
+
+    fake = mac({"MacBook Pro Microphone": "zeros_first_open"})
+    # first run: macOS shows its permission prompt; the user answers after a few seconds
+    monkeypatch.setattr(pl, "mic_permission_status", lambda: "not_determined")
+    monkeypatch.setattr(pl, "request_mic_permission", lambda timeout=45: (time.sleep(3), "authorized")[1])
+    with FakeOllama() as fo:
+        pipe, cfg, events = _pipeline(tmp_path, fo)
+        pipe.start(name="a")
+        assert wait_for(lambda: any(e["type"] == "mic_check" for e in events))
+        pipe.stop(wait=True)                 # stop while meeting a's recovery waits for the prompt
+        pipe.start(name="b")                 # meeting b opens the (now working) MacBook mic
+        time.sleep(5)                        # a's recovery wakes up meanwhile
+        assert pipe.state == "listening" and pipe.source_name == "MacBook Pro Microphone"
+        assert fake.killed == [], fake.killed
+        assert len(fake.live) == 1
+        pipe.stop(wait=True)
+        pipe.shutdown()
+
+
+def test_blocked_memory_is_cleared_when_a_microphone_works_again(mac, tmp_path):
+    mac({n: "zeros" for n, _, _ in MAC_DEVICES})
+    with FakeOllama() as fo:
+        pipe, cfg, events = _pipeline(tmp_path, fo)
+        pipe.start(name="t")
+        assert wait_for(lambda: pipe.status()["source_kind"] == "browser")
+        pipe.stop(wait=True)
+        assert pipe._mic_blocked
+        old = cfg.settings
+        pipe.apply_settings(old, cfg.update({"input_device": "External USB Mic"}))
+        assert not pipe._mic_blocked
+        pipe.shutdown()

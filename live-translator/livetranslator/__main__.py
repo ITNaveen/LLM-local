@@ -111,6 +111,95 @@ def cmd_mictest(_a) -> int:
     return 2
 
 
+# ---------------------------------------------------------------- micperm
+def cmd_micperm(_a) -> int:
+    """Ask macOS for microphone permission while the Terminal window is in front
+    (toggle.sh runs this before starting the app in the background)."""
+    from .audio_io import mic_permission_status, request_mic_permission
+
+    st = mic_permission_status()
+    if st == "not_determined":
+        print("• macOS will ask whether Terminal may use the microphone - click Allow.")
+        st = request_mic_permission(timeout=90)
+    if st == "authorized":
+        print("✓ Microphone allowed")
+        return 0
+    if st in ("denied", "restricted"):
+        print("⚠ macOS blocks the microphone for Terminal. Live Translator will use the browser's microphone instead.")
+        print("  To use the Mac microphone: System Settings → Privacy & Security → Microphone → turn on Terminal,")
+        print("  then double-click the Desktop icon twice (stop, start).")
+        return 3
+    return 0   # unknown (not macOS / helper missing): the app checks again when recording starts
+
+
+# ---------------------------------------------------------------- doctor
+def cmd_doctor(_a) -> int:
+    """Check everything translation needs and print a report (paste it to get help)."""
+    import platform
+    import subprocess
+
+    from .config import SettingsStore, home_dir
+    from .translate import OllamaTranslator
+
+    s = SettingsStore().settings
+    print("Live Translator - doctor\n" + "=" * 60)
+    print(f"System        : {platform.platform()} / {platform.machine()}")
+    if platform.system() == "Darwin":
+        try:
+            mem = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout.strip())
+            print(f"Memory        : {mem / 2**30:.0f} GB")
+            mp = subprocess.run(["memory_pressure", "-Q"], capture_output=True, text=True, timeout=10).stdout.strip()
+            print(f"Memory free   : {mp.splitlines()[-1] if mp else '?'}")
+        except Exception:  # noqa: BLE001
+            pass
+    print(f"Data folder   : {home_dir()}")
+    print(f"Speech model  : {s.resolved_asr_backend()} / {s.resolved_asr_model()}")
+    t = OllamaTranslator(s.ollama_url, s.llm_model, s.context_lines, s.topic, s.glossary_terms())
+    h = t.health()
+    print(f"Ollama        : {'running, version ' + t.version() if h['running'] else 'NOT RUNNING - ' + h.get('error', '')}")
+    if not h["running"]:
+        print("\n→ Start Ollama (open the Ollama app, or run: ollama serve) and try again.")
+        return 1
+    print(f"Installed     : {', '.join(h['models']) or '(none)'}")
+    print(f"Translation   : {s.llm_model}  (fallback when slow: {s.llm_fallback if s.auto_fallback else 'off'})")
+    if not h["model_ready"]:
+        print(f"\n→ {s.llm_model} is not installed. Run:  ollama pull {s.llm_model}")
+        return 1
+
+    def show_loaded():
+        lm = t.loaded_models()
+        if not lm:
+            print("In memory     : (nothing loaded)")
+        for m in lm:
+            print(f"In memory     : {m['name']}  {m['size'] / 2**30:.1f} GB, {m['gpu_share'] * 100:.0f}% on GPU, "
+                  f"context {m['context_length']}")
+        return lm
+
+    show_loaded()
+    rc = 0
+    for model in [s.llm_model] + ([s.llm_fallback] if s.llm_fallback and s.llm_fallback != s.llm_model
+                                  and s.llm_fallback in h["models"] else []):
+        print(f"\n--- testing {model}")
+        for i, de in enumerate(["Guten Morgen zusammen.",
+                                "Wir müssen das Angebot für den Kunden bis Freitag fertig haben, sonst wird es knapp."]):
+            r = t.translate(de, record=False, model=model, first_token_timeout=180 if i == 0 else 30)
+            if not r.ok:
+                print(f"  ✗ {'NO ANSWER (timeout)' if r.timeout else 'ERROR'}: {r.error}")
+                rc = 2
+                break
+            st = r.stats
+            print(f"  {'cold' if i == 0 else 'warm'}: first word {r.first_token_s:.2f}s, done {r.total_s:.2f}s "
+                  f"(load {st.get('load_s', 0):.1f}s, read {st.get('prompt_tokens')} tok in {st.get('prompt_s', 0):.2f}s, "
+                  f"{st.get('tok_s', 0)} tok/s)")
+            print(f"     DE: {de}\n     EN: {r.text}")
+        lm = [m for m in show_loaded() if m["name"] == model]
+        if lm and lm[0]["gpu_share"] < 0.9 and platform.system() == "Darwin":
+            print(f"  ⚠ {model} does not fit in GPU memory - it will be slow. Use {s.llm_fallback}.")
+    print("\n" + "=" * 60)
+    print("All good." if rc == 0 else "Problems found - see above.")
+    return rc
+
+
 # ---------------------------------------------------------------- download
 def cmd_download(a) -> int:
     from .asr import resolve_hf_model
@@ -139,10 +228,13 @@ def cmd_download(a) -> int:
         if not h["running"]:
             print("Ollama is not running - install it from https://ollama.com and run this again.")
             return 1
-        if h["model_ready"]:
-            print(f"Translation model {s.llm_model}: already installed")
-        else:
-            print(f"Translation model {s.llm_model}: downloading…")
+        wanted = [s.llm_model] + ([s.llm_fallback] if s.llm_fallback and s.llm_fallback != s.llm_model else [])
+        for model in wanted:
+            want = model if ":" in model else model + ":latest"
+            if want in h["models"] or model in h["models"]:
+                print(f"Translation model {model}: already installed")
+                continue
+            print(f"Translation model {model}: downloading…")
             last = [""]
 
             def prog(p):
@@ -152,7 +244,7 @@ def cmd_download(a) -> int:
                     last[0] = msg
                     print(msg, flush=True)
 
-            t.pull(s.llm_model, prog)
+            t.pull(model, prog)
             print("  -> ok")
     return 0
 
@@ -327,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("-v", "--verbose", action="store_true")
     sub.add_parser("devices", help="list microphones")
     sub.add_parser("mictest", help="test which microphones hear sound")
+    sub.add_parser("micperm", help="ask macOS for microphone permission (foreground)")
+    sub.add_parser("doctor", help="check Ollama / translation and print a report")
     dp = sub.add_parser("download", help="download the models")
     dp.add_argument("--all", action="store_true", help="also the alternative speech model")
     dp.add_argument("--skip-llm", action="store_true")
@@ -343,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_devices(a)
     if a.cmd == "mictest":
         return cmd_mictest(a)
+    if a.cmd == "micperm":
+        return cmd_micperm(a)
+    if a.cmd == "doctor":
+        return cmd_doctor(a)
     if a.cmd == "download":
         return cmd_download(a)
     if a.cmd == "selftest":

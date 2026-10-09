@@ -95,7 +95,7 @@ function fillLine(el, line, meetingId) {
     en.textContent = "(no translation)";
   } else {
     en.classList.add("waiting", "pending");
-    en.textContent = "translating";
+    en.textContent = waitingText(line);
   }
   if (line.done && !line.ok) {
     const b = document.createElement("button");
@@ -147,7 +147,30 @@ function resetLive(meeting, lines) {
   scrollToEnd(true);
 }
 
+function waitingText(line) {
+  const secs = line.t0 ? Math.floor((Date.now() - line.t0) / 1000) : 0;
+  if (secs < 3) return "translating…";
+  const llm = (S.status && S.status.llm) || {};
+  let why = "";
+  if (secs >= 12) {
+    if (llm.warming || llm.loaded === false) why = " - the translation model is still loading";
+    else if (llm.queue > 1) why = ` - translator is ${llm.queue} lines behind`;
+    else why = " - the translator is slow right now";
+  }
+  return `translating… ${secs} s${why}`;
+}
+// refresh the "translating… N s" counters once a second
+setInterval(() => {
+  for (const [id, ln] of S.live.lines) {
+    if (ln.done || ln.en) continue;
+    const el = S.live.els.get(id);
+    const en = el && $(".en.waiting", el);
+    if (en) en.textContent = waitingText(ln);
+  }
+}, 1000);
+
 function addLiveLine(line) {
+  if (!line.done && !line.en) line.t0 = Date.now();
   const last = [...S.live.lines.values()].pop();
   line.cont = !!(last && last.forced);
   S.live.lines.set(line.id, line);
@@ -231,9 +254,17 @@ function applyStatus(st) {
   let cls = "warn", tip = "Checking Ollama…";
   if (llm.checked && !llm.running) { cls = "err"; tip = "Ollama is not running - start the Ollama app (translation is off)."; }
   else if (llm.running && !llm.model_ready) { cls = "err"; tip = `Translation model ${llm.model} is not installed - click to download it in Settings.`; }
-  else if (llm.running && llm.model_ready) { cls = "ok"; tip = `Translating with ${llm.model}`; }
+  else if (llm.running && llm.model_ready) {
+    const speed = llm.tok_s ? ` · ${llm.tok_s} tok/s` : "";
+    const fb = llm.fallback_active ? " (fast model - the main one was too slow on this Mac)" : "";
+    if (llm.warming && !llm.loaded) { cls = "warn"; tip = `Loading translation model ${llm.model}…`; }
+    else if (llm.speed === "slow") { cls = "warn"; tip = `${llm.model} is slow on this Mac right now${speed}${fb}`; }
+    else if ((llm.queue || 0) > 2) { cls = "warn"; tip = `Translator is ${llm.queue} lines behind${speed}${fb}`; }
+    else { cls = "ok"; tip = `Translating with ${llm.model}${speed}${fb}`; }
+  }
   l.className = "pill " + cls;
   l.title = tip;
+  $("#llmPill b").textContent = llm.fallback_active ? "Translator (fast)" : "Translator";
 
   // timer
   if (st.state === "listening" && st.meeting) {
@@ -550,6 +581,7 @@ function updateBrowserAudioBar() {
   const st = S.status;
   const show = !!(st && st.state === "listening" && (st.source_kind === "browser" || (S.settings && S.settings.input_source === "browser")));
   $("#browserAudio").hidden = !show;
+  if (BA.ctx && st && st.state === "listening" && st.source_kind && st.source_kind !== "browser") stopBrowserAudio();
   if (!show) return;
   const fallback = S.settings && S.settings.input_source === "mic";
   $("#baText").innerHTML = fallback
@@ -616,6 +648,8 @@ async function loadDevicesAndModels() {
     };
     for (const r of models.llm_recommended) add(r.name, r.label);
     for (const m of models.llm_installed) add(m, m);
+    const fs = $("#llmFallbackSelect");
+    fs.innerHTML = ls.innerHTML;
     $("#infoLine").textContent = `Meetings are saved in ${info.meetings_dir}`;
     applySettings();
   } catch (e) { toast("error", e.message); }
@@ -655,41 +689,67 @@ function onPull(ev) {
 }
 
 // ------------------------------------------------------------------ browser audio (remote / host-name use)
-const BA = { ctx: null, ws: null, stream: null, node: null };
+const BA = { ctx: null, ws: null, stream: null, node: null, gen: 0 };
+
+// resume() can stay pending forever when the browser wants a click first: never await it unbounded
+function waitRunning(ctx, ms = 2000) {
+  if (ctx.state === "running") return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let t;
+    const on = () => { if (ctx.state === "running") fin(true); };
+    const fin = (ok) => { clearTimeout(t); ctx.removeEventListener("statechange", on); resolve(ok); };
+    ctx.addEventListener("statechange", on);
+    ctx.resume().then(on, () => {});
+    t = setTimeout(() => fin(ctx.state === "running"), ms);
+  });
+}
+
 async function startBrowserAudio(kind, automatic) {
+  // an automatic start only in the tab the user is looking at (several tabs may be open)
+  if (automatic && document.visibilityState !== "visible") return;
   stopBrowserAudio();
+  const gen = ++BA.gen;
+  const stale = () => gen !== BA.gen || !(S.status && S.status.state === "listening");
+  let stream = null, ctx = null, ws = null;
+  const cleanup = () => {
+    try { stream && stream.getTracks().forEach((t) => t.stop()); } catch (_) { /* */ }
+    try { ws && ws.close(); } catch (_) { /* */ }
+    try { ctx && ctx.close(); } catch (_) { /* */ }
+  };
   try {
-    let stream;
     if (kind === "tab") {
       stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
       stream.getVideoTracks().forEach((t) => t.stop());
       if (!stream.getAudioTracks().length) throw new Error("No audio shared - tick 'Share tab audio' / 'Share system audio'.");
     } else {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 1 } } });
     }
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (ctx.state !== "running") { try { await ctx.resume(); } catch (_) { /* needs a click */ } }
+    if (stale()) { cleanup(); return; }
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws/audio`);
+    ws = new WebSocket(`${proto}://${location.host}/ws/audio`);
     ws.binaryType = "arraybuffer";
     await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error("audio connection failed")); });
+    if (stale()) { cleanup(); return; }
     ws.send(JSON.stringify({ rate: ctx.sampleRate, format: "i16" }));
     const src = ctx.createMediaStreamSource(stream);
     const send = (f32) => {
-      if (ws.readyState !== 1) return;
+      if (ws.readyState !== 1 || ws.bufferedAmount > 2e6) return;
       const i16 = new Int16Array(f32.length);
       for (let i = 0; i < f32.length; i++) { const v = Math.max(-1, Math.min(1, f32[i])); i16[i] = v < 0 ? v * 32768 : v * 32767; }
       ws.send(i16.buffer);
     };
     let node;
     if (ctx.audioWorklet) {
-      const code = `class P extends AudioWorkletProcessor{constructor(){super();this.b=[];this.n=0}
-        process(i){const c=i[0]&&i[0][0];if(c){this.b.push(new Float32Array(c));this.n+=c.length;
-        if(this.n>=${2048}){const o=new Float32Array(this.n);let k=0;for(const x of this.b){o.set(x,k);k+=x.length}
-        this.port.postMessage(o,[o.buffer]);this.b=[];this.n=0}}return true}}registerProcessor('lt-pcm',P);`;
+      const code = `class P extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(4096);this.n=0}
+        process(i){const c=i[0]&&i[0][0];if(c){if(this.n+c.length>this.b.length){this.flush()}this.b.set(c,this.n);this.n+=c.length;
+        if(this.n>=2048){this.flush()}}return true}
+        flush(){if(!this.n)return;const o=this.b.slice(0,this.n);this.port.postMessage(o,[o.buffer]);this.n=0}}
+        registerProcessor('lt-pcm',P);`;
       const url = URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
       await ctx.audioWorklet.addModule(url);
-      node = new AudioWorkletNode(ctx, "lt-pcm");
+      if (stale()) { cleanup(); return; }
+      node = new AudioWorkletNode(ctx, "lt-pcm", { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: "explicit", channelInterpretation: "speakers" });
       node.port.onmessage = (e) => send(e.data);
       src.connect(node);
     } else {
@@ -700,23 +760,25 @@ async function startBrowserAudio(kind, automatic) {
     }
     Object.assign(BA, { ctx, ws, stream, node });
     const label = (stream.getAudioTracks()[0] && stream.getAudioTracks()[0].label) || "microphone";
-    $("#baState").textContent = kind === "tab" ? "● sending shared audio" : "● sending: " + label;
+    const sending = kind === "tab" ? "● sending shared audio" : "● sending: " + label;
+    $("#baState").textContent = sending;
     stream.getAudioTracks()[0].onended = stopBrowserAudio;
-    if (ctx.state !== "running") {
+    ws.onclose = () => { if (BA.ws === ws) stopBrowserAudio(); };
+    if (!(await waitRunning(ctx))) {
       // the browser wants a click before audio may run
       $("#baState").textContent = "▶ click anywhere on this page to start the microphone";
       toast("warn", "Click anywhere on this page to start the browser microphone.");
-      const go = async () => {
-        try { await ctx.resume(); } catch (_) { /* */ }
-        if (ctx.state === "running") {
-          $("#baState").textContent = "● sending: " + label;
-          document.removeEventListener("click", go, true);
-        }
+      const go = () => {
+        ctx.resume().catch(() => {});   // first statement inside the click: counts as a user gesture
+        waitRunning(ctx, 1500).then((ok) => {
+          if (ok && BA.ctx === ctx) { $("#baState").textContent = sending; document.removeEventListener("click", go, true); }
+        });
       };
       document.addEventListener("click", go, true);
     }
-    ws.onclose = () => { if (BA.ws === ws) stopBrowserAudio(); };
   } catch (e) {
+    cleanup();
+    if (gen !== BA.gen) return;
     let msg = e && e.name === "NotAllowedError"
       ? "The browser was not allowed to use the microphone. Click the microphone/lock icon in the address bar → Allow, "
         + "and check System Settings → Privacy & Security → Microphone → your browser."
@@ -727,6 +789,7 @@ async function startBrowserAudio(kind, automatic) {
   }
 }
 function stopBrowserAudio() {
+  BA.gen++;
   try { BA.node && BA.node.disconnect(); } catch (_) { /* */ }
   try { BA.stream && BA.stream.getTracks().forEach((t) => t.stop()); } catch (_) { /* */ }
   try { BA.ws && BA.ws.close(); } catch (_) { /* */ }

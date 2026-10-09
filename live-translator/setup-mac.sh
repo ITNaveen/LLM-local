@@ -46,6 +46,10 @@ if [ "$SRC" != "$DEST" ]; then
   esac
 else
   echo "✓ Already in $DEST"
+  if [ -x "$DEST/toggle.sh" ] && "$DEST/toggle.sh" status >/dev/null 2>&1; then
+    echo "• Stopping the running app for the update…"
+    "$DEST/toggle.sh" stop >/dev/null 2>&1 || true
+  fi
 fi
 
 cd "$DEST"
@@ -68,6 +72,9 @@ if [ -x ".venv/bin/python" ] && [ -f ".venv/.installed-ok" ]; then
       echo "⚠ Package update failed - run ./install.sh in $DEST"
     fi
   fi
+  # models added by an update (e.g. the fast fallback translation model) - already-present ones are skipped
+  echo "• Checking models…"
+  ./.venv/bin/python -m livetranslator download || echo "⚠ Model download incomplete - it is retried next time"
 else
   echo "• Installing (one time, ~15 min - mostly downloading the models)…"
   ./install.sh

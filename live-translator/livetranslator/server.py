@@ -187,6 +187,13 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
             await ws.close(code=4401)
             return
         await ws.accept()
+        prev = state.get("audio_ws")
+        state["audio_ws"] = ws
+        if prev is not None:
+            try:   # only one browser may send audio: the newest wins
+                await prev.close(code=4000)
+            except Exception:  # noqa: BLE001
+                pass
         rate, fmt = 48000, "i16"
         try:
             while True:
@@ -198,6 +205,8 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
                     rate, fmt = int(cfg.get("rate", rate)), cfg.get("format", fmt)
                     continue
                 data = msg.get("bytes")
+                if state.get("audio_ws") is not ws:
+                    break
                 p = state["pipeline"]
                 if not data or p is None or not isinstance(p.source, PushSource):
                     continue
@@ -207,6 +216,9 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
                     p.source.push_int16(data, rate)
         except (WebSocketDisconnect, RuntimeError):
             pass
+        finally:
+            if state.get("audio_ws") is ws:
+                state["audio_ws"] = None
 
     # ----------------------------------------------------------- session
     @app.get("/api/state")
@@ -236,14 +248,14 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
     async def set_settings(changes: dict):
         old = settings.settings
         new = settings.update(changes)
-        P().apply_settings(old, new)
+        await asyncio.to_thread(P().apply_settings, old, new)   # may open a microphone: keep the loop free
         hub.publish({"type": "settings", "settings": new.to_dict()})
         return new.to_dict()
 
     @app.get("/api/devices")
     async def devices():
-        # re-scan only while no microphone is open (a re-scan restarts the audio library)
-        return await asyncio.to_thread(list_input_devices, P().state == "idle" and P().source is None)
+        # re-scans the devices unless a microphone is open (audio_io refuses to restart PortAudio then)
+        return await asyncio.to_thread(list_input_devices, True)
 
     @app.post("/api/mictest")
     async def mictest():
@@ -254,8 +266,11 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
 
         def run():
             devs = list_input_devices(refresh=True)
-            return {"permission": mic_permission_status(),
-                    "devices": [probe_device(d) for d in preferred_order(devs)]}
+            res = {"permission": mic_permission_status(),
+                   "devices": [probe_device(d) for d in preferred_order(devs)]}
+            if any(d["ok"] for d in res["devices"]):
+                p._mic_blocked = False     # a microphone works again: use it on the next Start
+            return res
 
         return await asyncio.to_thread(run)
 

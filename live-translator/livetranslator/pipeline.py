@@ -75,7 +75,9 @@ class Pipeline:
         self.state = "idle"                     # idle | listening | stopping
         self.asr: BaseASR | None = None
         self.asr_state = {"status": "loading", "detail": "Loading speech model…", "model": "", "backend": ""}
-        self.llm_state = {"running": False, "model_ready": False, "model": s.llm_model, "models": [], "checked": False}
+        self.llm_state = {"running": False, "model_ready": False, "model": s.llm_model, "models": [], "checked": False,
+                          "loaded": False, "gpu_share": None, "tok_s": None, "first_s": None, "speed": "unknown",
+                          "queue": 0, "busy": False, "fallback_active": False}
         self.session: Session | None = None
         self.source = None
         self.source_name = ""
@@ -99,6 +101,11 @@ class Pipeline:
         self._summary_busy = False
         self._recovery_done_at = 0.0
         self._mic_blocked = False   # macOS blocked every microphone this run -> go straight to the browser
+        self._source_gen = 0        # bumped whenever the audio source is replaced; cancels a stale recovery
+        self._tr_busy = False       # translator is working on a line right now
+        self._slow_strikes = 0      # consecutive lines on which the translation model was too slow
+        self._fallback_lock = threading.Lock()
+        self._pulling: set = set()
         self.on_session_end: Callable[[Session], None] | None = None
 
         self._threads = [
@@ -154,6 +161,7 @@ class Pipeline:
                 offset_base = 0.0
                 self.translator.reset()
             self._token += 1
+            self._source_gen += 1
             sess = Session(meeting=meeting, t0_wall=now, token=self._token, offset_base=offset_base)
             if meeting.lines:
                 sess.prev_text = meeting.lines[-1].de
@@ -197,6 +205,7 @@ class Pipeline:
                 return
             sess = self.session
             src, self.source = self.source, None
+            self._source_gen += 1
             self.state = "stopping"
         if src:
             src.stop()
@@ -251,12 +260,16 @@ class Pipeline:
         self.translator.configure(model=new.llm_model, context_lines=new.context_lines, topic=new.topic,
                                   terms=new.glossary_terms(), base_url=new.ollama_url)
         if old.llm_model != new.llm_model or old.ollama_url != new.ollama_url:
-            self.llm_state.update({"model": new.llm_model, "model_ready": False})
+            self._slow_strikes = 0
+            self.llm_state.update({"model": new.llm_model, "model_ready": False, "fallback_active": False,
+                                   "speed": "unknown", "tok_s": None, "slow_noticed": False, "cpu_noticed": False})
             threading.Thread(target=self._refresh_llm, args=(True,), daemon=True).start()
         if (old.sensitivity, old.pause_ms, old.max_line_s) != (new.sensitivity, new.pause_ms, new.max_line_s):
             self._seg_cfg_version += 1
-        if self.state == "listening" and (old.input_device != new.input_device or old.input_source != new.input_source):
-            self._swap_source()
+        if old.input_device != new.input_device or old.input_source != new.input_source:
+            self._mic_blocked = False
+            if self.state == "listening":
+                self._swap_source()
 
     def retranslate(self, meeting_id: str, line_id: int) -> bool:
         with self._lock:
@@ -346,6 +359,7 @@ class Pipeline:
 
     def _swap_source(self) -> None:
         with self._lock:
+            self._source_gen += 1
             old = self.source
             if old:
                 old.stop()
@@ -438,7 +452,8 @@ class Pipeline:
             # and must not wait behind a preview)
             if (self.settings.live_preview and seg.in_speech and seg.current_voiced_s() >= 0.6
                     and seg.cur is not None and seg.cur.silence_run <= 2
-                    and now - last_partial_req >= max(1.0, 2.2 * self._partial_ema) and self._asr_q.empty()):
+                    and now - last_partial_req >= max(1.0, 2.2 * self._partial_ema) and self._asr_q.empty()
+                    and not self._tr_busy and self._tr_q.empty()):   # English first: no preview while translating
                 cur = seg.current_audio()
                 if cur is not None:
                     audio, start = cur
@@ -462,8 +477,12 @@ class Pipeline:
         1. reopen it (fixes a macOS permission that was granted after recording started),
         2. try the other inputs - built-in microphone first, virtual devices last,
         3. otherwise capture in the browser, which asks for permission itself."""
+        with self._lock:
+            gen = self._source_gen
+
         def live() -> bool:
-            return self.session is sess and self.state == "listening"
+            # still the same meeting, and nobody (Stop, Settings) replaced the source meanwhile
+            return self.session is sess and self.state == "listening" and self._source_gen == gen
 
         with self._lock:
             if not live() or not isinstance(self.source, MicSource):
@@ -479,8 +498,12 @@ class Pipeline:
             if perm == "not_determined":
                 perm = request_mic_permission(timeout=45)
             found, tried = None, []
+            if not live():
+                return
             if perm not in ("denied", "restricted"):
                 time.sleep(0.3)
+                if not live():
+                    return
                 devices = list_input_devices(refresh=True)
                 order = [d for d in devices if d["name"] == old_name] + preferred_order(devices, exclude=old_name)
                 for d in order:
@@ -493,8 +516,8 @@ class Pipeline:
                         found = d
                         break
             with self._lock:
-                if not live():
-                    return
+                if not live() or self.source is not None:
+                    return      # stopped, or the user picked another input meanwhile
                 if found:
                     src = MicSource(found["name"], self.push_audio)
                     try:
@@ -517,14 +540,20 @@ class Pipeline:
                 else:
                     self._notice("ok", f"'{found['name']}' works now.")
             else:
-                blocked = perm in ("denied", "restricted") or (tried and not any(r["ok"] for r in tried))
-                self._mic_blocked = bool(blocked)
+                all_silent = bool(tried) and not any(r["ok"] for r in tried)
+                blocked = perm in ("denied", "restricted") or (perm != "authorized" and all_silent)
+                self._mic_blocked = bool(blocked or all_silent)
                 self.publish({"type": "browser_audio_needed", "reason": "permission" if blocked else "silent",
                               "permission": perm})
-                self._notice("warn", "macOS gives Live Translator no microphone sound (Privacy & Security → "
-                                     "Microphone). Using this browser's microphone instead - click Allow if the "
-                                     "browser asks. For the Mac microphone: allow Terminal there, quit Terminal "
-                                     "(⌘Q) and start Live Translator again.")
+                if perm == "authorized":
+                    self._notice("warn", "macOS allows the microphone, but every input is silent (check System "
+                                         "Settings → Sound → Input: device and input volume). Using this browser's "
+                                         "microphone for now - click Allow if the browser asks.")
+                else:
+                    self._notice("warn", "macOS gives Live Translator no microphone sound (System Settings → Privacy "
+                                         "& Security → Microphone → Terminal). Using this browser's microphone "
+                                         "instead - click Allow if the browser asks. To use the Mac microphone: turn "
+                                         "Terminal on there, double-click the Desktop icon twice (stop, start).")
         finally:
             self._recovery_done_at = time.monotonic()
             self.publish(self.status())
@@ -640,13 +669,31 @@ class Pipeline:
                 continue
             if job[0] == "barrier":
                 job[1].set()
+                self._set_llm(queue=self._lines_waiting())
                 continue
+            self._tr_busy = True
+            self._set_llm(busy=True, queue=self._lines_waiting())
             try:
                 self._translate_job(*job[1:])
             except Exception:  # noqa: BLE001
                 log.exception("translation job failed")
+            finally:
+                self._tr_busy = False
+                self._set_llm(busy=False, queue=self._lines_waiting())
+
+    # How long to wait for the first English word before giving up on a request.
+    # A model that is already in memory answers in well under a second on an M-series
+    # Mac; loading Gemma 12B from disk takes ~5-20 s (much longer when memory is full).
+    WAIT_LOADED_S = 25.0
+    WAIT_LOADING_S = 150.0
+    # "Too slow": English starts more than this long after the line, or is written slower than
+    # this (tokens/s; reading speed is ~4-6), on two lines in a row -> switch to the fast model.
+    SLOW_FIRST_S = 8.0
+    SLOW_TOK_S = 5.0
 
     def _translate_job(self, sess: Session, ln: Line, record: bool, meta: dict | None = None) -> None:
+        from .translate import TranslationResult
+
         last = [0.0]
 
         def on_delta(t: str) -> None:
@@ -658,24 +705,22 @@ class Pipeline:
         if self.llm_state.get("checked") and not self.llm_state.get("running"):
             # known to be down: don't make every line wait for a time-out; these
             # lines are translated automatically once Ollama is back
-            from .translate import TranslationResult
-
             res = TranslationResult("", False, error="Ollama is not running")
         else:
-            res = self.translator.translate(ln.de, on_delta, record=record)
-            if not res.ok and not res.text:
-                time.sleep(1.0)
-                res = self.translator.translate(ln.de, on_delta, record=record)
+            res = self._translate_with_watchdog(ln.de, on_delta, record)
         if res.ok:
             if self._llm_fail_noticed:
                 self._llm_fail_noticed = False
                 self._notice("info", "Translation is working again.")
         elif not self._llm_fail_noticed:
             self._llm_fail_noticed = True
-            self._notice("error", f"Translation failed: {res.error}. Is Ollama running? German lines are still saved; "
-                                  "click a line's ↻ to translate it again later.")
+            hint = ("Ollama did not answer in time." if res.timeout else f"{res.error}.")
+            self._notice("error", f"Translation failed: {hint} German lines are still saved and will be translated "
+                                  "automatically when the translator is back (or click a line's ↻).")
         self.store.set_translation(sess.meeting, ln.id, res.text, res.ok)
         lat = {"tr_first_s": round(res.first_token_s, 2), "tr_total_s": round(res.total_s, 2)}
+        if res.stats:
+            lat["tok_s"] = res.stats.get("tok_s")
         if meta:
             sess.stats["tr_first_s"].append(res.first_token_s)
             sess.stats["tr_total_s"].append(res.total_s)
@@ -684,33 +729,168 @@ class Pipeline:
         self.publish({"type": "tr", "id": ln.id, "meeting": sess.meeting.id, "en": res.text, "final": True,
                       "ok": res.ok, "lat": lat})
 
+    def _translate_with_watchdog(self, german: str, on_delta, record: bool):
+        """One translation with a time limit, speed bookkeeping and automatic fallback."""
+        model = self.translator.model
+        loaded = self._model_loaded(model)
+        res = self.translator.translate(german, on_delta, record=record,
+                                        first_token_timeout=self.WAIT_LOADED_S if loaded else self.WAIT_LOADING_S)
+        if res.ok:
+            self._record_speed(res, loaded)
+            return res
+        if res.timeout:
+            # nothing came back in time: the model is stuck loading or the Mac is out of memory
+            self._slow_strikes = 2
+            switched = self._maybe_fallback(f"{model} did not answer within "
+                                            f"{self.WAIT_LOADED_S if loaded else self.WAIT_LOADING_S:.0f} s")
+            if switched:
+                return self.translator.translate(german, on_delta, record=record,
+                                                 first_token_timeout=self.WAIT_LOADING_S)
+            return res
+        if not res.text:
+            time.sleep(1.0)
+            res = self.translator.translate(german, on_delta, record=record, first_token_timeout=self.WAIT_LOADING_S)
+            if res.ok:
+                self._record_speed(res, self._model_loaded(model))
+        return res
+
+    def _record_speed(self, res, was_loaded: bool) -> None:
+        tok_s = res.stats.get("tok_s") or None
+        self._set_llm(tok_s=tok_s, first_s=round(res.first_token_s, 2))
+        if not was_loaded:
+            return   # the first request after loading is slow by nature
+        slow = res.first_token_s > self.SLOW_FIRST_S or (tok_s is not None and res.stats.get("gen_tokens", 0) >= 8
+                                                         and tok_s < self.SLOW_TOK_S)
+        self._slow_strikes = self._slow_strikes + 1 if slow else 0
+        self._set_llm(speed="slow" if slow else "ok")
+        if self._slow_strikes >= 2:
+            why = (f"English started {res.first_token_s:.1f} s after the line" if res.first_token_s > self.SLOW_FIRST_S
+                   else f"it writes only {tok_s} words-pieces/s")
+            self._maybe_fallback(f"{self.translator.model} is too slow on this Mac right now ({why})")
+
+    def _maybe_fallback(self, reason: str) -> bool:
+        """Switch to the fast translation model (for this run). True if switched now."""
+        s = self.settings
+        fb = (s.llm_fallback or "").strip()
+        cur = self.translator.model
+        if not s.auto_fallback or not fb or fb == cur:
+            if not self.llm_state.get("slow_noticed"):
+                self._set_llm(slow_noticed=True)
+                self._notice("warn", f"Translation is slow: {reason}. Close other heavy apps, or pick a smaller "
+                                     "translation model in Settings.")
+            return False
+        with self._fallback_lock:
+            if self.translator.model != cur:     # someone else switched already
+                return True
+            installed = self._installed(fb)
+            if not installed:
+                if fb not in self._pulling:
+                    self._pulling.add(fb)
+                    self._notice("warn", f"{reason}. Downloading the faster model {fb} (one time, ~3 GB) and "
+                                         "switching to it as soon as it is ready…")
+                    threading.Thread(target=self._pull_then_switch, args=(fb, cur), daemon=True).start()
+                return False
+            self._switch_model(fb, cur, reason)
+            return True
+
+    def _switch_model(self, new: str, old: str, reason: str) -> None:
+        log.warning("switching translation model %s -> %s: %s", old, new, reason)
+        self.translator.configure(model=new)
+        self._slow_strikes = 0
+        self._set_llm(model=new, fallback_active=True, loaded=False, speed="unknown", tok_s=None)
+        self._notice("warn", f"{reason}. Switched to the faster model {new} for this session - lines keep coming. "
+                             "(Settings → Translation to change the default.)")
+        # free the memory the slow model was using
+        threading.Thread(target=self.translator.unload, args=(old,), daemon=True).start()
+        sess = self.session
+        if sess is not None:
+            for ln in [x for x in sess.meeting.lines if x.done and not x.ok]:
+                self._tr_q.put(("line", sess, ln, False))
+
+    def _pull_then_switch(self, fb: str, cur: str) -> None:
+        try:
+            self.translator.pull(fb, lambda p: None)
+            self._refresh_llm(True)
+            with self._fallback_lock:
+                if self.translator.model == cur:
+                    self._switch_model(fb, cur, f"{cur} was too slow")
+        except Exception as e:  # noqa: BLE001
+            self._notice("error", f"Could not download {fb}: {e}")
+        finally:
+            self._pulling.discard(fb)
+
+    def _lines_waiting(self) -> int:
+        with self._tr_q.mutex:
+            return sum(1 for j in self._tr_q.queue if j[0] == "line")
+
+    def _installed(self, model: str) -> bool:
+        names = set(self.llm_state.get("models") or [])
+        return model in names or (":" not in model and model + ":latest" in names)
+
+    def _model_loaded(self, model: str) -> bool:
+        for m in self.translator.loaded_models():
+            if m["name"] == model or m["name"] == model + ":latest":
+                return True
+        return False
+
+    def _set_llm(self, **kw) -> None:
+        changed = any(self.llm_state.get(k) != v for k, v in kw.items())
+        self.llm_state.update(kw)
+        if changed:
+            self.publish(self.status())
+
     # ================================================================ Ollama health
     def _warm_llm(self) -> None:
+        model = self.translator.model
+        self._set_llm(warming=True)
         try:
-            self.translator.warmup()
+            res = self.translator.warmup()
+            if res.ok:
+                self._set_llm(tok_s=res.stats.get("tok_s") or None, loaded=True)
+                tok_s = res.stats.get("tok_s") or 0
+                if res.stats.get("gen_tokens", 0) >= 5 and 0 < tok_s < self.SLOW_TOK_S * 0.6:
+                    self._maybe_fallback(f"{model} writes only {tok_s} word-pieces/s on this Mac")
+            elif res.timeout:
+                self._maybe_fallback(f"{model} did not finish loading within {self.WAIT_LOADING_S:.0f} s")
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("warm-up failed")
+        finally:
+            self._set_llm(warming=False)
         self._refresh_llm(True)
 
     def _refresh_llm(self, force_publish: bool = False) -> None:
         h = self.translator.health()
-        new = {"running": h["running"], "model_ready": h["model_ready"], "model": self.translator.model,
-               "models": h.get("models", []), "checked": True}
-        changed = any(self.llm_state.get(k) != new[k] for k in ("running", "model_ready", "model", "models"))
+        model = self.translator.model
+        loaded = [m for m in (self.translator.loaded_models() if h["running"] else [])
+                  if m["name"] in (model, model + ":latest")]
+        prev = dict(self.llm_state)
+        new = {"running": h["running"], "model_ready": h["model_ready"], "model": model,
+               "models": h.get("models", []), "checked": True, "loaded": bool(loaded),
+               "gpu_share": round(loaded[0]["gpu_share"], 2) if loaded else None}
+        changed = any(prev.get(k) != v for k, v in new.items())
         recovered = new["running"] and new["model_ready"] and not (
-            self.llm_state.get("running") and self.llm_state.get("model_ready")) and self.llm_state.get("checked")
-        self.llm_state = new
+            prev.get("running") and prev.get("model_ready")) and prev.get("checked")
+        self.llm_state.update(new)
         if recovered and self.session is not None:
             sess = self.session
             for ln in [x for x in sess.meeting.lines if x.done and not x.ok]:
                 self._tr_q.put(("line", sess, ln, False))
+        # a model that does not fit in GPU memory runs partly on the CPU: many times slower
+        if (loaded and loaded[0]["size"] and loaded[0]["gpu_share"] < 0.9 and platform.system() == "Darwin"
+                and not prev.get("cpu_noticed")):
+            self.llm_state["cpu_noticed"] = True
+            self._maybe_fallback(f"{model} does not fit in the Mac's GPU memory "
+                                 f"(only {loaded[0]['gpu_share'] * 100:.0f}% on the GPU)")
         if changed or force_publish:
             self.publish(self.status())
 
     def _health_loop(self) -> None:
         warmed = False
         while not self._shutdown.is_set():
-            self._refresh_llm()
+            try:
+                self._refresh_llm()
+            except Exception:  # noqa: BLE001
+                log.exception("Ollama health check failed")
             if self.llm_state["running"] and self.llm_state["model_ready"] and not warmed:
                 warmed = True
                 threading.Thread(target=self._warm_llm, daemon=True).start()
