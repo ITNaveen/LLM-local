@@ -353,7 +353,9 @@ class FixtureSource:
         captions, t = [], 3.0
         while spoken and t < duration - 4:
             dur = rng.uniform(2.5, 5.5)
-            line = rng.choice(_FAKE_LINES)
+            # every video talks about its own details, like real channels do
+            line = rng.choice(_FAKE_LINES).rstrip("।.") + " " + " ".join(
+                f"v{i}k{rng.randint(0, 30)}" for _ in range(5)) + "।"
             if spoken == "te":
                 line = "ఇది ఒక పరీక్ష వాక్యం."
             captions.append({"start": round(t, 2), "end": round(t + dur, 2), "text": line})
@@ -386,7 +388,9 @@ class FixtureSource:
         font = str(FONT_FILE).replace(":", r"\:")
         label = (f"drawtext=fontfile='{font}':text='{video_id}  %{{pts\\:hms\\:{start:.3f}}}':"
                  f"fontcolor=white:fontsize=48:x=40:y=40:box=1:boxcolor=black@0.5")
-        ffmpeg("-f", "lavfi", "-i", f"testsrc2=s={w}x{h}:r=30:d={dur}",
+        # each video / scene looks different (real footage does), so duplicate checks work
+        angle = ((i * 7 + int(start // 10)) % 12) / 12 * 6.2832
+        ffmpeg("-f", "lavfi", "-i", f"testsrc2=s={w}x{h}:r=30:d={dur},rotate=a={angle:.3f}",
                "-f", "lavfi", "-i", f"color=c={color}:s={w}x{h}:r=30:d={dur}",
                "-f", "lavfi", "-i", f"sine=frequency={freq}:sample_rate=48000:duration={dur}",
                "-filter_complex",

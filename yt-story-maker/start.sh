@@ -19,9 +19,18 @@ fi
 if ! command -v ffmpeg >/dev/null 2>&1; then
   need_brew; echo "Installing ffmpeg..."; brew install ffmpeg
 fi
+if ! ffmpeg -hide_banner -filters 2>/dev/null | grep -q " ass " && command -v brew >/dev/null 2>&1 \
+   && [ ! -f "$HOME/.storymaker-ffmpeg-full-tried" ]; then
+  echo "Installing the full ffmpeg so videos get Hindi text cards and subtitles (one time, a few minutes)..."
+  touch "$HOME/.storymaker-ffmpeg-full-tried"
+  if brew install ffmpeg-full; then
+    FULL="$(brew --prefix ffmpeg-full 2>/dev/null)/bin"
+    [ -x "$FULL/ffmpeg" ] && export PATH="$FULL:$PATH"
+  fi
+fi
 if ! ffmpeg -hide_banner -filters 2>/dev/null | grep -q " ass "; then
-  echo "NOTE: your ffmpeg cannot draw Hindi text (titles, burned subtitles, thumbnail text)."
-  echo "      Fix once with:  brew install ffmpeg-full   then start StoryMaker again."
+  echo "NOTE: ffmpeg cannot draw Hindi text here; on-screen lines will be spoken by the narrator."
+  echo "      For text cards and burned subtitles run:  brew install ffmpeg-full"
 fi
 # yt-dlp needs a JavaScript runtime for YouTube nowadays.
 if ! command -v deno >/dev/null 2>&1 && ! command -v node >/dev/null 2>&1; then

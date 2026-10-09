@@ -124,30 +124,64 @@ def test_broken_ai_output_falls_back_to_rules(material):
             assert pa["start"] < pb["start"]
 
 
+def _p(vid, start, text, lang="hi", channel=None, strength=3, hindi=""):
+    return {"video_id": vid, "start": start, "text": text, "lang": lang, "strength": strength,
+            "heat": 0.5, "channel": channel or f"ch-{vid}", "hindi": hindi}
+
+
 def test_same_speaker_plays_in_original_order():
-    cat = {"P1": {"video_id": "a", "start": 50}, "P2": {"video_id": "a", "start": 10},
-           "P3": {"video_id": "b", "start": 5}}
-    scenes = [{"act": "rising", "type": "dialogue", "pid": "P1"},
+    cat = {"P1": _p("a", 50, "alpha one"), "P2": _p("a", 10, "alpha two"), "P3": _p("b", 5, "beta")}
+    scenes = [{"act": "opening", "type": "hook", "pid": "P3"},
+              {"act": "rising", "type": "dialogue", "pid": "P1"},
               {"act": "rising", "type": "text", "text": "x"},
               {"act": "rising", "type": "dialogue", "pid": "P3"},
               {"act": "rising", "type": "dialogue", "pid": "P2"}]
     out = editor.enforce_rules(scenes, cat, "light")
-    assert [s.get("pid") for s in out] == ["P2", None, "P3", "P1"]
+    assert [s.get("pid") for s in out] == ["P3", "P2", None, "P1"]   # hook line not replayed
 
 
-def test_enforce_rules():
-    cat = {"P1": {"video_id": "a", "start": 50}, "P2": {"video_id": "a", "start": 10}}
-    scenes = [{"act": "opening", "type": "hook", "pid": "P1"},
-              {"act": "opening", "type": "hook", "pid": "P2"},
-              {"act": "opening", "type": "hook", "pid": "P1"},
-              {"act": "buildup", "type": "dialogue", "pid": "P1"},
-              {"act": "buildup", "type": "dialogue", "pid": "P1"}] + \
-             [{"act": "rising", "type": "narration", "text": f"line {i}"} for i in range(8)]
+def test_rules_hindi_audio_only():
+    cat = {"P1": _p("a", 5, "hindi line one", strength=5),
+           "P2": _p("b", 5, "english minister speech", lang="en", hindi="मंत्री ने साफ़ कहा कि..."),
+           "P3": _p("c", 5, "english with no translation", lang="en")}
+    scenes = [{"act": "opening", "type": "hook", "pid": "P2"},          # English hook: dropped
+              {"act": "buildup", "type": "dialogue", "pid": "P2"},
+              {"act": "buildup", "type": "dialogue", "pid": "P3"},
+              {"act": "buildup", "type": "dialogue", "pid": "P1"}]
     out = editor.enforce_rules(scenes, cat, "light")
-    assert sum(s["type"] == "hook" for s in out) == 2
-    assert sum(1 for s in out if s["type"] == "dialogue" and s["pid"] == "P1") == 1
-    assert sum(s["type"] == "narration" for s in out) == 6       # rest become text cards
-    assert sum(s["type"] == "text" for s in out) == 2
+    assert out[0] == {"act": "opening", "type": "hook", "pid": "P1",
+                      "link": "the most explosive line first"}
+    vo = [s for s in out if s["type"] == "voiceover"]
+    assert len(vo) == 1 and vo[0]["pid"] == "P2" and vo[0]["text"].startswith("मंत्री")
+    assert all(s.get("pid") != "P3" for s in out)                      # can't be heard in Hindi
+    assert all(cat[s["pid"]]["lang"] == "hi" for s in out if s["type"] in ("hook", "dialogue"))
+
+
+def test_rules_variety_and_no_repeats():
+    cat = {f"P{i}": _p("same", i * 30, f"unique point number {i} about topic{i} details{i}")
+           for i in range(1, 5)}
+    cat["P5"] = _p("x", 0, "unique point number 1 about topic1 details1")   # same story, other channel
+    cat["P6"] = _p("y", 0, "fresh angle completely different words", channel="ch-same")
+    scenes = [{"act": "buildup", "type": "dialogue", "pid": f"P{i}"} for i in range(1, 7)]
+    out = editor.enforce_rules(scenes, cat, "light")
+    used = [s["pid"] for s in out if s["type"] == "dialogue"]
+    assert used == ["P1", "P2", "P6"]          # max 2 per video, P5 repeats P1
+
+
+def test_rules_text_cards():
+    cat = {"P1": _p("a", 5, "hindi line")}
+    scenes = [{"act": "opening", "type": "text", "text": "पहली लाइन यहाँ है"},
+              {"act": "opening", "type": "text", "text": "दूसरी अलग लाइन"},
+              {"act": "buildup", "type": "narration", "text": "पहली लाइन यहाँ है"},   # repeat
+              {"act": "buildup", "type": "dialogue", "pid": "P1"}]
+    out = editor.enforce_rules(scenes, cat, "light")
+    assert out[0]["type"] == "hook"                                    # never open on a card
+    types = [s["type"] for s in out]
+    assert types.count("text") == 1 and "narration" not in types       # no 2 cards, no repeat
+    spoken = editor.enforce_rules(scenes, cat, "light", can_text=False)
+    assert "text" not in [s["type"] for s in spoken]                   # narrator says them
+    assert [s["text"] for s in spoken if s["type"] == "narration"] == \
+        ["पहली लाइन यहाँ है", "दूसरी अलग लाइन"]
 
 
 # ------------------------------------------------------------------ assembly
@@ -176,6 +210,17 @@ def test_dialogue_scenes_play_one_continuous_passage(material):
             if b["kind"] == "hook":
                 c = b["clips"][0]
                 assert c["end"] - c["start"] <= 9.5
+                hook_passage = b["passage_id"]
+            if b["kind"] == "voiceover":                 # English speaker, Hindi narrator
+                p = pmap[b["passage_id"]]
+                assert p["lang"] == "en" and b["narration"] and b["narration_id"]
+                assert b["clips"][0]["video_id"] == p["video_id"]
+            if b["kind"] in ("dialogue", "hook"):        # everything heard is Hindi
+                assert pmap[b["passage_id"]]["lang"] in editor.DIALOGUE_LANGS
+    dialogue_passages = [b["passage_id"] for a in story["acts"] for b in a["beats"]
+                         if b["kind"] in ("dialogue", "voiceover")]
+    assert hook_passage not in dialogue_passages              # the hook is never replayed
+    assert len(dialogue_passages) == len(set(dialogue_passages))
 
 
 def test_no_footage_used_twice_except_hook(material):
@@ -191,7 +236,7 @@ def test_no_footage_used_twice_except_hook(material):
                 seen.setdefault(c["video_id"], []).append((c["start"], c["end"]))
 
 
-@pytest.mark.parametrize("minutes", [4, 8])
+@pytest.mark.parametrize("minutes", [3, 5])
 def test_length_is_met_by_letting_speakers_continue(material, minutes):
     _, story, _ = _assemble(material, minutes)
     total = sum(editor.beat_seconds(b) for a in story["acts"] for b in a["beats"]) + 4
@@ -200,7 +245,7 @@ def test_length_is_met_by_letting_speakers_continue(material, minutes):
 
 
 def test_too_little_material_is_reported_not_padded(material):
-    _, story, _ = _assemble(material, 40)
+    _, story, _ = _assemble(material, 15)
     assert story["warnings"] and "shorter" in story["warnings"][0]
 
 
@@ -210,8 +255,10 @@ def test_timeline_with_text_cards_and_no_music(material, settings):
     tl = timeline.build(story, voice, {k: None for k in ACT_KEYS}, {}, settings)
     segs = tl["segments"]
     cards = [s for s in segs if s["type"] == "card"]
-    assert any(s.get("style") == "text" and s["text"] for s in cards)
     assert sum(s.get("style") == "title" for s in cards) == 1
+    # on-screen text sits on moving footage, never on a frozen frame
+    assert any(s["type"] == "clip" and s.get("overlay") for s in segs)
+    assert not any(s.get("style") == "text" for s in cards)
     for a, b in zip(segs, segs[1:]):
         assert b["t"] == pytest.approx(a["t"] + a["frames"] / 30, abs=1e-3)
     # without music the montage keeps its own sound, dialogue stays at full level

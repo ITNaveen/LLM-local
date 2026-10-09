@@ -225,7 +225,7 @@ async function refreshDetail() {
 }
 
 const KIND_NAMES = { hook: "Hook", dialogue: "Clip audio", narration: "Narrator", text: "Text on screen",
-  montage: "Montage" };
+  montage: "Montage", voiceover: "Hindi voice-over" };
 
 function storyboard(story, editable) {
   let html = `<h3>Storyboard – “${esc(story.title_hi)}”${story.source === "template" ? " (built-in, no AI)" : ""}</h3>`;
@@ -245,7 +245,7 @@ function storyboard(story, editable) {
         `<a href="https://www.youtube.com/watch?v=${esc(c.video_id)}&t=${Math.floor(c.start)}s" target="_blank" rel="noopener" title="${esc(c.video_title)}">
           <img loading="lazy" src="https://i.ytimg.com/vi/${esc(c.video_id)}/mqdefault.jpg" alt="" onerror="this.style.visibility='hidden'"><span>${fmt(c.end - c.start)}</span></a>`).join("");
       let body = "";
-      if (kind === "narration" || kind === "text") {
+      if (kind === "narration" || kind === "text" || kind === "voiceover") {
         body = editable ? `<textarea rows="2" data-scene="${esc(b.scene_id)}">${esc(b.narration)}</textarea>`
                         : `<div class="narr">${kind === "text" ? "▣ " : ""}“${esc(b.narration)}”</div>`;
       }

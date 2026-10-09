@@ -25,6 +25,12 @@ DEFAULT_STYLE = {
 }
 
 THEMES = {
+    "sensational": ("Hindi news-YouTube style, like India's biggest news channels: sensational, "
+                    "emotional and gripping. Hook with the most explosive line, build outrage at "
+                    "the wrongdoers and pride in India, ask the viewer rhetorical questions "
+                    "('क्या आप जानते हैं...?', 'आख़िर क्यों...?'), use words like 'सबसे बड़ा खुलासा', "
+                    "'देखिए', 'सच्चाई'. Clearly take the side the creator describes - but every fact "
+                    "must come from the footage."),
     "auto": "Pick the theme that fits the topic best.",
     "epic": "Epic tribute: pride, power, goosebumps. Big music, heroic narration.",
     "emotional": "Emotional journey: struggle, sacrifice, tears and triumph.",
@@ -33,6 +39,7 @@ THEMES = {
 }
 
 THEME_MOODS = {
+    "sensational": ["dark", "tense", "tense", "epic", "triumphant"],
     "epic":        ["dark", "emotional", "tense", "epic", "triumphant"],
     "emotional":   ["calm", "emotional", "tense", "emotional", "triumphant"],
     "documentary": ["calm", "calm", "tense", "epic", "calm"],

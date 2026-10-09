@@ -15,14 +15,17 @@
 
 import re
 
-from .llm import LLMError
+from .llm import LLMError, tfidf_similarity
 from .moments import JUNK, SENTENCE_END, build_moments, heat_at, mean_heat
 from .style import ACT_KEYS, THEME_MOODS, THEMES
-from .util import clamp, estimate_speech_seconds, keywords
+from .util import clamp, estimate_speech_seconds, keywords, tokens
 
 ACT_NAMES_HI = {"opening": "शुरुआत", "buildup": "कहानी", "rising": "तूफ़ान से पहले",
                 "climax": "चरम", "ending": "अंजाम"}
 SCENE_TYPES = ("hook", "text", "narration", "dialogue", "montage")
+# Heard by the audience as-is. Everything else (e.g. English) is retold by the Hindi narrator.
+DIALOGUE_LANGS = {"hi", "ur"}
+MAX_PER_VIDEO, MAX_PER_CHANNEL = 2, 3
 NARRATION_LIMITS = {"none": 0, "light": 6, "medium": 12}
 SPEECH_LANGS = {"hi", "en", "ur"}
 INDIAN_REGIONAL = {"te", "ta", "kn", "ml", "bn", "mr", "gu", "pa", "or", "as", "ne", "sd",
@@ -166,6 +169,7 @@ def screen(llm, topic, description, plan, videos, log, progress=None, trust_topi
                              "reason": f"not relevant: {str(verdict.get('reason', ''))[:80]}"})
             continue
         v["role"], v["kind"], v["role_note"] = role, kind, why
+        v["lang"] = (v.get("spoken_lang") or v.get("caption_lang") or "hi").lower()
         kept.append(v)
     for r in rejected:
         log(f"  ✗ {r['title'][:60]} — {r['reason']}")
@@ -190,6 +194,8 @@ def build_passages(video, min_len=10.0, max_len=35.0):
             if not JUNK.search(text):
                 out.append({
                     "id": f"{vid}#{len(out)}", "video_id": vid, "index": len(out),
+                    "lang": (video.get("lang") or video.get("spoken_lang")
+                             or video.get("caption_lang") or "hi").lower(),
                     "start": round(cur[0]["start"], 2), "end": round(cur[-1]["end"], 2),
                     "text": text,
                     "cues": [{"s": c["start"], "e": c["end"], "t": c["text"],
@@ -236,7 +242,14 @@ For EVERY passage return one item:
   "summary": "max 14 words, English: who says what",
   "topic": "1-3 word sub-topic, reuse the same label for the same thread",
   "strength": 1-5 (5 = powerful, emotional, quotable; 1 = filler),
-  "standalone": true if it makes sense without what came before}}]}}"""
+  "standalone": true if it makes sense without what came before{hindi_field}}}]}}"""
+
+HINDI_FIELD = """,
+  "hindi": "this passage is in English and our audience only hears Hindi: write the Hindi
+            voice-over (Devanagari, 1-2 sentences, about 2 words per second of the passage,
+            max 45 words) that tells the viewer what is said here,
+            naming the speaker (e.g. 'केंद्रीय मंत्री किरेन रिजिजू ने साफ़ कहा...'). Faithful to
+            what is said: no invented facts, numbers or quotes"""
 
 
 def annotate(llm, topic, description, video, passages, log):
@@ -249,10 +262,12 @@ def annotate(llm, topic, description, video, passages, log):
             listing = "\n".join(f"{k + 1}. [{int(p['end'] - p['start'])}s] {p['text'][:420]}"
                                 for k, p in enumerate(batch))
             try:
+                english = any(p.get("lang", "hi") not in DIALOGUE_LANGS for p in batch)
                 raw = llm.chat_json(ANNOTATE_SYSTEM, ANNOTATE_USER.format(
                     topic=topic, description=description or "-", title=video["title"],
-                    channel=video.get("channel", ""), listing=listing), temperature=0.2,
-                    max_tokens=2600)
+                    channel=video.get("channel", ""), listing=listing,
+                    hindi_field=HINDI_FIELD if english else ""), temperature=0.2,
+                    max_tokens=4200 if english else 2600)
                 for item in raw.get("passages") or []:
                     n = _num(item.get("n")) if isinstance(item, dict) else None
                     if n and 1 <= n <= len(batch):
@@ -270,6 +285,8 @@ def annotate(llm, topic, description, video, passages, log):
                      subtopic=str(item.get("topic") or "general").lower()[:40],
                      strength=strength, standalone=item.get("standalone") not in (False, "false"),
                      ai=True)
+            if p.get("lang", "hi") not in DIALOGUE_LANGS:
+                p["hindi"] = clean_text(item.get("hindi"), 45)
         else:
             hits = sum(1 for w in topic_words if w in p["text"].lower())
             p.update(use=hits > 0 or p["heat"] > 0.5, summary=p["text"][:100],
@@ -283,31 +300,46 @@ def annotate(llm, topic, description, video, passages, log):
 
 
 def visual_moments(video):
-    """B-roll candidates: the most replayed seconds of a relevant video."""
+    """B-roll candidates: the most replayed seconds of a relevant video, with how much of the
+    window is someone talking (studio anchors/graphics talk; action footage mostly doesn't)."""
+    caps = video.get("captions") or []
     ms = build_moments(video, per_video=25)
-    return [{"video_id": m["video_id"], "start": m["start"], "end": m["end"], "peak": m["peak"],
-             "video_duration": m["video_duration"], "video_title": m["video_title"],
-             "channel": m["channel"]} for m in ms]
+    out = []
+    for m in ms:
+        span = max(0.1, m["end"] - m["start"])
+        talk = sum(max(0.0, min(c["end"], m["end"]) - max(c["start"], m["start"])) for c in caps
+                   if c["start"] < m["end"] and c["end"] > m["start"]) / span
+        out.append({"video_id": m["video_id"], "start": m["start"], "end": m["end"],
+                    "peak": m["peak"], "talk": round(min(1.0, talk), 2),
+                    "video_duration": m["video_duration"], "video_title": m["video_title"],
+                    "channel": m["channel"]})
+    return out
 
 
 # =================================================================== 3. story (architect)
-ARCHITECT_SYSTEM = """You are the lead editor of India's most-watched Hindi documentary YouTube
+ARCHITECT_SYSTEM = """You are the lead editor of India's most-watched Hindi news-story YouTube
 channel. Your films feel like a movie: every scene grows out of the previous one and leads into
-the next. Viewers never feel a random jump. Rules you never break:
+the next, and the audience feels something (anger, pride, suspense) at every step. Rules:
 1. ONE THREAD AT A TIME. Finish a sub-topic before starting the next. Never ping-pong between
    sub-topics, speakers or countries.
 2. EVERY SCENE CONNECTS. For every scene write "link": the concrete reason it follows the
    previous scene (cause -> effect, claim -> reaction, question -> answer, before -> after).
    If you cannot write a real link, do not use that scene.
-3. A dialogue scene plays ONE passage completely. Never use the same speaker in fragments;
-   if a speaker continues, use the next passage of the same source right after.
-4. When the source, place or sub-topic changes, put a bridge first: a short Hindi narration
-   line or an on-screen text card that tells the viewer where we are going and why.
-5. Only use passages that are clearly about the topic. Fewer good scenes beat many weak ones.
-6. Structure: opening = 1-2 hook lines (the most powerful quotes) + text cards that set the
-   context; buildup = who, what, why it matters; rising = conflict and stakes grow;
-   climax = the strongest passages + a montage; ending = consequence and a final thought.
-7. Hindi text is natural spoken Hindi in Devanagari, short and cinematic (6-20 words).
+3. VARIETY = TRUST. Use many different channels, anchors and voices. Never more than 2 passages
+   from one video, never more than 3 from one channel. Never repeat a fact, claim or clip that
+   was already shown - each scene must add something NEW.
+4. HINDI AUDIO ONLY. Passages marked "EN" are English: if you use one, our Hindi narrator
+   retells it in Hindi over the speaker's footage (that happens automatically).
+5. A dialogue scene plays ONE passage completely. When the source, place or sub-topic
+   changes, put a bridge first: a short Hindi narration line or an on-screen text card.
+6. OPEN WITH FIRE: the first scene is a "hook" - the single most explosive Hindi line.
+   Then 1 text card or narration line that sets up the conflict. Never start with a text card.
+7. Structure: opening = hook + the question the film answers; buildup = who, what, why it
+   matters; rising = conflict and stakes grow; climax = the strongest, most emotional passages
+   + one short montage; ending = the consequence and ONE powerful closing line that leaves
+   the viewer with a feeling (pride, anger, resolve) - not a long montage.
+8. Hindi lines are natural spoken Hindi in Devanagari, short and punchy (6-20 words).
+9. Never invent facts, numbers, names or quotes. Dramatise HOW you tell it, not WHAT happened.
 JSON only."""
 
 ARCHITECT_USER = """Topic: {topic}
@@ -316,7 +348,7 @@ Theme: {theme}
 Target length: about {minutes} minutes (dialogue passages give most of the runtime)
 Narration: {narration_rule}
 
-DIALOGUE PASSAGES (id | source | sub-topic | seconds | strength 1-5 | what is said):
+DIALOGUE PASSAGES (id | language | source | sub-topic | seconds | strength 1-5 | what is said):
 {passages}
 
 VISUAL SOURCES for montages / background (id | what it is):
@@ -327,7 +359,7 @@ Scene types:
 - "text": an on-screen Hindi text card (text). Use for context, dates, facts, bridges.
 - "narration": a Hindi voice-over line (text). Bridges and context.
 - "dialogue": play a passage completely (use: passage id).
-- "montage": music + visuals, no words (use: list of visual ids, seconds: 8-25).
+- "montage": music + action visuals, no words (use: list of visual ids, seconds: 8-15).
 
 Return JSON:
 {{"title_hi": "powerful Hindi title",
@@ -338,10 +370,12 @@ Return JSON:
 Use about {n_dialogue} dialogue scenes."""
 
 CRITIC_SYSTEM = """You are a ruthless senior editor reviewing a junior's edit before it goes to
-millions of Indian viewers. You check that the film flows like a movie: each scene must
-connect to the one before and after it, one thread at a time, no off-topic material, no
-repetition, no abrupt jumps between speakers/countries/sub-topics without a bridge, a strong
-hook, rising tension and a satisfying ending. JSON only."""
+millions of Hindi-speaking viewers. You check: the film opens with an explosive hook (not a text
+card); each scene connects to the one before and after it; one thread at a time; no off-topic
+material; NO REPETITION (the same fact, claim, speaker or clip shown twice is cut); variety of
+channels and voices; no abrupt jumps between speakers/countries/sub-topics without a bridge;
+rising tension, an emotional climax and a short, powerful ending. Bridges you add must say
+something new - never repeat the line next to them. JSON only."""
 
 CRITIC_USER = """Topic: {topic}
 Film description: {description}
@@ -382,7 +416,7 @@ def estimate_seconds(scenes, cat):
             total += cat[s["pid"]]["end"] - cat[s["pid"]]["start"]
         elif s["type"] == "hook":
             total += 7
-        elif s["type"] == "narration":
+        elif s["type"] in ("narration", "voiceover"):
             total += estimate_speech_seconds(s["text"]) + 0.9
         elif s["type"] == "text":
             total += clamp(1.8 + len(s["text"]) / 14, 2.8, 6.5)
@@ -394,7 +428,7 @@ def estimate_seconds(scenes, cat):
 def _draft_lines(scenes, cat, vcat):
     lines = []
     for i, s in enumerate(scenes, 1):
-        if s["type"] in ("hook", "dialogue"):
+        if s["type"] in ("hook", "dialogue", "voiceover"):
             p = cat[s["pid"]]
             content, src = f"[{p['subtopic']}] {p['summary']}", _source_label(p)
         elif s["type"] == "montage":
@@ -450,7 +484,7 @@ def _extend(llm, topic, outline, cat, vcat, minutes, log):
     return outline
 
 
-def make_catalog(passages, limit=70, per_video=8):
+def make_catalog(passages, limit=70, per_video=4):
     usable = [p for p in passages if p.get("use")]
     by_video = {}
     for p in sorted(usable, key=lambda p: (p["strength"], p["heat"]), reverse=True):
@@ -474,20 +508,23 @@ def _source_label(v_or_p):
     return f"{ch}: {title}" if ch else title
 
 
-def plan_story(llm, topic, description, theme, minutes, narration, passages, videos, log):
+def plan_story(llm, topic, description, theme, minutes, narration, passages, videos, log,
+               can_text=True):
     cat = make_catalog(passages)
     vcat = make_visual_catalog(videos)
     outline = None
     if llm.available() and cat:
         outline = _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log)
         if outline:
+            # rules first (they drop repeats / over-used sources), then let the AI fill the gap
+            outline["scenes"] = enforce_rules(outline["scenes"], cat, narration, log, can_text)
             outline = _extend(llm, topic, outline, cat, vcat, minutes, log)
             outline = _critic(llm, topic, description, outline, cat, vcat, log)
     if not outline:
         if cat:
             log("Using the built-in story builder (start Ollama for an AI-edited story).")
         outline = fallback_story(topic, theme, cat, vcat, minutes)
-    outline["scenes"] = enforce_rules(outline["scenes"], cat, narration, log)
+    outline["scenes"] = enforce_rules(outline["scenes"], cat, narration, log, can_text)
     outline["catalog"] = {k: p["id"] for k, p in cat.items()}
     outline["visual_catalog"] = {k: v["id"] for k, v in vcat.items()}
     assign_ids(outline)
@@ -501,8 +538,8 @@ def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, lo
             "medium": f"Voice-over is welcome, max {NARRATION_LIMITS['medium']} lines."}[
         narration if narration in NARRATION_LIMITS else "light"]
     plines = "\n".join(
-        f"{pid} | {_source_label(p)} | {p['subtopic']} | {int(p['end'] - p['start'])}s | "
-        f"{p['strength']} | {p['summary']}" for pid, p in cat.items())
+        f"{pid} | {'HI' if _speaks_hindi(p) else 'EN'} | {_source_label(p)} | {p['subtopic']} | "
+        f"{int(p['end'] - p['start'])}s | {p['strength']} | {p['summary']}" for pid, p in cat.items())
     vlines = "\n".join(
         f"{vid} | {_source_label(v)}{' (foreign language, silent)' if v.get('role') == 'visual' else ''}"
         for vid, v in vcat.items())
@@ -560,7 +597,7 @@ def normalize_scenes(raw_scenes, cat, vcat):
         else:  # montage
             ids = use if isinstance(use, list) else [use]
             scene["vids"] = [f"V{_num(v, 0)}" for v in ids if f"V{_num(v, 0)}" in vcat][:6]
-            scene["seconds"] = clamp(_num(s.get("seconds"), 12) or 12, 6, 25)
+            scene["seconds"] = clamp(_num(s.get("seconds"), 12) or 12, 6, 15)
         scenes.append(scene)
     return scenes
 
@@ -604,34 +641,119 @@ def _critic(llm, topic, description, outline, cat, vcat, log):
 
 
 # =================================================================== rules + fallback
-def enforce_rules(scenes, cat, narration, log=lambda m: None):
-    """Hard guarantees, whatever the AI wrote."""
-    out, used, hooks = [], set(), 0
+def _speaks_hindi(p):
+    return (p.get("lang") or "hi") in DIALOGUE_LANGS
+
+
+class _Repeats:
+    """'Does this passage say what an earlier one already said?' (two channels, same story).
+    Word weights come from ALL passages, so words every passage shares (the topic itself:
+    police, protest, ...) count for little and specific facts (numbers, names) count a lot."""
+
+    def __init__(self, cat, threshold=0.45):
+        self.keys = list(cat)
+        texts = [cat[k].get("text", "") or "-" for k in self.keys]
+        self.sim = tfidf_similarity(texts, texts) if texts else None
+        self.index = {k: i for i, k in enumerate(self.keys)}
+        self.threshold = threshold
+
+    def __call__(self, pid, earlier):
+        if self.sim is None or not earlier:
+            return False
+        i = self.index[pid]
+        return max(float(self.sim[i, self.index[e]]) for e in earlier) >= self.threshold
+
+
+def _same_line(line, earlier, threshold=0.6):
+    words = set(tokens(line))
+    for e in earlier:
+        other = set(tokens(e))
+        if words and other and len(words & other) / len(words | other) >= threshold:
+            return True
+    return False
+
+
+def enforce_rules(scenes, cat, narration, log=lambda m: None, can_text=True):
+    """Hard guarantees, whatever the AI wrote:
+    Hindi audio only (English passages become Hindi voice-over), variety caps per video and
+    channel, nothing said twice, no back-to-back text cards, a Hindi hook first."""
+    out, used, hooks, n_narr, lines = [], [], 0, 0, []
+    per_video, per_channel = {}, {}
     limit = NARRATION_LIMITS.get(narration, 6)
-    n_narr = 0
+    dropped = {"repeat": 0, "variety": 0, "english": 0}
+    repeats = _Repeats(cat)
     for s in scenes:
         s = dict(s)
-        if s["type"] == "hook":
-            if hooks >= 2 or s["act"] != "opening":
-                s["type"] = "dialogue"
-            else:
+        t = s["type"]
+        if t == "hook":
+            p = cat[s["pid"]]
+            if s["act"] == "opening" and hooks < 2 and _speaks_hindi(p) and s["pid"] not in used:
                 hooks += 1
-        if s["type"] == "dialogue":
+                used.append(s["pid"])                 # the hook line is never replayed later
+                out.append(s)
+                continue
+            if s["act"] == "opening" and not _speaks_hindi(p):
+                continue                              # never open the film in English
+            s["type"] = t = "dialogue"
+        if t in ("dialogue", "voiceover"):
+            p = cat[s["pid"]]
             if s["pid"] in used:
-                continue                          # a passage plays once
-            used.add(s["pid"])
-        if s["type"] == "narration":
-            if n_narr >= limit:
-                s["type"] = "text"                # over the voice budget: show it as text
-            else:
-                n_narr += 1
+                continue                              # a passage plays once
+            vid, ch = p["video_id"], p.get("channel") or p["video_id"]
+            if per_video.get(vid, 0) >= MAX_PER_VIDEO or per_channel.get(ch, 0) >= MAX_PER_CHANNEL:
+                dropped["variety"] += 1
+                continue
+            if repeats(s["pid"], used):
+                dropped["repeat"] += 1
+                continue
+            if t == "dialogue" and not _speaks_hindi(p):
+                if not p.get("hindi"):
+                    dropped["english"] += 1
+                    continue
+                s = {**s, "type": "voiceover", "text": p["hindi"]}
+            used.append(s["pid"])
+            per_video[vid] = per_video.get(vid, 0) + 1
+            per_channel[ch] = per_channel.get(ch, 0) + 1
+            out.append(s)
+            continue
+        if t in ("text", "narration"):
+            if _same_line(s["text"], lines):
+                dropped["repeat"] += 1
+                continue
+            if t == "text" and not can_text:
+                s["type"] = t = "narration"           # can't draw text: the narrator says it
+            if t == "text" and out and out[-1]["type"] == "text":
+                continue                              # never two cards in a row
+            if t == "narration":
+                if n_narr >= limit:
+                    if not can_text:
+                        continue
+                    s["type"] = "text"                # over the voice budget: show it as text
+                else:
+                    n_narr += 1
+            lines.append(s["text"])
         out.append(s)
+
+    # Open with fire: a Hindi hook first, never a text card. Prefer a line not used
+    # elsewhere; otherwise the hook takes that scene's place (nothing is shown twice).
+    if not out or out[0]["type"] != "hook":
+        hindi = [(k, p) for k, p in cat.items() if _speaks_hindi(p)]
+        if hindi:
+            fresh = [kv for kv in hindi if kv[0] not in used] or hindi
+            pid, _p = max(fresh, key=lambda kv: (kv[1]["strength"], kv[1]["heat"]))
+            out = [s for s in out if not (s["type"] == "dialogue" and s.get("pid") == pid)]
+            out.insert(0, {"act": "opening", "type": "hook", "pid": pid,
+                           "link": "the most explosive line first"})
+    if any(dropped.values()):
+        log(f"Rules: dropped {dropped['repeat']} repeated, {dropped['variety']} over-used-source"
+            f" and {dropped['english']} untranslated English scenes.")
+
     # Within an act, one speaker's passages always play in their original order
     # (never "later sentence, then earlier sentence" from the same interview).
     for act in ACT_KEYS:
         slots = {}
         for i, s in enumerate(out):
-            if s["act"] == act and s["type"] == "dialogue":
+            if s["act"] == act and s["type"] in ("dialogue", "voiceover"):
                 slots.setdefault(cat[s["pid"]]["video_id"], []).append(i)
         for idx in slots.values():
             ordered = sorted((out[i] for i in idx), key=lambda s: cat[s["pid"]]["start"])
@@ -682,7 +804,7 @@ def assign_ids(outline):
     for i, s in enumerate(outline["scenes"], 1):
         s["id"] = f"s{i:02d}"
         s.pop("narration_id", None)
-        if s["type"] == "narration":
+        if s["type"] in ("narration", "voiceover"):
             n += 1
             s["narration_id"] = f"n{n:02d}"
     return outline
@@ -690,7 +812,7 @@ def assign_ids(outline):
 
 def narration_lines(outline):
     return {s["narration_id"]: s["text"] for s in outline["scenes"]
-            if s["type"] == "narration" and s.get("narration_id")}
+            if s["type"] in ("narration", "voiceover") and s.get("narration_id")}
 
 
 # =================================================================== 4. assemble
@@ -739,8 +861,9 @@ class Assembler:
 
     def broll(self, seconds, prefer=(), avoid_vid=None, shot=3.0):
         clips, total, last = [], 0.0, avoid_vid
-        pool = [m for m in self.visuals if m["video_id"] in prefer] + \
-               [m for m in self.visuals if m["video_id"] not in prefer]
+        quiet = sorted(self.visuals, key=lambda m: (m.get("talk", 0) > 0.4, -m["peak"]))
+        pool = [m for m in quiet if m["video_id"] in prefer] + \
+               [m for m in quiet if m["video_id"] not in prefer]
         for m in pool:
             if total >= seconds - 0.3:
                 break
@@ -759,7 +882,7 @@ class Assembler:
             last = m["video_id"]
         return clips
 
-    def lead_in(self, next_p, seconds):
+    def lead_in(self, next_p, seconds, single=False):
         """Visuals for a bridge: the moments just before the next speaker starts (J-cut feel)."""
         if next_p:
             e = next_p["start"] - 0.3
@@ -768,7 +891,7 @@ class Assembler:
                 self.take(next_p["video_id"], s, e)
                 return [self.clip(next_p["video_id"], s, e)]
         prefer = (next_p["video_id"],) if next_p else ()
-        return self.broll(seconds, prefer=prefer)
+        return self.broll(seconds, prefer=prefer, shot=seconds if single else 3.0)
 
     # -- main
     def build(self, outline, narration_seconds, theme):
@@ -780,13 +903,13 @@ class Assembler:
 
         # reserve dialogue footage first so bridges never steal it
         for s in scenes:
-            if s["type"] == "dialogue" and cat.get(s["pid"]):
+            if s["type"] in ("dialogue", "voiceover") and cat.get(s["pid"]):
                 p = cat[s["pid"]]
                 self.take(p["video_id"], p["start"] - 0.2, p["end"] + 0.4)
 
         for i, s in enumerate(scenes):
-            nxt = next((cat.get(x["pid"]) for x in scenes[i + 1:] if x["type"] in ("dialogue", "hook")
-                        and cat.get(x["pid"])), None)
+            nxt = next((cat.get(x["pid"]) for x in scenes[i + 1:]
+                        if x["type"] in ("dialogue", "hook", "voiceover") and cat.get(x["pid"])), None)
             beat = {"scene_id": s["id"], "kind": s["type"], "idea": s.get("link", ""),
                     "narration": "", "clips": [], "said": "", "source": ""}
             if s["type"] in ("hook", "dialogue"):
@@ -800,18 +923,31 @@ class Assembler:
                 beat.update(audio="original", said=text[:400], source=_source_label(p),
                             passage_id=p["id"], strength=p.get("strength", 3),
                             clips=[self.clip(p["video_id"], a, b, text, p["heat"])])
+            elif s["type"] == "voiceover":
+                # English speaker on screen, our Hindi narrator says what they said.
+                p = cat.get(s["pid"])
+                if not p:
+                    continue
+                d = narration_seconds.get(s.get("narration_id"), estimate_speech_seconds(s["text"])) + 0.9
+                a = p["start"] - 0.15
+                beat.update(audio="narration", narration=s["text"], narration_id=s.get("narration_id"),
+                            said=p["text"][:400], source=_source_label(p) + " (EN, retold in Hindi)",
+                            passage_id=p["id"], strength=p.get("strength", 3),
+                            clips=[self.clip(p["video_id"], a, a + d, p["text"], p["heat"])])
             elif s["type"] == "narration":
                 d = narration_seconds.get(s.get("narration_id"), estimate_speech_seconds(s["text"])) + 0.9
                 beat.update(audio="narration", narration=s["text"], narration_id=s.get("narration_id"),
                             clips=self.lead_in(nxt, d))
             elif s["type"] == "text":
-                beat.update(audio="text", narration=s["text"],
-                            seconds=round(clamp(1.8 + len(s["text"]) / 14, 2.8, 6.5), 2))
+                # Text over moving, darkened footage of what comes next - never a frozen frame.
+                secs = round(clamp(1.8 + len(s["text"]) / 14, 2.8, 6.5), 2)
+                beat.update(audio="text", narration=s["text"], seconds=secs,
+                            clips=self.lead_in(nxt, secs, single=True))
             else:
                 prefer = tuple(vcat.get(v) for v in s.get("vids", []) if vcat.get(v))
+                secs = min(s.get("seconds", 12), 10 if s["act"] == "ending" else 15)
                 beat.update(audio="music", clips=self.broll(
-                    s.get("seconds", 12), prefer=prefer,
-                    shot=self.style["acts"][s["act"]]["shot"]))
+                    secs, prefer=prefer, shot=self.style["acts"][s["act"]]["shot"]))
                 if not beat["clips"]:
                     continue
             beats_by_act[s["act"]].append(beat)
@@ -870,7 +1006,7 @@ class Assembler:
                 break
         if total() < self.total * 0.95:
             for b in (b for a in story["acts"] for b in a["beats"] if b["kind"] == "montage"):
-                need = min(25.0 - beat_seconds(b), self.total * 0.95 - total())
+                need = min(15.0 - beat_seconds(b), self.total * 0.95 - total())
                 if need > 2:
                     b["clips"] += self.broll(need, avoid_vid=b["clips"][-1]["video_id"])
         if total() < self.total * 0.85:
@@ -894,6 +1030,6 @@ class Assembler:
 
 
 def beat_seconds(beat):
-    if beat.get("audio") == "text":
+    if beat.get("audio") == "text" and not beat.get("clips"):
         return beat.get("seconds", 3.0)
     return sum(c["end"] - c["start"] for c in beat.get("clips", []))

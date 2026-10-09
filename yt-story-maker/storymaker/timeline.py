@@ -5,8 +5,8 @@ YouTube chapters."""
 import re
 
 # How loud the footage's own audio and the music are, per beat type.
-CLIP_GAIN = {"original": 1.0, "narration": 0.12, "music": 0.16}
-MUSIC_GAIN = {"original": 0.10, "narration": 0.26, "music": 0.9, "card": 0.85}
+CLIP_GAIN = {"original": 1.0, "narration": 0.12, "music": 0.16, "text": 0.22}
+MUSIC_GAIN = {"original": 0.10, "narration": 0.26, "music": 0.9, "card": 0.85, "text": 0.8}
 NARRATION_LEAD = 0.35     # voice starts this long after its beat begins
 NARRATION_TAIL = 0.55     # breathing room after the voice ends
 ACT_FADE = 0.4
@@ -33,7 +33,7 @@ def frames(seconds, fps):
 
 
 # Without a music track the footage's own sound carries montages and bridges.
-CLIP_GAIN_NO_MUSIC = {"original": 1.0, "narration": 0.18, "music": 0.75}
+CLIP_GAIN_NO_MUSIC = {"original": 1.0, "narration": 0.18, "music": 0.75, "text": 0.35}
 TEXT_CARD_FADE = 0.35
 
 
@@ -50,14 +50,15 @@ def build(story, voice, tracks, beat_grids, settings):
         items, mins = [], {}
         for bi, beat in enumerate(act["beats"]):
             audio = beat.get("audio", "music")
-            if audio == "text":
+            if audio == "text" and not beat.get("clips"):
                 items.append({"kind": "card", "beat": bi, "dur": beat.get("seconds", 3.0),
                               "text": beat.get("narration", ""), "mode": "card"})
                 continue
             first = len(items)
             for c in beat.get("clips", []):
                 items.append({"kind": "clip", "beat": bi, "dur": c["end"] - c["start"],
-                              "clip": c, "mode": audio})
+                              "clip": c, "mode": audio,
+                              "overlay": beat.get("narration", "") if audio == "text" else ""})
             if audio == "narration" and beat.get("narration_id") in voice and len(items) > first:
                 mins[bi] = voice[beat["narration_id"]]["duration"] + NARRATION_LEAD + NARRATION_TAIL
         if not items:
@@ -92,6 +93,8 @@ def build(story, voice, tracks, beat_grids, settings):
                     "fade_in": 0.0, "fade_out": 0.0, "heat": c.get("heat", 0),
                     "video_title": c.get("video_title", ""), "channel": c.get("channel", ""),
                 }
+                if it.get("overlay"):
+                    seg["overlay"] = it["overlay"]   # the text fades, the footage keeps moving
                 gain_points.append((t - act_start, t - act_start + durs[i], MUSIC_GAIN[mode]))
             act_segments.append(seg)
             t += durs[i]

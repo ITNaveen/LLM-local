@@ -59,9 +59,12 @@ class FakeLLM:
             return {"relevant": ok, "kind": "news" if ok else "comedy", "reason": "test verdict"}
         if "help a top Hindi documentary editor" in system:
             n = len(re.findall(r"^\d+\. \[", user, flags=re.M))
+            english = "only hears Hindi" in user
             return {"passages": [{"n": i, "use": True, "summary": f"speaker makes point {i}",
                                   "topic": "result" if i <= n // 2 else "reaction",
-                                  "strength": 3 + i % 3, "standalone": True} for i in range(1, n + 1)]}
+                                  "strength": 3 + i % 3, "standalone": True,
+                                  **({"hindi": f"वक्ता ने साफ़ कहा कि यह मुद्दा नंबर {i} बेहद गंभीर है।"}
+                                     if english else {})} for i in range(1, n + 1)]}
         if "The film\nis too short" in system:
             unused = re.findall(r"^(P\d+) \| ([^|]+)\|", user.split("UNUSED PASSAGES")[1], flags=re.M)
             n = len(re.findall(r"^\d+ \| ", user.split("UNUSED PASSAGES")[0], flags=re.M))

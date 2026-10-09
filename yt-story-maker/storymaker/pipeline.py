@@ -151,9 +151,13 @@ def run_job(job, settings, source=None, llm=None):
         outline = read_json(job.path("outline.json"))
         if not outline:
             log("Planning the film scene by scene...")
+            can_text = render.can_draw_text()
+            if not can_text:
+                log("ffmpeg can't draw Hindi text here, so on-screen lines are spoken by the "
+                    "narrator instead (install ffmpeg-full for text cards).")
             outline = editor.plan_story(llm, topic, desc, req.get("theme", "auto"), minutes,
                                         req.get("narration", "light"), mom["passages"],
-                                        mom["videos"], log)
+                                        mom["videos"], log, can_text=can_text)
             write_json(job.path("outline.json"), outline)
         finish(share)
 
@@ -177,7 +181,8 @@ def run_job(job, settings, source=None, llm=None):
             st = editor.Assembler(mom["passages"], mom["videos"], mom["visuals"], style,
                                   minutes * 60, log).build(
                 outline, {k: v["duration"] for k, v in vo.items()},
-                theme if theme in ("epic", "emotional", "documentary", "thriller") else "documentary")
+                theme if theme in ("epic", "emotional", "documentary", "thriller", "sensational")
+                else "sensational")
             write_json(job.path("story.json"), st)
         finish(share)
 
@@ -203,9 +208,13 @@ def run_job(job, settings, source=None, llm=None):
         share, sub = stage("download")
         files, failed = render.download_all(source, tl["segments"], job.path("downloads"), log)
         gone_keys = set()
+        dupes = render.visual_duplicates(tl["segments"], files)
+        if dupes:
+            log(f"Dropping {len(dupes)} shots that repeat footage already shown.")
         for _round in range(3):
             clip_segs = [s for s in tl["segments"] if s["type"] == "clip"]
-            gone = [s for s in clip_segs if not render.locate(files, s)[0]]
+            gone = [s for s in clip_segs if not render.locate(files, s)[0]
+                    or (s["video_id"], round(s["src_start"], 2)) in dupes]
             if len(gone) == len(clip_segs):
                 raise RuntimeError("No footage could be downloaded. " + "; ".join(failed[:2]))
             if gone:
@@ -271,7 +280,7 @@ def apply_review_edits(job, edits, remove=()):
         if sc.get("id") in remove:
             changed = True
             continue
-        if sc.get("id") in edits and sc["type"] in ("narration", "text"):
+        if sc.get("id") in edits and sc["type"] in ("narration", "text", "voiceover"):
             new = editor.clean_text(edits[sc["id"]], 30)
             if new and new != sc["text"]:
                 sc["text"] = new

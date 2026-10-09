@@ -199,3 +199,43 @@ def test_render_holds_last_frame_when_source_is_short(tmp_path):
     render.render_segment(seg, str(src), 0.5, tmp_path / "v.mp4", tmp_path / "a.wav",
                           {"width": 320, "height": 180, "fps": 30}, {"preset": "ultrafast"})
     assert int(probe(tmp_path / "v.mp4")["streams"][0]["nb_frames"]) == 240
+
+
+def test_same_footage_from_two_channels_is_detected(tmp_path):
+    a, b, c = tmp_path / "a.mp4", tmp_path / "b.mp4", tmp_path / "c.mp4"
+    for path, src in ((a, "testsrc2"), (b, "testsrc2"), (c, "testsrc2=s=320x180:r=25:d=6,hflip,vflip,rotate=1.2")):
+        lavfi = src if "=" in src else f"{src}=s=320x180:r=25:d=6"
+        ffmpeg("-f", "lavfi", "-i", lavfi, "-c:v", "libx264", "-preset", "ultrafast", str(path))
+    files = {"x": [{"start": 0, "end": 6, "file": str(a)}],
+             "y": [{"start": 0, "end": 6, "file": str(b)}],     # the same clip, re-aired
+             "z": [{"start": 0, "end": 6, "file": str(c)}]}
+    seg = lambda vid, mode: {"type": "clip", "video_id": vid, "src_start": 1.0, "dur": 2.0,
+                             "mode": mode, "act": "climax", "beat": 0}
+    segs = [seg("x", "music"), seg("y", "music"), seg("z", "music")]
+    assert render.visual_duplicates(segs, files) == {("y", 1.0)}
+    # a person speaking is never dropped as a duplicate
+    assert render.visual_duplicates([seg("x", "music"), seg("y", "original")], files) == set()
+
+
+def test_text_overlay_on_moving_footage(tmp_path):
+    src = tmp_path / "s.mp4"
+    ffmpeg("-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=4", "-f", "lavfi", "-i",
+           "sine=duration=4", "-vf", "geq=lum='16+50*T':cb=128:cr=128", "-c:v", "libx264",
+           "-preset", "ultrafast", "-shortest", str(src))
+    seg = {"frames": 90, "fade_in": 0, "fade_out": 0, "clip_gain": 0.3, "overlay": "सच्चाई सामने आई"}
+    out = tmp_path / "v.mp4"
+    render.render_segment(seg, str(src), 0.0, out, tmp_path / "a.wav",
+                          {"width": 320, "height": 180, "fps": 30}, {"preset": "ultrafast"})
+    assert int(probe(out)["streams"][0]["nb_frames"]) == 90
+    # footage keeps moving under the text (frames differ), unlike the old frozen cards
+    assert _yavg(out, 2.5) - _yavg(out, 0.2) > 30
+
+
+def test_duplicate_check_never_empties_a_narration_line(tmp_path):
+    a = tmp_path / "a.mp4"
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=6", "-c:v", "libx264", "-preset",
+           "ultrafast", str(a))
+    files = {"x": [{"start": 0, "end": 6, "file": str(a)}], "y": [{"start": 0, "end": 6, "file": str(a)}]}
+    segs = [{"type": "clip", "video_id": "x", "src_start": 1.0, "dur": 2.0, "mode": "music", "act": "a", "beat": 0},
+            {"type": "clip", "video_id": "y", "src_start": 1.0, "dur": 2.0, "mode": "narration", "act": "a", "beat": 1}]
+    assert render.visual_duplicates(segs, files) == set()      # it's the only picture under the line

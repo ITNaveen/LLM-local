@@ -75,6 +75,58 @@ def locate(files, seg, strict=False):
     return None, 0.0
 
 
+def frame_hash(path, t):
+    """64-bit difference hash of one frame (None for dark/flat frames that would all match)."""
+    import subprocess
+    try:
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0, t):.2f}", "-i", str(path),
+                              "-frames:v", "1", "-vf", "scale=9:8,format=gray", "-f", "rawvideo", "-"],
+                             capture_output=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(raw) < 72:
+        return None
+    px = list(raw[:72])
+    mean = sum(px) / 72
+    if mean < 18 or max(px) - min(px) < 25:
+        return None
+    bits = 0
+    for r in range(8):
+        for c in range(8):
+            bits = (bits << 1) | (px[r * 9 + c] > px[r * 9 + c + 1])
+    return bits
+
+
+def visual_duplicates(segments, files, max_distance=6):
+    """Shots (other than people speaking) that show the same picture as an earlier shot,
+    e.g. the same CCTV clip re-aired by two channels. Returns {(video_id, src_start)}."""
+    seen, dupes = [], set()
+    per_beat = {}
+    for seg in segments:
+        if seg["type"] == "clip":
+            per_beat[(seg["act"], seg["beat"])] = per_beat.get((seg["act"], seg["beat"]), 0) + 1
+    for seg in segments:
+        if seg["type"] != "clip":
+            continue
+        src, offset = locate(files, seg)
+        if not src:
+            continue
+        h = frame_hash(src, offset + seg["dur"] / 2)
+        if h is None:
+            continue
+        key = (seg["act"], seg["beat"])
+        # Only drop a shot when something remains: montage shots, or extra pictures under a
+        # narration/text line - never the only picture under a line, never a speaker.
+        removable = seg["mode"] == "music" or (seg["mode"] in ("narration", "text")
+                                               and per_beat.get(key, 0) > 1)
+        if removable and any(bin(h ^ o).count("1") <= max_distance for o in seen):
+            dupes.add((seg["video_id"], round(seg["src_start"], 2)))
+            per_beat[key] -= 1
+            continue
+        seen.append(h)
+    return dupes
+
+
 def merge_files(files, more):
     for vid, lst in more.items():
         files.setdefault(vid, []).extend(lst)
@@ -116,8 +168,18 @@ def render_segment(seg, src, offset, out_v, out_a, tl, settings):
         fades += f",fade=t=in:st=0:d={seg['fade_in']}"
     if seg["fade_out"]:
         fades += f",fade=t=out:st={max(0, dur - seg['fade_out']):.3f}:d={seg['fade_out']}"
+    overlay = ""
+    if seg.get("overlay"):       # on-screen text over darkened, still-moving footage
+        overlay = ",eq=brightness=-0.28:saturation=0.75,gblur=sigma=3"
+        if can_draw_text():
+            ass = Path(out_v).with_suffix(".ass")
+            ass.write_text(ass_header(W, H, int(H * 0.075), 0, outline=int(H * 0.018), box=True) +
+                           f"Dialogue: 0,{_ass_ts(0)},{_ass_ts(dur)},Default,,{int(W * 0.1)},{int(W * 0.1)},0,,"
+                           f"{{\\an5\\q0\\fad(300,300)\\fscx100\\fscy100\\t(0,{int(dur * 1000)},\\fscx104\\fscy104)}}"
+                           f"{_ass_escape(seg['overlay'])}\n", encoding="utf-8")
+            overlay += f",{ass_filter(ass)}"
     vchain += (f"[v0]setsar=1,fps={fps},eq=contrast=1.05:saturation=1.08,"
-               f"tpad=stop_mode=clone:stop_duration={max(4.0, dur + 1):.1f}{fades},format=yuv420p[v]")
+               f"tpad=stop_mode=clone:stop_duration={max(4.0, dur + 1):.1f}{overlay}{fades},format=yuv420p[v]")
     gain = seg["clip_gain"]
     afades = f"afade=t=in:d={max(0.03, seg['fade_in'])}"
     afades += f",afade=t=out:st={max(0, dur - max(0.06, seg['fade_out'])):.3f}:d={max(0.06, seg['fade_out'])}"
@@ -153,15 +215,16 @@ def ass_filter(path):
     return f"ass='{_filter_path(path)}':fontsdir='{_filter_path(FONTS_DIR)}':shaping=complex"
 
 
-def ass_header(W, H, size, margin_v, outline=3, primary="&H00FFFFFF", bold=-1):
+def ass_header(W, H, size, margin_v, outline=3, primary="&H00FFFFFF", bold=-1, box=False):
     return (
         "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n"
         f"PlayResX: {W}\nPlayResY: {H}\n\n[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{FONT_NAME},{size},{primary},&H000000FF,&H00000000,&H96000000,"
-        f"{bold},0,0,0,100,100,0,0,1,{outline},1,2,60,60,{margin_v},1\n\n"
+        f"Style: Default,{FONT_NAME},{size},{primary},&H000000FF,"
+        f"{'&H50000000' if box else '&H00000000'},&H96000000,"
+        f"{bold},0,0,0,100,100,0,0,{3 if box else 1},{outline},{0 if box else 1},2,60,60,{margin_v},1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
 
 

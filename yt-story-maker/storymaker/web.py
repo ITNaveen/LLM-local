@@ -104,7 +104,7 @@ def create_job():
         "topic": topic[:200],
         "description": (data.get("description") or "").strip()[:3000],
         "minutes": minutes,
-        "theme": data.get("theme") if data.get("theme") in style_mod.THEMES else "auto",
+        "theme": data.get("theme") if data.get("theme") in style_mod.THEMES else "sensational",
         "narration": data.get("narration") if data.get("narration") in ("none", "light", "medium") else "light",
         "voice": data.get("voice") if data.get("voice") in pipeline.VOICES else "male",
         "style": data.get("style") or "cinematic",
