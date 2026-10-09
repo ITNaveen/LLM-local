@@ -297,7 +297,7 @@ function updateMeetingHeader() {
   const m = S.live.meeting;
   const inp = $("#meetingName");
   if (document.activeElement !== inp) inp.value = m ? (m.name || "") : (inp.dataset.pending || "");
-  inp.placeholder = m ? `Name this meeting (started ${fmtDate(m.started, { hour: "2-digit", minute: "2-digit" })})…` : "Name the next meeting (optional)…";
+  inp.placeholder = m ? "Name this meeting…" : "Name the next meeting (optional)…";
   $("#meetingWhen").textContent = m ? fmtDate(m.started, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
 }
 

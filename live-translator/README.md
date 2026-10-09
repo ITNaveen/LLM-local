@@ -86,7 +86,10 @@ at any time (the folder is renamed). Meetings stay until you delete them. An emp
 * **Speech model**: *large-v3-turbo* (default) is fast and very good. *large-v3* is slightly more
   accurate but slower - try it if your Mac keeps up (the self-test tells you).
 * **Translation model**: *Gemma 3 12B* (default, best). *Gemma 3 4B* is ~3× faster with slightly
-  lower quality. Any other Ollama model can be chosen too.
+  lower quality and is installed as the automatic **fast fallback**: if 12B is too slow on your Mac at
+  that moment (memory full, other apps using Ollama, model does not fit on the GPU, no answer within
+  25 s), the app switches to 4B by itself, tells you, and the header shows *Translator (fast)*.
+  You can turn this off or pick another fallback in Settings. Any other Ollama model can be chosen too.
 
 ## 4. How it works (why it is fast *and* accurate)
 
@@ -115,6 +118,8 @@ run the self-test (below).
 ```bash
 .venv/bin/python -m livetranslator selftest      # accuracy + speed on this Mac (~5 min)
 .venv/bin/python -m livetranslator devices       # list microphones
+~/Documents/LiveTranslator/toggle.sh mictest      # which microphones really hear sound
+~/Documents/LiveTranslator/toggle.sh doctor       # translation health check with timings
 ```
 The self-test speaks German test sentences with the Mac's German voice ("Anna" - if missing:
 System Settings → Accessibility → Spoken Content → System Voice → Manage Voices → German),
@@ -125,6 +130,7 @@ rate and how long German and English take to appear.
 | --- | --- |
 | Won't start | Look at `~/LiveTranslator/logs/app.log`; `~/Documents/LiveTranslator/toggle.sh status` shows whether it runs. |
 | No sound / "No sound from '…' - checking the microphones" | Nothing to do: the app re-opens the microphone, tries the Mac's other inputs (built-in mic first) and, if macOS blocks all of them, switches to **this browser's microphone** by itself (click *Allow* if the browser asks). To see which inputs really hear sound: ⚙ Settings → **Test microphones**, or in Terminal `~/Documents/LiveTranslator/toggle.sh mictest`. To use the Mac microphone directly again: System Settings → Privacy & Security → Microphone → Terminal on, quit Terminal (⌘Q), start again. |
+| German appears, English does not / is late | Lines now show *translating… N s* and the reason. The app switches to the fast model automatically when the big one is too slow. Run `~/Documents/LiveTranslator/toggle.sh doctor` - it tests Ollama and both models and prints timings (paste it when asking for help). Close apps that use a lot of memory; if you also run LocalLLM with a local model, stop it during meetings. |
 | *Translator* pill is red | Start the **Ollama** app. If it says the model is missing: ⚙ Settings → Download model. German is still shown and saved; missing translations are filled in automatically when Ollama is back. |
 | *Speech* pill is red | First start needs internet to download the speech model. Check the log: `~/LiveTranslator/logs/server.log`. |
 | Lines too slow | Check the self-test numbers. Choose *Gemma 3 4B* in Settings for faster translation. |

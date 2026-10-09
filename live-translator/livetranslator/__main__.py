@@ -119,8 +119,8 @@ def cmd_micperm(_a) -> int:
 
     st = mic_permission_status()
     if st == "not_determined":
-        print("• macOS will ask whether Terminal may use the microphone - click Allow.")
-        st = request_mic_permission(timeout=90)
+        print("• macOS will ask whether Terminal may use the microphone - click Allow (waiting up to 30 s).")
+        st = request_mic_permission(timeout=30)
     if st == "authorized":
         print("✓ Microphone allowed")
         return 0
