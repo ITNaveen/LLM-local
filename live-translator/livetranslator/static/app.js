@@ -201,6 +201,7 @@ function setPartial(text) {
   const p = $("#partial");
   const listening = S.status && S.status.state === "listening";
   $(".de", p).textContent = text || "";
+  if (!text) $(".en-prev", p).textContent = "";
   p.hidden = !listening || !!S.view;
   if (text) scrollToEnd();
 }
@@ -342,6 +343,9 @@ function onEvent(ev) {
     case "line": ev.line.lat = ev.lat; addLiveLine(ev.line); setPartial(""); break;
     case "tr": onTr(ev); break;
     case "partial": setPartial(ev.text); break;
+    case "partial_en":
+      if ($("#partial .de").textContent) { $("#partial .en-prev").textContent = ev.text; scrollToEnd(); }
+      break;
     case "level": updateMeter(ev); break;
     case "notice": toast(ev.level, ev.text); break;
     case "browser_audio_needed": if (!BA.ctx) startBrowserAudio("mic", true); break;

@@ -47,6 +47,8 @@ _SUSPICIOUS = [
 # A line consisting only of one of these is a sound description, not speech.
 _EXACT_FAKE = {"musik", "applaus", "lachen", "stille", "untertitel", "music", "applause", "silence", "you", "ähm", "äh", "hm", "hmm"}
 
+# a line that is only hesitation sounds ("Uuuuhh.", "Ähm, äh…", "Hmm") carries nothing to translate
+_FILLER_RE = re.compile(r"^(?:(?:u+h+|ä+h*m*|e+h*m*|h+m+|m+h+|a+h+|o+h+)[\s,.!?…-]*)+$", re.I)
 _TAG_RE = re.compile(r"(\[[^\]]{0,40}\]|\((?:musik|applaus|lachen|lacht|gelächter|husten|räuspern|seufzt|stille|unverständlich|music|laughter|applause|silence)[^)]{0,20}\)|\*[^*]{0,30}\*|♪+|♫+)", re.I)
 _WS_RE = re.compile(r"\s+")
 
@@ -116,7 +118,7 @@ def clean_transcript(
             if not t:
                 return ""
             n = _norm(t)
-    if n in _EXACT_FAKE:
+    if n in _EXACT_FAKE or _FILLER_RE.match(n):
         return ""
     weak = no_speech_prob > 0.5 or avg_logprob < -0.9
     if n in _SUSPICIOUS and weak:

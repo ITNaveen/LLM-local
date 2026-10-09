@@ -59,7 +59,7 @@ RECOMMENDED_LLMS = [
     {"name": "gemma3:12b", "label": "Gemma 3 12B - higher quality, needs ~10 GB free memory"},
     {"name": "qwen2.5:14b", "label": "Qwen 2.5 14B - alternative, needs ~11 GB free memory"},
 ]
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 SENSITIVITY = {
     # speech-probability thresholds for the voice detector
@@ -76,7 +76,7 @@ class Settings:
     input_device: str = ""               # sounddevice name; "" = system default
     sensitivity: str = "normal"          # key of SENSITIVITY
     pause_ms: int = 500                  # silence that ends a line
-    max_line_s: float = 14.0             # long monologues are split around here
+    max_line_s: float = 10.0             # long monologues are split around here (English comes sooner)
     live_preview: bool = True            # grey German text while someone is speaking
     # speech recognition
     asr_backend: str = "auto"            # auto | mlx | faster
@@ -156,6 +156,11 @@ def migrate(d: dict) -> dict:
         if int(d.get("context_lines") or 8) > 8:
             d["context_lines"] = 8
         d["settings_version"] = 2
+    if int(d.get("settings_version") or 1) < 3:
+        # 1.2: long monologues are cut at ~10 s instead of ~14 s, so their English comes sooner
+        if float(d.get("max_line_s") or 14.0) >= 14.0:
+            d["max_line_s"] = 10.0
+        d["settings_version"] = 3
     return d
 
 

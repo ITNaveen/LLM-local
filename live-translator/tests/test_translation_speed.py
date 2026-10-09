@@ -7,6 +7,7 @@ and checks that every line still gets its English, by switching to the fast mode
 import threading
 import time
 
+import numpy as np
 import pytest
 from fake_ollama import FakeOllama
 
@@ -312,4 +313,50 @@ def test_failed_lines_are_not_translated_twice(tmp_path, meeting_wav):
         assert all(ln.ok and ln.en for ln in m.lines)
         oks = [e for e in events if e["type"] == "tr" and e.get("final") and e.get("ok")]
         assert len(oks) == len({e["id"] for e in oks}), "a line was translated successfully twice"
+        pipe.shutdown()
+
+
+def test_settings_from_1_2_get_the_shorter_line_limit(tmp_path):
+    import json
+
+    from livetranslator.config import SettingsStore as SS
+
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"settings_version": 2, "llm_model": "gemma3:12b", "max_line_s": 14.0}))
+    s = SS(p).settings
+    assert s.max_line_s == 10.0 and s.llm_model == "gemma3:12b"     # a deliberate 12B choice is kept
+    p.write_text(json.dumps({"settings_version": 2, "max_line_s": 8.0}))
+    assert SS(p).settings.max_line_s == 8.0                          # a user's own value is kept
+
+
+def test_english_preview_while_a_long_sentence_is_spoken(tmp_path):
+    """Long sentence: grey English appears before the speaker pauses, then the real line replaces it."""
+    from livetranslator.asr import EchoASR
+
+    long_de = sim.SENTENCES[5][0]
+    clip = np.concatenate([sim.synthesize(sim.SENTENCES[1][0], 0), sim.synthesize(sim.SENTENCES[5][0], 0)])
+    audio, _ = sim.make_meeting([clip], sim.SCENARIOS["clean"])
+    wav = tmp_path / "long.wav"
+    write_wav(str(wav), audio)
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005) as fo:
+        cfg = SettingsStore(tmp_path / "s.json")
+        cfg.update({"ollama_url": fo.url, "llm_model": "gemma3:4b", "live_preview": True, "max_line_s": 20})
+        events = []
+        pipe = Pipeline(cfg, MeetingStore(tmp_path / "M"), lambda e: events.append({**e, "_t": time.monotonic()}),
+                        asr_factory=lambda s: EchoASR(long_de, delay=0.1))
+        assert wait_for(lambda: pipe.asr_state["status"] == "ready" and pipe.llm_state.get("loaded"), 30)
+        done = threading.Event()
+        pipe.start(name="t", source=FileSource(str(wav), pipe.push_audio, speed=1.0, on_end=done.set))
+        assert done.wait(60)
+        pipe.stop(wait=True)
+        prev = [e for e in events if e["type"] == "partial_en"]
+        lines = [e for e in events if e["type"] == "line"]
+        assert prev, "no English preview during the long sentence"
+        assert prev[0]["text"] == sim.SENTENCES[5][1]
+        assert prev[0]["_t"] < lines[0]["_t"], "the preview must come before the speaker pauses"
+        finals = [e for e in events if e["type"] == "tr" and e.get("final")]
+        assert finals and finals[0]["ok"]
+        # previews are never kept as conversation context
+        assert all(d != long_de or e for d, e in pipe.translator.history)
+        assert len(pipe.translator.history) <= len(finals)
         pipe.shutdown()

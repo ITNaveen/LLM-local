@@ -53,3 +53,10 @@ def test_build_prompt():
     assert p.startswith("Müller, SAP") and "Das Angebot ist fertig" in p
     long_prev = "wort " * 200
     assert len(build_prompt(["A"], long_prev)) <= 360
+
+
+def test_filler_only_lines_are_dropped_real_words_kept():
+    for t in ["Uuuuhh.", "Ähm, äh…", "Hmm.", "Mhh", "Ah.", "Oh!", "Ehm"]:
+        assert clean_transcript(t) == "", t
+    for t in ["Um 10 Uhr.", "Uhr.", "Ah, okay.", "Aha.", "Ach so.", "Ja.", "Ähm, das Budget ist fertig."]:
+        assert clean_transcript(t) == t, t

@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen
 
+import numpy as np
 import pytest
 
 from livetranslator import simulate as sim
@@ -275,6 +276,48 @@ def test_slow_translator_is_visible_and_recovers(tmp_path, meeting_wav):
                 timeout=60000)
             page.screenshot(path=str(SHOTS / "08-slow-translator.png"))
             assert "fast model" in page.get_attribute("#llmPill", "title")
+            assert not errors, errors
+            browser.close()
+    finally:
+        proc.terminate()
+        proc.wait(10)
+
+
+def test_english_preview_is_shown_while_speaking(tmp_path):
+    clip = np.concatenate([sim.synthesize(sim.SENTENCES[1][0], 0), sim.synthesize(sim.SENTENCES[5][0], 0)])
+    audio, _ = sim.make_meeting([clip, clip], sim.SCENARIOS["desk"], pauses_s=[1.5])
+    from scipy.signal import resample_poly
+    wav = tmp_path / "long.wav"
+    write_wav(str(wav), resample_poly(audio, 3, 1).astype("float32"), 48000)
+    port = free_port()
+    proc = subprocess.Popen([sys.executable, str(ROOT / "tools" / "demo_server.py"), "--port", str(port),
+                             "--home", str(tmp_path / "h"), "--preview"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(100):
+            try:
+                urlopen(url + "/api/info", timeout=1)
+                break
+            except Exception:  # noqa: BLE001
+                time.sleep(0.2)
+        with pw.sync_playwright() as p:
+            kw = {"executable_path": CHROME} if Path(CHROME).exists() else {}
+            browser = p.chromium.launch(args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+                                              f"--use-file-for-fake-audio-capture={wav}"], **kw)
+            page = browser.new_page(viewport={"width": 1280, "height": 820})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(url)
+            page.wait_for_selector("#asrPill.ok")
+            page.wait_for_selector("#llmPill.ok", timeout=20000)
+            page.click("#startBtn")
+            page.wait_for_selector("#browserAudio:not([hidden])")
+            page.click("#baMic")
+            page.wait_for_function("document.querySelector('#partial .en-prev').textContent.length > 10", timeout=60000)
+            page.screenshot(path=str(SHOTS / "09-english-preview.png"))
+            assert "test team" in page.inner_text("#partial .en-prev")
+            page.wait_for_function("document.querySelectorAll('#liveFeed .line').length >= 1", timeout=60000)
             assert not errors, errors
             browser.close()
     finally:

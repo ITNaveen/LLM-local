@@ -206,6 +206,24 @@ class ScriptedASR(BaseASR):
         return ASRResult(f"Satz mit {len(audio) / 16000:.1f} Sekunden.", elapsed=self.delay)
 
 
+class EchoASR(BaseASR):
+    """Test double: every call (live preview or final) returns the same text."""
+
+    name = "echo"
+
+    def __init__(self, text: str, delay: float = 0.0):
+        self.text = text
+        self.delay = delay
+
+    def warmup(self) -> float:
+        return 0.0
+
+    def transcribe(self, audio: np.ndarray, prompt: str | None = None) -> ASRResult:
+        if self.delay:
+            time.sleep(self.delay)
+        return ASRResult(self.text, elapsed=self.delay)
+
+
 def _from_segments(segs: list[dict], text: str | None, elapsed: float) -> ASRResult:
     if not segs:
         return ASRResult((text or "").strip(), elapsed=elapsed, no_speech_prob=1.0 if not text else 0.0)

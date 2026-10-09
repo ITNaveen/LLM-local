@@ -182,6 +182,8 @@ body.hide-de .line:not(.partial) .de { display: none; }
 .mic-row.bad .name { color: var(--muted); }
 .mic-row .why { grid-column: 1 / -1; color: var(--muted); font-size: 12px; margin-top: -4px; }
 .partial .src { font-style: normal; margin-top: 2px; }
+.partial .en-prev { color: var(--partial); font-size: calc(20px * var(--scale)); line-height: 1.38; margin-top: 2px; }
+.partial .en-prev:empty { display: none; }
 .pull { display: flex; align-items: center; gap: 10px; margin: 6px 0; flex-wrap: wrap; }
 .pull[hidden] { display: none; }
 .pull progress { flex: 1; min-width: 120px; }

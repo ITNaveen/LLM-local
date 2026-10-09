@@ -91,6 +91,8 @@ class Pipeline:
         self._asr_q: queue.Queue = queue.Queue()
         self._tr_q: queue.Queue = queue.Queue()
         self._partial_slot = None
+        self._partial_tr_slot = None        # (session, line start, German so far) for the English preview
+        self._partial_en_last = (None, 0.0, "")   # (line start, time, German) of the last preview
         self._partial_lock = threading.Lock()
         self._partial_ema = 0.5
         self._cur_seg_start = None
@@ -646,6 +648,29 @@ class Pipeline:
         if sess is self.session and self._cur_seg_start == start and text:
             self.partial = {"text": text, "start": start}
             self.publish({"type": "partial", "text": text, "start": start})
+            self._maybe_preview_english(sess, start, text, len(audio) / 16000)
+
+    # English for a line that is still being spoken (long sentences): shown in grey, replaced by
+    # the real translation when the speaker pauses. Only when the translator has nothing else to do.
+    PREVIEW_EN_MIN_S = 4.0
+    PREVIEW_EN_EVERY_S = 2.5
+
+    def _maybe_preview_english(self, sess: Session, start: float, text: str, seconds: float) -> None:
+        if seconds < self.PREVIEW_EN_MIN_S or not self.llm_state.get("loaded") or self.llm_state.get("stuck"):
+            return
+        last_start, last_t, last_text = self._partial_en_last
+        now = time.monotonic()
+        if last_start == start and (now - last_t < self.PREVIEW_EN_EVERY_S or len(text) - len(last_text) < 12):
+            return
+        self._partial_en_last = (start, now, text)
+        self._partial_tr_slot = (sess, start, text)
+
+    def _run_preview_english(self, sess: Session, start: float, text: str) -> None:
+        if sess is not self.session or self._cur_seg_start != start:
+            return      # the line is finished already: its real translation is on the way
+        res = self.translator.translate(text, record=False, first_token_timeout=8.0, max_gen_s=6.0)
+        if res.ok and res.text and sess is self.session and self._cur_seg_start == start:
+            self.publish({"type": "partial_en", "text": res.text, "start": start})
 
     def _run_final(self, sess: Session, seg: Segment) -> None:
         if self.asr is None:
@@ -700,6 +725,12 @@ class Pipeline:
             try:
                 job = self._tr_q.get(timeout=0.2)
             except queue.Empty:
+                pj, self._partial_tr_slot = self._partial_tr_slot, None
+                if pj is not None:
+                    try:
+                        self._run_preview_english(*pj)
+                    except Exception:  # noqa: BLE001
+                        log.exception("English preview failed")
                 continue
             if job[0] == "barrier":
                 job[1].set()
