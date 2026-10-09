@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import music
 from .config import FONT_NAME, FONTS_DIR
-from .util import PipelineError, ffmpeg, ffmpeg_has_filter, probe, srt_ts  # noqa: F401
+from .util import PipelineError, ffmpeg, ffmpeg_has_filter, has_video, probe, srt_ts  # noqa: F401
 
 AUDIO_SR = 48000
 
@@ -52,6 +52,8 @@ def download_all(source, segments, out_dir, log, workers=3):
             try:
                 r, got = fut.result()
                 entry = {**r, **got} if isinstance(got, dict) else {**r, "file": got}
+                if not has_video(entry["file"]):
+                    raise PipelineError(f"{r['video_id']}: downloaded file has no picture")
                 files.setdefault(r["video_id"], []).append(entry)
             except Exception as e:  # noqa: BLE001 - drop clips from this section later
                 failed.append(str(e)[:200])
@@ -155,6 +157,8 @@ def render_segment(seg, src, offset, out_v, out_a, tl, settings):
     n, dur = seg["frames"], seg["frames"] / fps
     samples = int(round(dur * AUDIO_SR))
     w, h, has_audio = _stream_info(src)
+    if not w:   # no picture at all (should have been caught at download): never fail the film
+        src_inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={fps}:d={dur + 1:.2f}"]
     aspect = w / h if h else 16 / 9
     if abs(aspect - W / H) < 0.04:
         vchain = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}[v0];"
@@ -188,7 +192,15 @@ def render_segment(seg, src, offset, out_v, out_a, tl, settings):
               + ("loudnorm=I=-18:TP=-3:LRA=9," if has_audio else "")
               + f"aresample={AUDIO_SR},volume={gain:.3f},{afades},apad,atrim=end_sample={samples}[a]")
     args = ["-ss", f"{max(0, offset):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", src]
-    if not has_audio:
+    if not w:
+        # input 0 = black picture, input 1 = the file's sound
+        args = src_inputs + ["-ss", f"{max(0, offset):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", src]
+        a_in = "[1:a]" if has_audio else None
+        if not has_audio:
+            args += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_SR}:cl=stereo"]
+            a_in = "[2:a]"
+        achain = achain.replace(achain[:achain.index("aresample")], a_in, 1)
+    elif not has_audio:
         args += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_SR}:cl=stereo"]
     ffmpeg(*args, "-filter_complex", vchain + ";" + achain,
            "-map", "[v]", "-frames:v", str(n), "-an", "-c:v", "libx264",

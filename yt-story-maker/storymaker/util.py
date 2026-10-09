@@ -42,6 +42,15 @@ def media_duration(path):
         return max(durations) if durations else 0.0
 
 
+def has_video(path):
+    """True if the file exists and contains a picture (not just sound)."""
+    try:
+        return any(st.get("codec_type") == "video" and st.get("codec_name") not in ("mjpeg", "png")
+                   for st in probe(path).get("streams", []))
+    except (PipelineError, ValueError, OSError):
+        return False
+
+
 def has_tool(name):
     return shutil.which(name) is not None
 

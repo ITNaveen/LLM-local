@@ -88,6 +88,8 @@ def language_role(video):
     spoken = (video.get("spoken_lang") or "").lower()
     title = video.get("title") or ""
     has_text = bool(video.get("captions")) and (video.get("caption_lang") or "") in SPEECH_LANGS
+    if video.get("downloadable") is False:
+        return "reject", "YouTube won't serve this video (live / members-only / blocked)"
     if spoken in INDIAN_REGIONAL:
         return "reject", f"spoken in a regional language ({spoken})"
     if REGIONAL_SCRIPT.search(title) and spoken not in SPEECH_LANGS:
@@ -246,8 +248,9 @@ For EVERY passage return one item:
 
 HINDI_FIELD = """,
   "hindi": "this passage is in English and our audience only hears Hindi: write the Hindi
-            voice-over (Devanagari, 1-2 sentences, about 2 words per second of the passage,
-            max 45 words) that tells the viewer what is said here,
+            voice-over (Devanagari) that retells EVERYTHING important this person says, as
+            long as the passage itself: about 2 Hindi words per second of the passage (a 30 s
+            passage needs about 60 words, max 80),
             naming the speaker (e.g. 'केंद्रीय मंत्री किरेन रिजिजू ने साफ़ कहा...'). Faithful to
             what is said: no invented facts, numbers or quotes"""
 
@@ -286,7 +289,7 @@ def annotate(llm, topic, description, video, passages, log):
                      strength=strength, standalone=item.get("standalone") not in (False, "false"),
                      ai=True)
             if p.get("lang", "hi") not in DIALOGUE_LANGS:
-                p["hindi"] = clean_text(item.get("hindi"), 45)
+                p["hindi"] = clean_text(item.get("hindi"), 80)
         else:
             hits = sum(1 for w in topic_words if w in p["text"].lower())
             p.update(use=hits > 0 or p["heat"] > 0.5, summary=p["text"][:100],
@@ -440,7 +443,7 @@ def _draft_lines(scenes, cat, vcat):
 
 
 def _extend(llm, topic, outline, cat, vcat, minutes, log):
-    for _round in range(2):
+    for _round in range(3):
         have = estimate_seconds(outline["scenes"], cat)
         if have >= minutes * 60 * 0.85:
             return outline

@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 from .config import CACHE_DIR, FONT_FILE
-from .util import PipelineError, ffmpeg, read_json, write_json
+from .util import PipelineError, ffmpeg, has_video, read_json, write_json
 
 CAPTION_LANG_PRIORITY = ["hi", "hi-IN", "hi-orig", "en-orig", "en", "en-IN", "en-US", "en-GB"]
 
@@ -196,6 +196,7 @@ class YouTubeSource:
             "chapters": [{"start": c["start_time"], "end": c["end_time"], "title": c["title"]}
                          for c in (info.get("chapters") or [])],
             "heatmap": heatmap,
+            "downloadable": bool(info.get("formats")),
             "captions": captions,
             "caption_lang": lang,
             "spoken_lang": spoken_language(info) or (lang if track and track["kind"] == "automatic_captions" else ""),
@@ -214,7 +215,11 @@ class YouTubeSource:
         out_base = Path(out_base)
 
         def found(base):
-            return [p for p in glob.glob(str(base) + ".*") if p.endswith((".mp4", ".mkv", ".webm"))]
+            # Only finished files with a picture: a failed merge can leave an audio-only
+            # '.f251.webm' behind, which must never be used as footage.
+            files = [p for p in glob.glob(str(base) + ".*") if p.endswith((".mp4", ".mkv", ".webm"))]
+            files.sort(key=lambda p: (".f" in Path(p).name[len(Path(str(base)).name):], p))
+            return [p for p in files if has_video(p)]
 
         def clean(base):
             for p in glob.glob(str(base) + ".*"):
@@ -227,7 +232,7 @@ class YouTubeSource:
             return self._full_result(video_id, found(full_base)[0])
         url = f"https://www.youtube.com/watch?v={video_id}"
         formats = [f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
-                   "b[height<=720][ext=mp4]/b[height<=720]/18/b"]   # plain single-file fallback
+                   "b[height<=720][ext=mp4][vcodec!=none]/b[height<=720][vcodec!=none]/18"]
         errors = []
         for fmt in formats:
             try:
@@ -240,6 +245,8 @@ class YouTubeSource:
                     return found(out_base)[0]
             except Exception as e:  # noqa: BLE001 - try the next way
                 errors.append(str(e)[-120:])
+            else:
+                errors.append("downloaded file had no picture")
             clean(out_base)
         # Last resort: the whole video (only if it is not too long), cut locally later.
         duration = float((read_json(self.details_dir / f"{video_id}.json") or {}).get("duration") or 0)
@@ -247,7 +254,7 @@ class YouTubeSource:
             self.log(f"  section download refused for {video_id}; fetching the whole video instead")
             try:
                 with yt_dlp.YoutubeDL(self._opts(
-                        format="b[height<=720][ext=mp4]/bv*[height<=720]+ba/b[height<=720]/b",
+                        format="b[height<=720][ext=mp4][vcodec!=none]/bv*[height<=720]+ba/b[vcodec!=none]",
                         merge_output_format="mp4",
                         outtmpl={"default": str(full_base) + ".%(ext)s"})) as ydl:
                     ydl.download([url])

@@ -182,13 +182,16 @@ def test_locate_prefers_full_cover_then_start_cover():
 
 
 def test_download_all_accepts_whole_video_fallback(tmp_path):
+    full = tmp_path / "full.mp4"
+    ffmpeg("-f", "lavfi", "-i", "testsrc2=s=160x90:r=10:d=2", "-c:v", "libx264", str(full))
+
     class WholeVideo:
         def download_section(self, video_id, start, end, out_base):
-            return {"file": "full.mp4", "start": 0.0, "end": 300.0}
+            return {"file": str(full), "start": 0.0, "end": 300.0}
     segs = [{"type": "clip", "video_id": "v", "src_start": 100.0, "dur": 4.0}]
     files, failed = render.download_all(WholeVideo(), segs, tmp_path, lambda m: None)
     assert not failed
-    assert render.locate(files, segs[0], strict=True) == ("full.mp4", 100.0)
+    assert render.locate(files, segs[0], strict=True) == (str(full), 100.0)
 
 
 def test_render_holds_last_frame_when_source_is_short(tmp_path):
@@ -239,3 +242,31 @@ def test_duplicate_check_never_empties_a_narration_line(tmp_path):
     segs = [{"type": "clip", "video_id": "x", "src_start": 1.0, "dur": 2.0, "mode": "music", "act": "a", "beat": 0},
             {"type": "clip", "video_id": "y", "src_start": 1.0, "dur": 2.0, "mode": "narration", "act": "a", "beat": 1}]
     assert render.visual_duplicates(segs, files) == set()      # it's the only picture under the line
+
+
+def _audio_only(path, seconds=4):
+    ffmpeg("-f", "lavfi", "-i", f"sine=frequency=500:duration={seconds}", "-c:a", "libopus", str(path))
+
+
+def test_audio_only_download_is_rejected(tmp_path):
+    from storymaker.util import has_video
+    audio = tmp_path / "x.f251.webm"            # what a failed merge leaves behind
+    _audio_only(audio)
+    assert not has_video(audio)
+
+    class AudioOnly:
+        def download_section(self, video_id, start, end, out_base):
+            return str(audio)
+    segs = [{"type": "clip", "video_id": "v", "src_start": 1.0, "dur": 2.0}]
+    files, failed = render.download_all(AudioOnly(), segs, tmp_path, lambda m: None)
+    assert files == {} and "no picture" in failed[0]
+
+
+def test_render_never_crashes_on_a_file_without_picture(tmp_path):
+    audio = tmp_path / "a.webm"
+    _audio_only(audio)
+    seg = {"frames": 60, "fade_in": 0, "fade_out": 0, "clip_gain": 0.75}
+    render.render_segment(seg, str(audio), 0.5, tmp_path / "v.mp4", tmp_path / "a.wav",
+                          {"width": 320, "height": 180, "fps": 30}, {"preset": "ultrafast"})
+    assert int(probe(tmp_path / "v.mp4")["streams"][0]["nb_frames"]) == 60
+    assert media_duration(tmp_path / "a.wav") == pytest.approx(2.0, abs=0.001)

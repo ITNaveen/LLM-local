@@ -272,3 +272,8 @@ def test_timeline_with_text_cards_and_no_music(material, settings):
 def test_numbers_from_ai_text():
     assert [editor._num(x) for x in (7, "7/10", "score 8 of 10", "P12", None, "x")] == \
         [7, 7, 8, 12, None, None]
+
+
+def test_undownloadable_videos_are_rejected():
+    v = {"spoken_lang": "en", "title": "LIVE", "captions": [1], "caption_lang": "en", "downloadable": False}
+    assert editor.language_role(v)[0] == "reject"
