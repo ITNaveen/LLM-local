@@ -103,6 +103,12 @@ def run_job(job, settings, source=None, llm=None):
     settings = dict(settings)
     if req.get("voice") in VOICES:
         settings["edge_voice"] = VOICES[req["voice"]]
+        if req["voice"] == "female" and settings.get("parler_speaker") in ("Rohit", "Aman", None, ""):
+            settings["parler_speaker"] = "Divya"
+        if req["voice"] == "male" and settings.get("parler_speaker") in ("Divya", "Rani"):
+            settings["parler_speaker"] = "Rohit"
+    if not render.can_draw_text():
+        settings["title_card"] = False      # a title card without text is just a blurred frame
     if req.get("resolution") == "720p":
         settings["width"], settings["height"] = 1280, 720
     job.set(status="running", error="", started=time.time())
@@ -157,7 +163,8 @@ def run_job(job, settings, source=None, llm=None):
                     "narrator instead (install ffmpeg-full for text cards).")
             outline = editor.plan_story(llm, topic, desc, req.get("theme", "auto"), minutes,
                                         req.get("narration", "light"), mom["passages"],
-                                        mom["videos"], log, can_text=can_text)
+                                        mom["videos"], log, can_text=can_text,
+                                        user_outline=req.get("outline", ""))
             write_json(job.path("outline.json"), outline)
         finish(share)
 

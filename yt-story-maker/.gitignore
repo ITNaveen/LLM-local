@@ -9,3 +9,5 @@ music/**/*.m4a
 music/**/*.ogg
 music/**/*.flac
 music/**/*.aac
+voice-test.wav
+.venv-voice/

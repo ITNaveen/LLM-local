@@ -25,6 +25,9 @@
         <textarea name="description" rows="5" maxlength="3000" placeholder="e.g. Kohli comes under pressure after two low scores, the media doubts him, then he scores a match-winning century in the final Test. Show his celebration, the crowd and the press conference."></textarea>
       </label>
 
+      <label>Your scene outline <span class="hint">optional — one story beat per line, the AI follows this order</span>
+        <textarea name="outline" rows="4" maxlength="3000" placeholder="e.g.&#10;1. America ka shock decision: Green Card band&#10;2. JD Vance ne Indians ko kya kaha&#10;3. Lakhon Indian engineers par asar&#10;4. India ko kya karna chahiye"></textarea>
+      </label>
       <label>Length: <b id="minutes-out">10</b> minutes
         <input type="range" name="minutes" min="8" max="15" step="1" value="10">
       </label>
@@ -45,8 +48,8 @@
           <span class="label">Hindi narration</span>
           <div class="chips" data-name="narration">
             <button type="button" data-value="none">None</button>
-            <button type="button" data-value="light" class="on">Light</button>
-            <button type="button" data-value="medium">More</button>
+            <button type="button" data-value="light">Light</button>
+            <button type="button" data-value="medium" class="on">More</button>
           </div>
         </div>
         <div class="field">
@@ -101,7 +104,8 @@
     <h3>Voice</h3>
     <label>Engine
       <select name="tts_engine">
-        <option value="auto">Auto (Edge → Piper → Mac voice)</option>
+        <option value="auto">Auto (emotional voice if installed → Microsoft → Mac)</option>
+        <option value="parler">Emotional Hindi voice (AI4Bharat, offline)</option>
         <option value="edge">Microsoft Edge neural (free, online)</option>
         <option value="piper">Piper (free, offline)</option>
         <option value="say">macOS voice (offline)</option>
@@ -110,6 +114,8 @@
       <label>Speed <input name="edge_rate"></label>
       <label>Pitch <input name="edge_pitch"></label>
     </div>
+    <label>Emotional voice speaker <select name="parler_speaker"><option>Rohit</option><option>Aman</option><option>Divya</option><option>Rani</option></select></label>
+    <label>Emotional voice style <span class="hint">optional, e.g. "Rohit speaks angrily and fast, like a fiery news debate"</span><input name="parler_style"></label>
     <label>Piper Hindi voice (.onnx path) <input name="piper_model"></label>
     <h3>Footage &amp; music</h3>
     <label>Music folder <input name="music_dir"></label>

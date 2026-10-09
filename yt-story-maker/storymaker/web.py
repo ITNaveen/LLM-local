@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 
-from . import pipeline, style as style_mod
+from . import pipeline, style as style_mod, voice as voice_mod
 from .config import JOBS_DIR, ROOT, STYLES_DIR, CACHE_DIR, ensure_dirs, load_settings, save_settings
 from .llm import OllamaLLM
 from .music import MOODS, scan_library
@@ -71,6 +71,7 @@ def status():
         "music": {m: len(lib[m]) for m in MOODS},
         "music_dir": s["music_dir"],
         "mac": platform.system() == "Darwin",
+        "emotional_voice": voice_mod.parler_available(),
         "queue": work_queue.qsize(),
     })
 
@@ -103,9 +104,10 @@ def create_job():
     req = {
         "topic": topic[:200],
         "description": (data.get("description") or "").strip()[:3000],
+        "outline": (data.get("outline") or "").strip()[:3000],
         "minutes": minutes,
         "theme": data.get("theme") if data.get("theme") in style_mod.THEMES else "sensational",
-        "narration": data.get("narration") if data.get("narration") in ("none", "light", "medium") else "light",
+        "narration": data.get("narration") if data.get("narration") in ("none", "light", "medium") else "medium",
         "voice": data.get("voice") if data.get("voice") in pipeline.VOICES else "male",
         "style": data.get("style") or "cinematic",
         "review": bool(data.get("review")),

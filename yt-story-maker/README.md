@@ -32,18 +32,29 @@ Description:  Kohli under pressure after two low scores, media doubts him, then 
 For burned-in Hindi titles and subtitles, ffmpeg needs text support. If the top bar says
 *"ffmpeg: no Hindi text"*, run `brew install ffmpeg-full` once.
 
+## The emotional Hindi voice (recommended)
+
+The built-in Microsoft voice is free but flat. For a narrator with real emotion, double-click
+**`install-emotional-voice.command`** once. It installs AI4Bharat's **Indic Parler-TTS**:
+free, offline, made for Indian languages, and it can be told *how* to speak. It downloads
+about 5 GB and plays a test line at the end. StoryMaker then uses it automatically. In
+**Settings** you can pick the speaker (Rohit, Aman, Divya, Rani) and describe the style, e.g.
+*"Rohit speaks angrily and fast, like a fiery TV debate"*.
+
 ## Make a video
 
 1. **Topic**: the big keyword (*Prime Minister Modi Operation Sindoor*).
 2. **Story description**: the angle, what should happen, what to show. The clearer this
    is, the better the video.
-3. Pick a length (8–15 min), a theme (Epic / Emotional / Documentary / Thriller), and how much
+3. Optional: **Your scene outline**. Write the story beats yourself, one per line, and the AI
+   follows them in that order.
+4. Pick a length (8–15 min), a theme (Epic / Emotional / Documentary / Thriller), and how much
    Hindi narration you want (None / Light / More).
-4. Press **Make my video** and walk away: it runs start to finish on its own (the Mac stays
+5. Press **Make my video** and walk away: it runs start to finish on its own (the Mac stays
    awake while StoryMaker runs). Optional: tick **"Pause before rendering"** to check the
    script first; then you see every scene, its
    clips and the Hindi narration lines. Change any line, then press **Render video**.
-5. Download the MP4, thumbnail, `.srt` subtitles and the upload kit.
+6. Download the MP4, thumbnail, `.srt` subtitles and the upload kit.
 
 A 10-minute video takes roughly 15–40 minutes on an M-series Mac, depending on your internet
 and model. You can close the tab; the job keeps running, and a failed job resumes from where it

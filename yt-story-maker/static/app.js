@@ -32,7 +32,8 @@ $("#new-form").addEventListener("submit", async (e) => {
   const f = e.target;
   const chip = (n) => $(`.chips[data-name=${n}] .on`)?.dataset.value;
   const body = {
-    topic: f.topic.value, description: f.description.value, minutes: +f.minutes.value,
+    topic: f.topic.value, description: f.description.value, outline: f.outline.value,
+    minutes: +f.minutes.value,
     theme: chip("theme"), narration: chip("narration"), voice: chip("voice"),
     style: f.style.value, resolution: f.resolution.value,
     review: f.review.checked, demo: f.demo.checked,
@@ -66,6 +67,7 @@ async function refreshStatus() {
       [s.llm_ready ? "ok" : (s.ollama ? "warn" : "bad"),
         s.llm_ready ? "AI ready" : (s.ollama ? "pick a model in Settings" : "Ollama off: basic mode")],
       [tracks ? "ok" : "warn", tracks ? `${tracks} music tracks` : "no music tracks yet"],
+      [s.emotional_voice ? "ok" : "warn", s.emotional_voice ? "emotional voice" : "basic voice (run install-emotional-voice)"],
     ];
     $("#pills").innerHTML = pills.map(([c, t]) => `<span class="pill ${c}">${esc(t)}</span>`).join("");
     window.__models = s.models;

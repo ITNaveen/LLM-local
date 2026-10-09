@@ -53,15 +53,62 @@ def _silent(text, out, settings):
            "-t", f"{estimate_speech_seconds(text):.2f}", str(out))
 
 
-ENGINES = {"edge": (_edge, "mp3"), "piper": (_piper, "wav"), "say": (_say, "aiff"),
-           "silent": (_silent, "wav")}
+# ------------------------------------------------------------------ emotional voice (Parler)
+ROOT = Path(__file__).resolve().parent.parent
+PARLER_PY = ROOT / ".venv-voice" / "bin" / "python"
+PARLER_SPEAKERS = {"male": "Rohit", "female": "Divya"}
+
+
+def parler_available():
+    return PARLER_PY.exists()
+
+
+def parler_description(settings):
+    speaker = settings.get("parler_speaker") or "Rohit"
+    return (settings.get("parler_style") or
+            "{speaker} speaks in an excited, energetic and highly expressive tone, like a passionate "
+            "YouTube presenter, at a moderately fast pace, with a very clear, close-sounding "
+            "recording and no background noise.").format(speaker=speaker)
+
+
+def parler_batch(lines, out_dir, settings, log):
+    """Render all lines in one run of the emotional voice model (it loads once)."""
+    import json
+    import subprocess
+    todo = {k: v for k, v in lines.items()
+            if not (out_dir / f"{k}.wav").exists() and not (out_dir / f"{k}.raw.wav").exists()}
+    if not todo:
+        return
+    job = out_dir / "parler_job.json"
+    job.write_text(json.dumps({"lines": todo, "out_dir": str(out_dir),
+                               "description": parler_description(settings)}, ensure_ascii=False))
+    log(f"Recording {len(todo)} lines with the emotional Hindi voice (this can take a while)...")
+    proc = subprocess.Popen([str(PARLER_PY), str(ROOT / "storymaker" / "voice_parler.py"), str(job)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    tail = []
+    for line in proc.stdout:
+        line = line.strip()
+        tail = (tail + [line])[-8:]
+        if line.startswith("PROGRESS") or line.startswith("Loading"):
+            log(f"  {line.replace('PROGRESS', 'voice line')}")
+    if proc.wait() != 0:
+        raise PipelineError("emotional voice failed: " + " | ".join(tail)[-300:])
+
+
+def _parler(text, out, settings):
+    if not out.exists():                    # made by parler_batch()
+        raise PipelineError("emotional voice line missing")
+
+
+ENGINES = {"parler": (_parler, "wav"), "edge": (_edge, "mp3"), "piper": (_piper, "wav"),
+           "say": (_say, "aiff"), "silent": (_silent, "wav")}
 
 
 def engine_order(settings):
     choice = settings.get("tts_engine", "auto")
     if choice != "auto":
         return [choice, "silent"]
-    order = ["edge"]
+    order = ["parler", "edge"] if parler_available() else ["edge"]
     if settings.get("piper_model"):
         order.append("piper")
     if platform.system() == "Darwin":
@@ -76,6 +123,12 @@ def synthesize(lines, out_dir, settings, log):
     out_dir.mkdir(parents=True, exist_ok=True)
     results, order = {}, engine_order(settings)
     working = None
+    if order[0] == "parler":
+        try:
+            parler_batch(lines, out_dir, settings, log)
+        except Exception as e:  # noqa: BLE001 - fall back to the next voice
+            log(f"  emotional voice failed ({str(e)[:200]}); using the Microsoft voice instead.")
+            order = [e for e in order if e != "parler"]
     for nid, text in lines.items():
         final = out_dir / f"{nid}.wav"
         if final.exists():
@@ -99,7 +152,8 @@ def synthesize(lines, out_dir, settings, log):
                 working = name
                 break
             except Exception as e:  # noqa: BLE001 - try the next engine
-                raw.unlink(missing_ok=True)
+                if name != "parler":
+                    raw.unlink(missing_ok=True)
                 log(f"  voice engine '{name}' failed: {str(e)[:150]}")
         else:
             raise PipelineError("no voice engine could synthesize narration")

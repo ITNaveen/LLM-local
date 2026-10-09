@@ -180,8 +180,9 @@ def test_rules_text_cards():
     assert types.count("text") == 1 and "narration" not in types       # no 2 cards, no repeat
     spoken = editor.enforce_rules(scenes, cat, "light", can_text=False)
     assert "text" not in [s["type"] for s in spoken]                   # narrator says them
+    # never two narration lines in a row: they become one stronger line
     assert [s["text"] for s in spoken if s["type"] == "narration"] == \
-        ["पहली लाइन यहाँ है", "दूसरी अलग लाइन"]
+        ["पहली लाइन यहाँ है दूसरी अलग लाइन"]
 
 
 # ------------------------------------------------------------------ assembly
@@ -277,3 +278,44 @@ def test_numbers_from_ai_text():
 def test_undownloadable_videos_are_rejected():
     v = {"spoken_lang": "en", "title": "LIVE", "captions": [1], "caption_lang": "en", "downloadable": False}
     assert editor.language_role(v)[0] == "reject"
+
+
+def test_length_is_guaranteed_from_unused_material():
+    cat = {f"P{i}": _p(f"v{i % 15}", 10 + i * 40, f"distinct fact {i} word{i} other{i * 7}",
+                       lang="hi" if i % 3 else "en", strength=3 + i % 3,
+                       hindi=f"इस बात {i} पर नज़र डालिए, ये बहुत बड़ा मुद्दा है और सबको जानना चाहिए।")
+           for i in range(1, 40)}
+    for i, p in enumerate(cat.values()):
+        p["end"] = p["start"] + 30
+        p["subtopic"] = "t%d" % (i % 4)
+    scenes = [{"act": "opening", "type": "hook", "pid": "P1"},
+              {"act": "buildup", "type": "dialogue", "pid": "P2"},
+              {"act": "climax", "type": "dialogue", "pid": "P4"}]
+    out = editor.fill_to_length(scenes, cat, 8, clip_cap=20)
+    assert editor.estimate_seconds(out, cat, 20) >= 8 * 60 * 0.92 - 4
+    acts = [editor.ACT_KEYS.index(s["act"]) for s in out]
+    assert acts == sorted(acts) and out[0]["type"] == "hook"
+    per_video = {}
+    for s in out:
+        if s["type"] in ("dialogue", "voiceover"):
+            per_video[cat[s["pid"]]["video_id"]] = per_video.get(cat[s["pid"]]["video_id"], 0) + 1
+    assert max(per_video.values()) <= editor.MAX_PER_VIDEO + 1
+    assert all(s["type"] == "voiceover" for s in out if s.get("pid") and cat[s["pid"]]["lang"] == "en")
+
+
+def test_hindi_news_style_cuts_clips_to_their_sharpest_part(material):
+    outline = editor.plan_story(material["llm"], TOPIC, DESC, "sensational", 5, "medium",
+                                material["passages"], material["videos"], lambda m: None)
+    assert outline["clip_cap"] == editor.CLIP_CAP
+    asm = editor.Assembler(material["passages"], material["videos"], material["visuals"],
+                           DEFAULT_STYLE, 5 * 60)
+    story = asm.build(outline, {n: 5.0 for n in editor.narration_lines(outline)}, "sensational")
+    hooks = [b for a in story["acts"] for b in a["beats"] if b["kind"] == "hook"]
+    assert len(hooks) == 1
+    for a in story["acts"]:
+        for b in a["beats"]:
+            if b["kind"] == "dialogue":
+                assert len(b["clips"]) <= 2
+                assert all(c["end"] - c["start"] <= editor.CLIP_CAP + 0.6 + 1e-6 for c in b["clips"])
+    kinds = [b["kind"] for a in story["acts"] for b in a["beats"]]
+    assert all(not (x == y == "narration") for x, y in zip(kinds, kinds[1:]))

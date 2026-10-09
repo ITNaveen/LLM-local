@@ -146,7 +146,7 @@ def test_web_api(client):
                                        "theme": "hacker", "narration": "lots"})
     jid = r.get_json()["id"]
     d = client.get(f"/api/jobs/{jid}").get_json()["state"]["request"]
-    assert d["minutes"] == 15 and d["theme"] == "sensational" and d["narration"] == "light"
+    assert d["minutes"] == 15 and d["theme"] == "sensational" and d["narration"] == "medium"
     assert client.get(f"/jobs/{jid}/job.json").status_code == 404        # not downloadable
     assert client.get("/api/jobs/..%2Fsettings").status_code == 404
     assert client.post(f"/api/jobs/{jid}/cancel").status_code == 200

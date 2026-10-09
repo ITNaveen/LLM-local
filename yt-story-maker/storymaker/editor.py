@@ -26,7 +26,14 @@ SCENE_TYPES = ("hook", "text", "narration", "dialogue", "montage")
 # Heard by the audience as-is. Everything else (e.g. English) is retold by the Hindi narrator.
 DIALOGUE_LANGS = {"hi", "ur"}
 MAX_PER_VIDEO, MAX_PER_CHANNEL = 2, 3
-NARRATION_LIMITS = {"none": 0, "light": 6, "medium": 12}
+NARRATION_LIMITS = {"none": 0, "light": 8, "medium": 20}
+# How the narrator talks: a passionate Delhi YouTuber, not a news reader.
+VOICE_STYLE = ("Write it the way a passionate young Delhi YouTuber talks to his audience: natural "
+               "Hinglish in Devanagari (keep common English words like visa, IT, company, job, "
+               "shock, plan, game as people say them), short punchy sentences, emotion, "
+               "exclamations and questions ('सोचिए ज़रा!', 'ये है असली खेल...', 'आख़िर क्यों?'). "
+               "Never sound like a slow, formal news reader.")
+CLIP_CAP = 20.0   # Hindi news style: clips are punchy evidence, the narrator drives the story
 SPEECH_LANGS = {"hi", "en", "ur"}
 INDIAN_REGIONAL = {"te", "ta", "kn", "ml", "bn", "mr", "gu", "pa", "or", "as", "ne", "sd",
                    "si", "kok", "mai", "bho", "raj"}
@@ -251,8 +258,10 @@ HINDI_FIELD = """,
             voice-over (Devanagari) that retells EVERYTHING important this person says, as
             long as the passage itself: about 2 Hindi words per second of the passage (a 30 s
             passage needs about 60 words, max 80),
-            naming the speaker (e.g. 'केंद्रीय मंत्री किरेन रिजिजू ने साफ़ कहा...'). Faithful to
-            what is said: no invented facts, numbers or quotes"""
+            naming the speaker (e.g. 'अमेरिका के उपराष्ट्रपति JD Vance ने साफ़-साफ़ कह दिया...').
+            Retell it with energy and emotion, like a passionate Delhi YouTuber talking to his
+            audience: natural Hinglish, short punchy sentences. Faithful to what is said: no
+            invented facts, numbers or quotes"""
 
 
 def annotate(llm, topic, description, video, passages, log):
@@ -335,13 +344,18 @@ the next, and the audience feels something (anger, pride, suspense) at every ste
    retells it in Hindi over the speaker's footage (that happens automatically).
 5. A dialogue scene plays ONE passage completely. When the source, place or sub-topic
    changes, put a bridge first: a short Hindi narration line or an on-screen text card.
-6. OPEN WITH FIRE: the first scene is a "hook" - the single most explosive Hindi line.
-   Then 1 text card or narration line that sets up the conflict. Never start with a text card.
+6. OPEN WITH FIRE: the first scene is ONE "hook" - the single most explosive, emotional Hindi
+   line. Then ONE narration line that hits the viewer with the stakes as a question. Never start
+   with a text card, never two narration lines in a row.
+   Hindi clips are punchy evidence (they are cut to their sharpest 10-20 seconds); the narrator
+   drives the story between them, like the biggest Hindi explainer channels.
 7. Structure: opening = hook + the question the film answers; buildup = who, what, why it
    matters; rising = conflict and stakes grow; climax = the strongest, most emotional passages
    + one short montage; ending = the consequence and ONE powerful closing line that leaves
    the viewer with a feeling (pride, anger, resolve) - not a long montage.
-8. Hindi lines are natural spoken Hindi in Devanagari, short and punchy (6-20 words).
+8. Narration and text lines: 6-25 words. VOICE: a passionate young Delhi YouTuber -
+   natural Hinglish in Devanagari, short punchy sentences, exclamations, questions to the
+   viewer ('सोचिए ज़रा!', 'ये है असली खेल...', 'आख़िर क्यों?'). Never a slow formal news reader.
 9. Never invent facts, numbers, names or quotes. Dramatise HOW you tell it, not WHAT happened.
 JSON only."""
 
@@ -358,7 +372,7 @@ VISUAL SOURCES for montages / background (id | what it is):
 {visuals}
 
 Scene types:
-- "hook": a short powerful quote from a passage (use: passage id). Opening only, max 2.
+- "hook": a short explosive quote from a Hindi passage (use: passage id). Exactly one, first.
 - "text": an on-screen Hindi text card (text). Use for context, dates, facts, bridges.
 - "narration": a Hindi voice-over line (text). Bridges and context.
 - "dialogue": play a passage completely (use: passage id).
@@ -370,14 +384,15 @@ Return JSON:
   "chapters": {{"opening": "Hindi chapter name", "buildup": "...", "rising": "...", "climax": "...", "ending": "..."}},
   "scenes": [{{"act": "opening|buildup|rising|climax|ending", "type": "...", "use": "P3 or [V1, V2]",
               "text": "Hindi, only for text/narration", "seconds": 12, "link": "why this follows"}}]}}
-Use about {n_dialogue} dialogue scenes."""
+Use about {n_dialogue} dialogue scenes.{outline_rule}"""
 
 CRITIC_SYSTEM = """You are a ruthless senior editor reviewing a junior's edit before it goes to
 millions of Hindi-speaking viewers. You check: the film opens with an explosive hook (not a text
 card); each scene connects to the one before and after it; one thread at a time; no off-topic
 material; NO REPETITION (the same fact, claim, speaker or clip shown twice is cut); variety of
 channels and voices; no abrupt jumps between speakers/countries/sub-topics without a bridge;
-rising tension, an emotional climax and a short, powerful ending. Bridges you add must say
+rising tension, an emotional climax and a short, powerful ending. Bridges must sound like a
+passionate Delhi YouTuber (Hinglish, punchy, emotional) - never a formal news reader, and must say
 something new - never repeat the line next to them. JSON only."""
 
 CRITIC_USER = """Topic: {topic}
@@ -412,11 +427,12 @@ Return JSON: {{"insert": [{{"after": scene number, "type": "dialogue|narration|t
   "use": "P id for dialogue", "text": "Hindi for narration/text", "link": "why it belongs here"}}]}}"""
 
 
-def estimate_seconds(scenes, cat):
+def estimate_seconds(scenes, cat, clip_cap=None):
     total = 0.0
     for s in scenes:
         if s["type"] == "dialogue":
-            total += cat[s["pid"]]["end"] - cat[s["pid"]]["start"]
+            length = cat[s["pid"]]["end"] - cat[s["pid"]]["start"]
+            total += min(length, clip_cap) if clip_cap else length
         elif s["type"] == "hook":
             total += 7
         elif s["type"] in ("narration", "voiceover"):
@@ -512,12 +528,14 @@ def _source_label(v_or_p):
 
 
 def plan_story(llm, topic, description, theme, minutes, narration, passages, videos, log,
-               can_text=True):
-    cat = make_catalog(passages)
+               can_text=True, user_outline=""):
+    cat = make_catalog(passages, limit=90)
     vcat = make_visual_catalog(videos)
+    clip_cap = CLIP_CAP if theme == "sensational" else None
     outline = None
     if llm.available() and cat:
-        outline = _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log)
+        outline = _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log,
+                             user_outline)
         if outline:
             # rules first (they drop repeats / over-used sources), then let the AI fill the gap
             outline["scenes"] = enforce_rules(outline["scenes"], cat, narration, log, can_text)
@@ -528,13 +546,15 @@ def plan_story(llm, topic, description, theme, minutes, narration, passages, vid
             log("Using the built-in story builder (start Ollama for an AI-edited story).")
         outline = fallback_story(topic, theme, cat, vcat, minutes)
     outline["scenes"] = enforce_rules(outline["scenes"], cat, narration, log, can_text)
+    outline["scenes"] = fill_to_length(outline["scenes"], cat, minutes, clip_cap, log)
     outline["catalog"] = {k: p["id"] for k, p in cat.items()}
+    outline["clip_cap"] = clip_cap
     outline["visual_catalog"] = {k: v["id"] for k, v in vcat.items()}
     assign_ids(outline)
     return outline
 
 
-def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log):
+def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, log, user_outline=""):
     rule = {"none": "NO voice-over at all. Use text cards for bridges and context.",
             "light": f"Voice-over only where needed, max {NARRATION_LIMITS['light']} lines. "
                      "Prefer letting the footage speak.",
@@ -546,12 +566,15 @@ def _architect(llm, topic, description, theme, minutes, narration, cat, vcat, lo
     vlines = "\n".join(
         f"{vid} | {_source_label(v)}{' (foreign language, silent)' if v.get('role') == 'visual' else ''}"
         for vid, v in vcat.items())
-    avg = sum(p["end"] - p["start"] for p in cat.values()) / max(1, len(cat))
+    avg = min(CLIP_CAP, sum(p["end"] - p["start"] for p in cat.values()) / max(1, len(cat)))
     n_dialogue = int(clamp(minutes * 60 * 0.65 / max(10, avg), 6, 30))
     prompt = ARCHITECT_USER.format(topic=topic, description=description or "-",
                                    theme=THEMES.get(theme, THEMES["auto"]), minutes=minutes,
                                    narration_rule=rule, passages=plines, visuals=vlines or "(none)",
-                                   n_dialogue=n_dialogue)
+                                   n_dialogue=n_dialogue, outline_rule=(
+                                       "\n\nTHE CREATOR'S OWN SCENE OUTLINE - follow it in this exact "
+                                       "order, one or more scenes per point, using the passages that "
+                                       "fit each point:\n" + user_outline.strip()) if user_outline.strip() else "")
     for attempt in range(2):
         try:
             raw = llm.chat_json(ARCHITECT_SYSTEM, prompt, temperature=0.6, max_tokens=7000)
@@ -690,7 +713,7 @@ def enforce_rules(scenes, cat, narration, log=lambda m: None, can_text=True):
         t = s["type"]
         if t == "hook":
             p = cat[s["pid"]]
-            if s["act"] == "opening" and hooks < 2 and _speaks_hindi(p) and s["pid"] not in used:
+            if s["act"] == "opening" and hooks < 1 and _speaks_hindi(p) and s["pid"] not in used:
                 hooks += 1
                 used.append(s["pid"])                 # the hook line is never replayed later
                 out.append(s)
@@ -727,6 +750,12 @@ def enforce_rules(scenes, cat, narration, log=lambda m: None, can_text=True):
                 s["type"] = t = "narration"           # can't draw text: the narrator says it
             if t == "text" and out and out[-1]["type"] == "text":
                 continue                              # never two cards in a row
+            if t == "narration" and out and out[-1]["type"] == "narration":
+                # never two narration lines in a row: one stronger line instead
+                if len((out[-1]["text"] + " " + s["text"]).split()) <= 40:
+                    out[-1] = {**out[-1], "text": out[-1]["text"] + " " + s["text"]}
+                    lines.append(s["text"])
+                continue
             if t == "narration":
                 if n_narr >= limit:
                     if not can_text:
@@ -763,6 +792,71 @@ def enforce_rules(scenes, cat, narration, log=lambda m: None, can_text=True):
             for i, s in zip(idx, ordered):
                 out[i] = s
     return out
+
+
+def fill_to_length(scenes, cat, minutes, clip_cap=None, log=lambda m: None):
+    """Guarantee the requested length: add unused strong passages where they belong - after
+    the same speaker's earlier passage, else after the same sub-topic, else before the climax.
+    Hindi passages play as clips, English ones are retold by the Hindi narrator."""
+    target = minutes * 60 * 0.92 - 4
+    have = estimate_seconds(scenes, cat, clip_cap)
+    if have >= target or not cat:
+        return scenes
+    scenes = list(scenes)
+    used = [s["pid"] for s in scenes if s.get("pid")]
+    per_video, per_channel = {}, {}
+    for s in scenes:
+        if s["type"] in ("dialogue", "voiceover") and s.get("pid") in cat:
+            p = cat[s["pid"]]
+            per_video[p["video_id"]] = per_video.get(p["video_id"], 0) + 1
+            ch = p.get("channel") or p["video_id"]
+            per_channel[ch] = per_channel.get(ch, 0) + 1
+    repeats = _Repeats(cat)
+    pool = sorted((k for k in cat if k not in used),
+                  key=lambda k: (-cat[k].get("strength", 3), -cat[k].get("heat", 0)))
+    added = 0
+    for cap_v, cap_c in ((MAX_PER_VIDEO, MAX_PER_CHANNEL), (MAX_PER_VIDEO + 1, MAX_PER_CHANNEL + 2)):
+        for pid in pool:
+            if have >= target:
+                break
+            if pid in used:
+                continue
+            p = cat[pid]
+            vid, ch = p["video_id"], p.get("channel") or p["video_id"]
+            if per_video.get(vid, 0) >= cap_v or per_channel.get(ch, 0) >= cap_c or repeats(pid, used):
+                continue
+            if _speaks_hindi(p):
+                new = {"type": "dialogue", "pid": pid, "link": "continues this thread"}
+            elif p.get("hindi"):
+                new = {"type": "voiceover", "pid": pid, "text": p["hindi"],
+                       "link": "continues this thread"}
+            else:
+                continue
+            idx = None
+            for i, sc in enumerate(scenes):          # after this speaker's earlier passage
+                q = cat.get(sc.get("pid"))
+                if q and sc["act"] != "opening" and q["video_id"] == vid and q["start"] < p["start"]:
+                    idx = i
+            if idx is None:                          # after the same thread
+                for i, sc in enumerate(scenes):
+                    q = cat.get(sc.get("pid"))
+                    if q and sc["act"] != "opening" and q.get("subtopic") == p.get("subtopic"):
+                        idx = i
+            if idx is None:                          # before the climax
+                idx = next((i - 1 for i, sc in enumerate(scenes) if sc["act"] in ("climax", "ending")),
+                           len(scenes) - 1)
+                idx = max(idx, 0)
+            act = scenes[idx]["act"] if scenes else "buildup"
+            new["act"] = "buildup" if act == "opening" else act
+            scenes.insert(idx + 1, new)
+            have += estimate_seconds([new], cat, clip_cap)
+            used.append(pid)
+            per_video[vid] = per_video.get(vid, 0) + 1
+            per_channel[ch] = per_channel.get(ch, 0) + 1
+            added += 1
+    if added:
+        log(f"Length: added {added} more scenes from unused material (about {have / 60:.1f} min planned).")
+    return scenes
 
 
 FALLBACK_TEXT = {
@@ -833,6 +927,7 @@ class Assembler:
         self.total = total_seconds - 4.0          # title card
         self.log = log or (lambda m: None)
         self.used = {}
+        self.clip_cap = None
 
     # -- footage bookkeeping
     def free(self, vid, s, e, pad=0.5):
@@ -847,7 +942,7 @@ class Assembler:
                 "heat": heat, "video_title": v.get("title", ""), "channel": v.get("channel", "")}
 
     def hook_span(self, p, lo=3.5, hi=9.0):
-        """Best 3.5-9 s run of whole caption lines inside a passage (highest replay heat)."""
+        """Best lo-hi s run of whole caption lines inside a passage (highest replay heat)."""
         cues, best = p["cues"], None
         for i in range(len(cues)):
             for j in range(i, len(cues)):
@@ -898,6 +993,7 @@ class Assembler:
 
     # -- main
     def build(self, outline, narration_seconds, theme):
+        self.clip_cap = outline.get("clip_cap")
         cat = {k: self.passages.get(v) for k, v in outline.get("catalog", {}).items()}
         vcat = outline.get("visual_catalog", {})
         scenes = outline["scenes"]
@@ -921,6 +1017,10 @@ class Assembler:
                     continue
                 if s["type"] == "hook":
                     a, b, text = self.hook_span(p)
+                elif self.clip_cap and p["end"] - p["start"] > self.clip_cap + 2:
+                    # Hindi-news style: the sharpest 10-20 s of the passage, whole sentences
+                    a, b, text = self.hook_span(p, lo=10.0, hi=self.clip_cap)
+                    a, b = a - 0.15, b + 0.35
                 else:
                     a, b, text = p["start"] - 0.15, p["end"] + 0.35, p["text"]
                 beat.update(audio="original", said=text[:400], source=_source_label(p),
@@ -984,7 +1084,8 @@ class Assembler:
                               key=lambda b: (len(b["clips"]), -b.get("strength", 3)))
             for b in dialogue:
                 c = b["clips"][-1]
-                if sum(x["end"] - x["start"] for x in b["clips"]) > 60:
+                if sum(x["end"] - x["start"] for x in b["clips"]) > (
+                        1.6 * self.clip_cap if self.clip_cap else 60):
                     continue
                 later = [p for p in self.by_video.get(c["video_id"], [])
                          if p["end"] > c["end"] + 1 and -0.8 <= p["start"] - c["end"] < 90
@@ -995,6 +1096,16 @@ class Assembler:
                 if not nxt or not self.free(c["video_id"], max(nxt["start"], c["end"]) + 0.45,
                                             nxt["end"], pad=0.0):
                     continue
+                if self.clip_cap:
+                    # Hindi-news style: the speaker continues as one more sharp cut (max 2 per scene)
+                    if len(b["clips"]) >= 2:
+                        continue
+                    a, e, text = self.hook_span(nxt, lo=6.0, hi=self.clip_cap)
+                    self.take(c["video_id"], nxt["start"], nxt["end"])
+                    b["clips"].append(self.clip(c["video_id"], a - 0.15, e + 0.35, text, nxt["heat"]))
+                    b["said"] = (b["said"] + " … " + text)[:600]
+                    grew = True
+                    break
                 self.take(c["video_id"], nxt["start"], nxt["end"])
                 if nxt["start"] - c["end"] < 4:      # flows on: one longer continuous clip
                     c["end"] = round(nxt["end"] + 0.35, 2)

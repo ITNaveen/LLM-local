@@ -32,10 +32,12 @@ DEFAULTS = {
     "search_workers": 4,          # searches / video reads running at the same time
     "research_minutes": 6,        # stop searching after this long and go with what we have
     # Voice
-    "tts_engine": "auto",         # auto | edge | piper | say | silent
+    "tts_engine": "auto",         # auto | parler | edge | piper | say | silent
+    "parler_speaker": "Rohit",    # emotional voice: Rohit / Aman (male), Divya / Rani (female)
+    "parler_style": "",           # optional custom description of how the voice should sound
     "edge_voice": "hi-IN-MadhurNeural",
-    "edge_rate": "-6%",
-    "edge_pitch": "-4Hz",
+    "edge_rate": "+8%",           # energetic, not a slow news reader
+    "edge_pitch": "+0Hz",
     "say_voice": "Lekha",
     "piper_model": "",            # path to a Hindi .onnx voice for fully offline TTS
     # Music
@@ -55,12 +57,17 @@ DEFAULTS = {
 }
 
 
+# Earlier defaults that turned out wrong; saved copies of them are upgraded automatically.
+_OLD_DEFAULTS = {"edge_rate": "-6%", "edge_pitch": "-4Hz"}
+
+
 def load_settings():
     settings = dict(DEFAULTS)
     if SETTINGS_FILE.exists():
         try:
             saved = json.loads(SETTINGS_FILE.read_text())
-            settings.update({k: v for k, v in saved.items() if k in DEFAULTS})
+            settings.update({k: v for k, v in saved.items()
+                             if k in DEFAULTS and _OLD_DEFAULTS.get(k) != v})
         except (OSError, ValueError):
             pass
     return settings
