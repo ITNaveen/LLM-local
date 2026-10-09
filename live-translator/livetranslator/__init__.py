@@ -1,2 +1,2 @@
 """Live Translator - real-time German -> English meeting translation, fully local."""
-__version__ = "1.0.2"
+__version__ = "1.1.0"
