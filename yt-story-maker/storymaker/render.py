@@ -2,6 +2,8 @@
 blurred fill for vertical/4:3 footage, light grade), mix dialogue + music + narration,
 burn Hindi subtitles, and export a YouTube-ready MP4 + SRT + thumbnail."""
 
+import hashlib
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -61,6 +63,20 @@ def download_all(source, segments, out_dir, log, workers=3):
             if n % 5 == 0 or n == len(plan):
                 log(f"  downloaded {n}/{len(plan)}")
     return files, failed
+
+
+def drop_missing(files):
+    """Forget downloads whose file is gone (deleted, or a temporary file yt-dlp replaced);
+    their shots are then re-edited like any failed download. Returns how many were dropped."""
+    dropped = 0
+    for vid in list(files):
+        keep = [r for r in files[vid] if Path(r["file"]).exists()]
+        dropped += len(files[vid]) - len(keep)
+        if keep:
+            files[vid] = keep
+        else:
+            del files[vid]
+    return dropped
 
 
 def locate(files, seg, strict=False):
@@ -323,22 +339,40 @@ def extract_frame(video, t, out_png):
 
 
 # ------------------------------------------------------------------ main render
+def shot_name(seg, tl):
+    """File name of a rendered shot. It carries a fingerprint of everything that shapes the
+    shot, so a resumed job never reuses a shot rendered for an earlier cut of the film."""
+    key = json.dumps([seg, tl["width"], tl["height"], tl["fps"]], sort_keys=True, default=str)
+    return f"{seg['i']:04d}_{hashlib.sha1(key.encode()).hexdigest()[:10]}"
+
+
 def render(tl, files, settings, job_dir, log, progress=None):
     job_dir = Path(job_dir)
     work = job_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
     segs = tl["segments"]
     clip_segs = [s for s in segs if s["type"] == "clip"]
+    names = {s["i"]: shot_name(s, tl) for s in segs}
+    vpath = lambda s: work / f"v{names[s['i']]}.mp4"   # noqa: E731
+    apath = lambda s: work / f"a{names[s['i']]}.wav"   # noqa: E731
+    keep = {vpath(s).name for s in segs} | {apath(s).name for s in segs}
+    for old in list(work.glob("v*.mp4")) + list(work.glob("a*.wav")):
+        if old.name not in keep and old.name not in ("video.mp4",):
+            old.unlink(missing_ok=True)       # shots of an earlier cut
     log(f"Rendering {len(clip_segs)} shots...")
 
     def do(seg):
-        out_v, out_a = work / f"v{seg['i']:04d}.mp4", work / f"a{seg['i']:04d}.wav"
+        out_v, out_a = vpath(seg), apath(seg)
         if out_v.exists() and out_a.exists():
             return seg
         src, offset = locate(files, seg)
         if not src:
             raise PipelineError(f"no footage for segment {seg['i']} ({seg['video_id']})")
-        render_segment(seg, src, offset, out_v, out_a, tl, settings)
+        # write under temporary names: a shot interrupted half-way is never mistaken for done
+        tmp_v, tmp_a = out_v.with_suffix(".tmp.mp4"), out_a.with_suffix(".tmp.wav")
+        render_segment(seg, src, offset, tmp_v, tmp_a, tl, settings)
+        os.replace(tmp_a, out_a)
+        os.replace(tmp_v, out_v)
         return seg
 
     workers = max(1, min(4, (os.cpu_count() or 4) // 2))
@@ -355,7 +389,7 @@ def render(tl, files, settings, job_dir, log, progress=None):
     # title card + thumbnail use the hottest climax shot as background
     climax = [s for s in clip_segs if s["act"] == "climax"] or clip_segs
     hero = max(climax, key=lambda s: s.get("heat", 0))
-    hero_png = extract_frame(work / f"v{hero['i']:04d}.mp4", hero["dur"] * 0.4, work / "hero.png")
+    hero_png = extract_frame(vpath(hero), hero["dur"] * 0.4, work / "hero.png")
     for seg in segs:
         if seg["type"] == "card":
             bg = hero_png
@@ -363,15 +397,15 @@ def render(tl, files, settings, job_dir, log, progress=None):
                 near = next((x for x in segs[seg["i"] + 1:] if x["type"] == "clip"), None) or \
                     next((x for x in reversed(segs[:seg["i"]]) if x["type"] == "clip"), None)
                 if near:
-                    bg = extract_frame(work / f"v{near['i']:04d}.mp4", near["dur"] * 0.3,
+                    bg = extract_frame(vpath(near), near["dur"] * 0.3,
                                        work / f"bg{seg['i']:04d}.png")
-            render_card(seg, bg, work / f"v{seg['i']:04d}.mp4", work / f"a{seg['i']:04d}.wav",
+            render_card(seg, bg, vpath(seg), apath(seg),
                         tl, settings, work)
 
     log("Joining shots...")
     vlist, alist = work / "video.txt", work / "audio.txt"
-    vlist.write_text("".join(f"file 'v{s['i']:04d}.mp4'\n" for s in segs))
-    alist.write_text("".join(f"file 'a{s['i']:04d}.wav'\n" for s in segs))
+    vlist.write_text("".join(f"file '{vpath(s).name}'\n" for s in segs))
+    alist.write_text("".join(f"file '{apath(s).name}'\n" for s in segs))
     ffmpeg("-f", "concat", "-safe", "0", "-i", str(vlist), "-c", "copy", str(work / "video.mp4"))
     ffmpeg("-f", "concat", "-safe", "0", "-i", str(alist), "-c", "copy", str(work / "clips.wav"))
 

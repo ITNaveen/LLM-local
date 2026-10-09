@@ -7,12 +7,32 @@ import html
 import json
 import random
 import re
+import threading
 from pathlib import Path
 
 from .config import CACHE_DIR, FONT_FILE
 from .util import PipelineError, ffmpeg, has_video, read_json, write_json
 
 CAPTION_LANG_PRIORITY = ["hi", "hi-IN", "hi-orig", "en-orig", "en", "en-IN", "en-US", "en-GB"]
+_LOCKS, _LOCKS_GUARD = {}, threading.Lock()
+
+
+def _lock(key):
+    """One lock per output file: two download threads must never write the same file."""
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(str(key), threading.Lock())
+
+
+def finished_download(base):
+    """The finished file for a download base: exactly '<base>.mp4/.mkv/.webm', with a picture.
+    yt-dlp's in-between files ('<base>.f398.mp4', '<base>.f251.webm', '<base>.temp.mp4',
+    '.part') are deleted or renamed by yt-dlp once it merges, so they must never be used."""
+    out = []
+    for ext in ("mp4", "mkv", "webm"):
+        p = Path(f"{base}.{ext}")
+        if p.exists() and has_video(p):
+            out.append(str(p))
+    return out
 
 
 # ---------------------------------------------------------------- captions
@@ -213,55 +233,59 @@ class YouTubeSource:
         from yt_dlp.utils import download_range_func
         h = self.settings.get("height", 1080)
         out_base = Path(out_base)
-
-        def found(base):
-            # Only finished files with a picture: a failed merge can leave an audio-only
-            # '.f251.webm' behind, which must never be used as footage.
-            files = [p for p in glob.glob(str(base) + ".*") if p.endswith((".mp4", ".mkv", ".webm"))]
-            files.sort(key=lambda p: (".f" in Path(p).name[len(Path(str(base)).name):], p))
-            return [p for p in files if has_video(p)]
+        full_base = out_base.parent / f"{video_id}_full"
+        full_lock = _lock(full_base)
 
         def clean(base):
             for p in glob.glob(str(base) + ".*"):
                 Path(p).unlink(missing_ok=True)
 
-        if found(out_base):
-            return found(out_base)[0]
-        full_base = out_base.parent / f"{video_id}_full"
-        if found(full_base):
-            return self._full_result(video_id, found(full_base)[0])
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        formats = [f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
-                   "b[height<=720][ext=mp4][vcodec!=none]/b[height<=720][vcodec!=none]/18"]
-        errors = []
-        for fmt in formats:
-            try:
-                with yt_dlp.YoutubeDL(self._opts(
-                        format=fmt, download_ranges=download_range_func(None, [(start, end)]),
-                        force_keyframes_at_cuts=True, merge_output_format="mp4",
-                        outtmpl={"default": str(out_base) + ".%(ext)s"})) as ydl:
-                    ydl.download([url])
-                if found(out_base):
-                    return found(out_base)[0]
-            except Exception as e:  # noqa: BLE001 - try the next way
-                errors.append(str(e)[-120:])
-            else:
-                errors.append("downloaded file had no picture")
-            clean(out_base)
+        with _lock(out_base):
+            if finished_download(out_base):
+                return finished_download(out_base)[0]
+            if full_lock.locked():          # another thread is fetching this whole video
+                with full_lock:
+                    pass
+            if finished_download(full_base):
+                return self._full_result(video_id, finished_download(full_base)[0])
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            formats = [f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b",
+                       "b[height<=720][ext=mp4][vcodec!=none]/b[height<=720][vcodec!=none]/18"]
+            errors = []
+            for fmt in formats:
+                try:
+                    with yt_dlp.YoutubeDL(self._opts(
+                            format=fmt, download_ranges=download_range_func(None, [(start, end)]),
+                            force_keyframes_at_cuts=True, merge_output_format="mp4",
+                            outtmpl={"default": str(out_base) + ".%(ext)s"})) as ydl:
+                        ydl.download([url])
+                    if finished_download(out_base):
+                        return finished_download(out_base)[0]
+                except Exception as e:  # noqa: BLE001 - try the next way
+                    errors.append(str(e)[-120:])
+                else:
+                    errors.append("downloaded file had no picture")
+                clean(out_base)
         # Last resort: the whole video (only if it is not too long), cut locally later.
+        # Several sections of one video can end up here at once: only one thread downloads,
+        # the others wait and then use its finished file.
         duration = float((read_json(self.details_dir / f"{video_id}.json") or {}).get("duration") or 0)
         if 0 < duration <= 40 * 60:
-            self.log(f"  section download refused for {video_id}; fetching the whole video instead")
-            try:
-                with yt_dlp.YoutubeDL(self._opts(
-                        format="b[height<=720][ext=mp4][vcodec!=none]/bv*[height<=720]+ba/b[vcodec!=none]",
-                        merge_output_format="mp4",
-                        outtmpl={"default": str(full_base) + ".%(ext)s"})) as ydl:
-                    ydl.download([url])
-                if found(full_base):
-                    return self._full_result(video_id, found(full_base)[0])
-            except Exception as e:  # noqa: BLE001
-                errors.append(str(e)[-120:])
+            with full_lock:
+                if finished_download(full_base):
+                    return self._full_result(video_id, finished_download(full_base)[0])
+                self.log(f"  section download refused for {video_id}; fetching the whole video instead")
+                try:
+                    with yt_dlp.YoutubeDL(self._opts(
+                            format="b[height<=720][ext=mp4][vcodec!=none]/bv*[height<=720]+ba/b[vcodec!=none]",
+                            merge_output_format="mp4",
+                            outtmpl={"default": str(full_base) + ".%(ext)s"})) as ydl:
+                        ydl.download([url])
+                    if finished_download(full_base):
+                        return self._full_result(video_id, finished_download(full_base)[0])
+                    errors.append("whole video had no picture")
+                except Exception as e:  # noqa: BLE001
+                    errors.append(str(e)[-120:])
         raise PipelineError(f"download of {video_id} [{start:.0f}-{end:.0f}s] failed: {errors[-1] if errors else '?'}")
 
     def _full_result(self, video_id, path):
@@ -286,8 +310,7 @@ class YouTubeSource:
                     captions = parse_json3(raw) if track["ext"] == "json3" else parse_vtt(raw)
                 except Exception:  # noqa: BLE001
                     captions = []
-        files = [p for p in glob.glob(str(out_base) + ".*")
-                 if p.endswith((".mp4", ".mkv", ".webm"))]
+        files = finished_download(out_base)
         if not files:
             raise PipelineError("reference video download failed")
         return files[0], {"title": info.get("title") or "", "captions": captions,

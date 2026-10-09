@@ -219,6 +219,8 @@ def run_job(job, settings, source=None, llm=None):
         if dupes:
             log(f"Dropping {len(dupes)} shots that repeat footage already shown.")
         for _round in range(3):
+            if render.drop_missing(files):
+                log("Some downloaded files disappeared - re-editing around them.")
             clip_segs = [s for s in tl["segments"] if s["type"] == "clip"]
             gone = [s for s in clip_segs if not render.locate(files, s)[0]
                     or (s["video_id"], round(s["src_start"], 2)) in dupes]
