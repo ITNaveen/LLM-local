@@ -124,7 +124,7 @@ rate and how long German and English take to appear.
 | Problem | Fix |
 | --- | --- |
 | Won't start | Look at `~/LiveTranslator/logs/app.log`; `~/Documents/LiveTranslator/toggle.sh status` shows whether it runs. |
-| "The microphone is completely silent" | System Settings → Privacy & Security → Microphone → enable **Terminal**, then restart. |
+| No sound / "No sound from '…' - checking the microphones" | Nothing to do: the app re-opens the microphone, tries the Mac's other inputs (built-in mic first) and, if macOS blocks all of them, switches to **this browser's microphone** by itself (click *Allow* if the browser asks). To see which inputs really hear sound: ⚙ Settings → **Test microphones**, or in Terminal `~/Documents/LiveTranslator/toggle.sh mictest`. To use the Mac microphone directly again: System Settings → Privacy & Security → Microphone → Terminal on, quit Terminal (⌘Q), start again. |
 | *Translator* pill is red | Start the **Ollama** app. If it says the model is missing: ⚙ Settings → Download model. German is still shown and saved; missing translations are filled in automatically when Ollama is back. |
 | *Speech* pill is red | First start needs internet to download the speech model. Check the log: `~/LiveTranslator/logs/server.log`. |
 | Lines too slow | Check the self-test numbers. Choose *Gemma 3 4B* in Settings for faster translation. |

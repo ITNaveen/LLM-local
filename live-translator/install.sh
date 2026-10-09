@@ -92,7 +92,8 @@ if [ "$RUN_TEST" = "1" ]; then
   "$VPY" -m livetranslator selftest || warn "Self-test reported a problem - see above."
 fi
 
-touch "$APP_DIR/.venv/.installed-ok"
+# remember which requirements are installed (setup-mac.sh re-installs when they change)
+shasum requirements.txt 2>/dev/null | cut -d' ' -f1 > "$APP_DIR/.venv/.installed-ok" || touch "$APP_DIR/.venv/.installed-ok"
 
 bold "Done."
 echo "  Start / stop:   double-click 'Live Translator' on the Desktop (created by setup-mac.sh)"

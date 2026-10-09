@@ -11,3 +11,5 @@ huggingface_hub>=0.23
 # speech recognition: Apple GPU on M-series Macs, CTranslate2 everywhere else
 mlx-whisper>=0.4.2 ; sys_platform == "darwin" and platform_machine == "arm64"
 faster-whisper>=1.1.0 ; sys_platform != "darwin" or platform_machine != "arm64"
+# macOS: read / request the microphone permission (to explain and fix "no sound")
+pyobjc-framework-AVFoundation>=10.0 ; sys_platform == "darwin"

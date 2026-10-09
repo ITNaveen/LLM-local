@@ -20,23 +20,142 @@ log = logging.getLogger("lt.audio")
 AudioCallback = Callable[[np.ndarray, int], None]
 
 
-def list_input_devices() -> list[dict]:
+# Names of virtual / app-provided inputs that are silent unless that app feeds them.
+_VIRTUAL_HINTS = ("teams", "zoom", "blackhole", "loopback", "soundflower", "krisp", "aggregate", "multi-output",
+                  "background music", "vb-cable", "cable output", "voicemeeter", "obs", "camo", "rogue amoeba",
+                  "audio hijack", "nvidia broadcast", "ishowu", "screenflow", "descript", "riverside", "virtual",
+                  "webex", "discord", "boom", "elgato", "mmhmm")
+_BUILTIN_HINTS = ("macbook", "built-in", "internal", "imac", "mac mini", "mac studio", "studio display")
+# a PortAudio call must never run while another one re-initialises the library
+_PA_LOCK = threading.RLock()
+
+
+def classify_device(name: str) -> str:
+    n = name.lower()
+    if any(h in n for h in _BUILTIN_HINTS):
+        return "builtin"
+    if any(h in n for h in _VIRTUAL_HINTS):
+        return "virtual"
+    if "iphone" in n or "ipad" in n:
+        return "phone"   # Continuity microphone: only works while the phone is actively connected
+    return "other"
+
+
+def _default_input_index(sd) -> int:
+    """The macOS/Windows system default input (System Settings → Sound → Input)."""
+    try:
+        return int(sd.query_devices(kind="input")["index"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        idx = sd.default.device[0]   # an _InputOutputPair - index it, it is not a list/tuple
+        return int(idx) if idx is not None else -1
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+def list_input_devices(refresh: bool = False) -> list[dict]:
+    """Input devices; refresh=True re-scans (new USB / Bluetooth devices, changed system default)."""
     try:
         import sounddevice as sd
     except Exception as e:  # noqa: BLE001  (PortAudio missing)
         log.warning("sounddevice unavailable: %s", e)
         return []
+    with _PA_LOCK:
+        try:
+            if refresh:
+                sd._terminate()
+                sd._initialize()
+            default_in = _default_input_index(sd)
+            out = []
+            for i, d in enumerate(sd.query_devices()):
+                if d.get("max_input_channels", 0) > 0:
+                    out.append({"index": i, "name": d["name"], "channels": d["max_input_channels"],
+                                "rate": int(d.get("default_samplerate") or 48000), "default": i == default_in,
+                                "kind": classify_device(d["name"])})
+            return out
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not list audio devices: %s", e)
+            return []
+
+
+def probe_device(dev: dict, seconds: float = 0.9) -> dict:
+    """Record briefly from one input. Real microphones always show some noise;
+    exact digital silence means: no permission, or a virtual device nobody feeds."""
+    import sounddevice as sd
+
+    rate = dev.get("rate") or 48000
+    channels = min(2, dev.get("channels") or 1)
+    chunks: list[np.ndarray] = []
+
+    def cb(indata, frames, t, status):
+        chunks.append(indata.copy())
+
+    res = {"name": dev["name"], "index": dev["index"], "kind": dev.get("kind", "other"),
+           "default": dev.get("default", False), "ok": False, "peak_db": None, "rms_db": None, "error": ""}
     try:
-        default_in = sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
-        out = []
-        for i, d in enumerate(sd.query_devices()):
-            if d.get("max_input_channels", 0) > 0:
-                out.append({"index": i, "name": d["name"], "channels": d["max_input_channels"],
-                            "rate": int(d.get("default_samplerate") or 48000), "default": i == default_in})
-        return out
+        with _PA_LOCK:  # held for the whole probe: no re-scan may close this stream under us
+            stream = sd.InputStream(device=dev["index"], channels=channels, samplerate=rate, dtype="float32",
+                                    blocksize=int(rate * 0.02), callback=cb)
+            stream.start()
+            time.sleep(seconds)
+            stream.stop()
+            stream.close()
     except Exception as e:  # noqa: BLE001
-        log.warning("could not list audio devices: %s", e)
-        return []
+        res["error"] = str(e)
+        return res
+    if not chunks:
+        res["error"] = "no audio callbacks"
+        return res
+    x = np.concatenate(chunks).astype(np.float64)
+    x = x[int(rate * 0.2):] if x.shape[0] > rate * 0.3 else x   # devices may start with a few silent buffers
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    rms_v = float(np.sqrt(np.mean(x ** 2))) if x.size else 0.0
+    res["peak_db"] = round(20 * np.log10(peak), 1) if peak > 0 else None
+    res["rms_db"] = round(20 * np.log10(rms_v), 1) if rms_v > 0 else None
+    res["ok"] = peak > 0.0
+    return res
+
+
+def mic_permission_status() -> str:
+    """macOS microphone permission of the app that launched us (Terminal):
+    authorized | denied | restricted | not_determined | unknown (not macOS / pyobjc missing)."""
+    import platform
+
+    if platform.system() != "Darwin":
+        return "unknown"
+    try:
+        from AVFoundation import AVCaptureDevice, AVMediaTypeAudio  # pyobjc-framework-AVFoundation
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    try:
+        st = int(AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio))
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    return {0: "not_determined", 1: "restricted", 2: "denied", 3: "authorized"}.get(st, "unknown")
+
+
+def request_mic_permission(timeout: float = 60.0) -> str:
+    """Show the macOS 'allow microphone' prompt (only possible while not yet decided)."""
+    status = mic_permission_status()
+    if status != "not_determined":
+        return status
+    try:
+        from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
+
+        done = threading.Event()
+        AVCaptureDevice.requestAccessForMediaType_completionHandler_(AVMediaTypeAudio, lambda granted: done.set())
+        done.wait(timeout)
+    except Exception:  # noqa: BLE001
+        pass
+    return mic_permission_status()
+
+
+def preferred_order(devices: list[dict], exclude: str = "") -> list[dict]:
+    """Which inputs to try when the chosen one is silent: built-in mic first, virtual devices last."""
+    rank = {"builtin": 0, "other": 1, "phone": 2, "virtual": 3}
+    return sorted((d for d in devices if d["name"] != exclude),
+                  key=lambda d: (rank.get(d.get("kind", "other"), 1), not d.get("default", False)))
 
 
 class MicSource:
@@ -46,9 +165,10 @@ class MicSource:
         self.stream = None
         self.rate = 0
         self.status_flags = 0
+        self.device: dict = {}
 
     def _resolve(self):
-        devices = list_input_devices()
+        devices = list_input_devices(refresh=True)
         if not devices:
             raise RuntimeError("No microphone found. Check that a microphone is connected and allowed.")
         if self.device_name:
@@ -74,18 +194,22 @@ class MicSource:
             mono = indata[:, 0] if channels == 1 else indata.mean(axis=1)
             self.on_audio(mono.astype(np.float32, copy=True), self.rate)
 
-        self.stream = sd.InputStream(device=dev["index"], channels=channels, samplerate=self.rate,
-                                     dtype="float32", blocksize=int(self.rate * 0.02), latency="low", callback=cb)
-        self.stream.start()
-        log.info("microphone: %s @ %d Hz", dev["name"], self.rate)
+        with _PA_LOCK:
+            self.stream = sd.InputStream(device=dev["index"], channels=channels, samplerate=self.rate,
+                                         dtype="float32", blocksize=int(self.rate * 0.02), latency="low", callback=cb)
+            self.stream.start()
+        self.device = dev
+        log.info("microphone: %s @ %d Hz (%s%s)", dev["name"], self.rate, dev.get("kind"),
+                 ", system default" if dev.get("default") else "")
         return dev["name"]
 
     def stop(self) -> None:
         s, self.stream = self.stream, None
         if s is not None:
             try:
-                s.stop()
-                s.close()
+                with _PA_LOCK:
+                    s.stop()
+                    s.close()
             except Exception:  # noqa: BLE001
                 pass
 

@@ -57,6 +57,17 @@ chmod +x install.sh start.sh toggle.sh "Live Translator.command" setup-mac.sh to
 # ---------------------------------------------------------------- 2. install (once)
 if [ -x ".venv/bin/python" ] && [ -f ".venv/.installed-ok" ]; then
   echo "✓ Already installed (models downloaded)"
+  # an update may bring new Python packages
+  want="$(shasum requirements.txt 2>/dev/null | cut -d' ' -f1)"
+  if [ -n "$want" ] && [ "$want" != "$(cat .venv/.installed-ok 2>/dev/null)" ]; then
+    echo "• Updating Python packages…"
+    if ./.venv/bin/python -m pip install -q -r requirements.txt; then
+      echo "$want" > .venv/.installed-ok
+      echo "✓ Packages up to date"
+    else
+      echo "⚠ Package update failed - run ./install.sh in $DEST"
+    fi
+  fi
 else
   echo "• Installing (one time, ~15 min - mostly downloading the models)…"
   ./install.sh

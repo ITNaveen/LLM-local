@@ -247,9 +247,8 @@ function applyStatus(st) {
     $("#meterFill").style.width = "0";
     $("#meterVoice").classList.remove("on");
   }
-  // browser-audio helper bar
-  const browserSrc = S.settings && S.settings.input_source === "browser";
-  $("#browserAudio").hidden = !(browserSrc && st.state === "listening");
+  updateBrowserAudioBar();
+  $("#srcName").textContent = st.state === "listening" && st.source ? "Listening with: " + st.source : "";
   setPartial($("#partial .de").textContent);
   updateEmpty();
   const hint = [];
@@ -299,6 +298,7 @@ function onEvent(ev) {
       if (ev.removed) toast("info", "Nothing was said - the empty meeting was not kept.");
       else if (ev.meeting) toast("ok", `Saved: ${ev.meeting.title} (${ev.meeting.line_count} lines)`);
       // the transcript stays on screen; the header is ready for the next meeting
+      stopBrowserAudio();
       S.live.meeting = null;
       $("#meetingName").dataset.pending = "";
       updateMeetingHeader();
@@ -312,6 +312,7 @@ function onEvent(ev) {
     case "partial": setPartial(ev.text); break;
     case "level": updateMeter(ev); break;
     case "notice": toast(ev.level, ev.text); break;
+    case "browser_audio_needed": if (!BA.ctx) startBrowserAudio("mic", true); break;
     case "meetings_changed": if (!$("#meetingsDrawer").hidden) loadMeetings(); break;
     case "settings": S.settings = ev.settings; applySettings(); break;
     case "pull": onPull(ev); break;
@@ -542,7 +543,18 @@ function applySettings() {
   $("#fontOut").textContent = Math.round(s.font_scale * 100) + "%";
   $$("[data-for-source]").forEach((el) => (el.hidden = el.dataset.forSource !== s.input_source));
   updatePullBox();
-  if (S.status) $("#browserAudio").hidden = !(s.input_source === "browser" && S.status.state === "listening");
+  updateBrowserAudioBar();
+}
+
+function updateBrowserAudioBar() {
+  const st = S.status;
+  const show = !!(st && st.state === "listening" && (st.source_kind === "browser" || (S.settings && S.settings.input_source === "browser")));
+  $("#browserAudio").hidden = !show;
+  if (!show) return;
+  const fallback = S.settings && S.settings.input_source === "mic";
+  $("#baText").innerHTML = fallback
+    ? "macOS gives no sound from the Mac microphone - using <b>this browser's microphone</b>."
+    : "Audio input is set to <b>this browser</b>.";
 }
 
 let saveTimer = null, pendingChanges = {};
@@ -644,7 +656,7 @@ function onPull(ev) {
 
 // ------------------------------------------------------------------ browser audio (remote / host-name use)
 const BA = { ctx: null, ws: null, stream: null, node: null };
-async function startBrowserAudio(kind) {
+async function startBrowserAudio(kind, automatic) {
   stopBrowserAudio();
   try {
     let stream;
@@ -656,6 +668,7 @@ async function startBrowserAudio(kind) {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
     }
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state !== "running") { try { await ctx.resume(); } catch (_) { /* needs a click */ } }
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws/audio`);
     ws.binaryType = "arraybuffer";
@@ -686,10 +699,30 @@ async function startBrowserAudio(kind) {
       node.connect(ctx.destination);
     }
     Object.assign(BA, { ctx, ws, stream, node });
-    $("#baState").textContent = kind === "tab" ? "● sending shared audio" : "● sending microphone";
+    const label = (stream.getAudioTracks()[0] && stream.getAudioTracks()[0].label) || "microphone";
+    $("#baState").textContent = kind === "tab" ? "● sending shared audio" : "● sending: " + label;
     stream.getAudioTracks()[0].onended = stopBrowserAudio;
+    if (ctx.state !== "running") {
+      // the browser wants a click before audio may run
+      $("#baState").textContent = "▶ click anywhere on this page to start the microphone";
+      toast("warn", "Click anywhere on this page to start the browser microphone.");
+      const go = async () => {
+        try { await ctx.resume(); } catch (_) { /* */ }
+        if (ctx.state === "running") {
+          $("#baState").textContent = "● sending: " + label;
+          document.removeEventListener("click", go, true);
+        }
+      };
+      document.addEventListener("click", go, true);
+    }
+    ws.onclose = () => { if (BA.ws === ws) stopBrowserAudio(); };
   } catch (e) {
-    toast("error", "Browser audio: " + e.message + (window.isSecureContext ? "" : " (needs https:// or localhost)"));
+    let msg = e && e.name === "NotAllowedError"
+      ? "The browser was not allowed to use the microphone. Click the microphone/lock icon in the address bar → Allow, "
+        + "and check System Settings → Privacy & Security → Microphone → your browser."
+      : (e.message || String(e));
+    if (!window.isSecureContext) msg += " (needs https:// or localhost)";
+    toast("error", "Browser microphone: " + msg);
     stopBrowserAudio();
   }
 }
@@ -702,6 +735,37 @@ function stopBrowserAudio() {
   $("#baState").textContent = "";
 }
 $("#baMic").onclick = () => startBrowserAudio("mic");
+
+// ------------------------------------------------------------------ microphone test
+$("#micTestBtn").onclick = async () => {
+  const btn = $("#micTestBtn"), out = $("#micTestOut");
+  btn.disabled = true;
+  btn.textContent = "Testing… (play some sound)";
+  out.innerHTML = "";
+  try {
+    const r = await api("/api/mictest", { body: {} });
+    const perm = { authorized: "allowed", denied: "BLOCKED - System Settings → Privacy & Security → Microphone → Terminal", restricted: "blocked by a policy", not_determined: "not asked yet", unknown: "" }[r.permission];
+    if (perm) { const p = document.createElement("p"); p.className = "small"; p.textContent = "macOS microphone permission: " + perm; out.appendChild(p); }
+    for (const d of r.devices) {
+      const row = document.createElement("div");
+      row.className = "mic-row" + (d.ok ? "" : " bad");
+      const pct = d.peak_db === null ? 0 : Math.max(3, Math.min(100, (d.peak_db + 70) / 70 * 100));
+      row.innerHTML = '<span class="name"></span><span class="lvl"><i></i></span><span class="act"></span><span class="why"></span>';
+      $(".name", row).textContent = d.name + (d.default ? " (system default)" : "");
+      $(".lvl i", row).style.width = pct + "%";
+      $(".why", row).textContent = d.error ? "error: " + d.error : d.ok ? `hears sound (peak ${d.peak_db} dB)` : "silent - blocked or a virtual device";
+      if (d.ok) {
+        const use = document.createElement("button");
+        use.type = "button"; use.className = "ghost"; use.textContent = "Use";
+        use.onclick = () => { saveSettings({ input_device: d.name }); $("#deviceSelect").value = d.name; };
+        $(".act", row).appendChild(use);
+      }
+      out.appendChild(row);
+    }
+  } catch (e) { toast("error", e.message); }
+  btn.disabled = false;
+  btn.textContent = "Test microphones";
+};
 $("#baTab").onclick = () => startBrowserAudio("tab");
 
 // ------------------------------------------------------------------ boot

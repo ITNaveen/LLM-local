@@ -4,6 +4,7 @@
 #
 #  Double-click (Desktop icon)  → starts it if it is off, stops it if it is on.
 #  toggle.sh start | stop | status   for scripts.
+#  toggle.sh mictest                 which microphones really hear sound
 #
 #  START: runs the app in the background, opens it in the browser.
 #  STOP : finishes and saves the meeting in progress, stops the app and
@@ -137,6 +138,7 @@ case "${1:-toggle}" in
   start)  if running; then echo "Already running - opening it."; open_browser; else do_start; fi ;;
   stop)   do_stop ;;
   status) if running; then echo "running (pid $(server_pid)) - $URL"; else echo "stopped"; exit 1; fi ;;
+  mictest) cd "$APP_DIR" && exec "$VPY" -m livetranslator mictest ;;
   toggle) if running; then do_stop; else do_start; fi ;;
-  *) echo "usage: $0 [start|stop|status]"; exit 2 ;;
+  *) echo "usage: $0 [start|stop|status|mictest]"; exit 2 ;;
 esac

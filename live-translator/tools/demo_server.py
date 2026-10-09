@@ -24,9 +24,16 @@ def main():
     ap.add_argument("--home", default="")
     ap.add_argument("--source", default="browser")
     ap.add_argument("--token-delay", type=float, default=0.06)
+    ap.add_argument("--fake-mics", default="", help="simulate Mac inputs: all-silent | default-silent | ok")
     a = ap.parse_args()
     home = a.home or tempfile.mkdtemp(prefix="lt-demo-")
     os.environ["LT_HOME"] = home
+    if a.fake_mics:
+        from fake_sounddevice import MAC_DEVICES, FakeSoundDevice
+
+        behaviour = {"all-silent": {n: "zeros" for n, _, _ in MAC_DEVICES},
+                     "default-silent": {"MacBook Pro Microphone": "zeros"}, "ok": {}}[a.fake_mics]
+        sys.modules["sounddevice"] = FakeSoundDevice(MAC_DEVICES, default_index=1, behaviour=behaviour)
     import uvicorn
     from fake_ollama import FakeOllama
 

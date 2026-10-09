@@ -55,7 +55,7 @@
 </div>
 
 <div id="browserAudio" class="browser-audio" hidden>
-  <span>Audio input is set to <b>this browser</b>.</span>
+  <span id="baText">Audio input is set to <b>this browser</b>.</span>
   <button id="baMic" class="ghost">Send this browser's microphone</button>
   <button id="baTab" class="ghost" title="Chrome/Edge: share a tab or the screen with 'Share audio' ticked">Send tab / system audio</button>
   <span id="baState" class="muted"></span>
@@ -66,7 +66,7 @@
     <section id="summaryBox" class="summary" hidden></section>
     <section id="liveFeed" class="feed" aria-live="polite"></section>
     <section id="viewFeed" class="feed" hidden></section>
-    <div id="partial" class="line partial" hidden><div class="t"><span class="dot"></span></div><div class="body"><div class="de"></div></div></div>
+    <div id="partial" class="line partial" hidden><div class="t"><span class="dot"></span></div><div class="body"><div class="de"></div><div class="src muted small" id="srcName"></div></div></div>
     <div id="emptyState" class="empty">
       <h1>Ready when you are.</h1>
       <p>Put the meeting on the speaker next to this laptop and press <b>Start</b>.<br>
@@ -98,6 +98,11 @@
       <label data-for-source="mic">Microphone
         <select name="input_device" id="deviceSelect"><option value="">System default</option></select>
       </label>
+      <div data-for-source="mic" class="mictest">
+        <button type="button" id="micTestBtn" class="ghost">Test microphones</button>
+        <small>Records 1 second from every input - play some sound while it runs.</small>
+        <div id="micTestOut"></div>
+      </div>
       <label>Sensitivity
         <select name="sensitivity">
           <option value="normal">Normal (recommended)</option>

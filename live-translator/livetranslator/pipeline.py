@@ -27,7 +27,8 @@ from typing import Callable
 import numpy as np
 
 from .asr import BaseASR, build_prompt, create_asr
-from .audio_io import FileSource, MicSource, PushSource
+from .audio_io import (FileSource, MicSource, PushSource, list_input_devices, mic_permission_status, preferred_order,
+                       probe_device, request_mic_permission)
 from .config import ASR_MODELS, Settings, SettingsStore
 from .dsp import level_segment
 from .frontend import FrontEnd
@@ -96,6 +97,8 @@ class Pipeline:
         self._caffeinate = None
         self._llm_fail_noticed = False
         self._summary_busy = False
+        self._recovery_done_at = 0.0
+        self._mic_blocked = False   # macOS blocked every microphone this run -> go straight to the browser
         self.on_session_end: Callable[[Session], None] | None = None
 
         self._threads = [
@@ -119,6 +122,7 @@ class Pipeline:
             "llm": {k: v for k, v in self.llm_state.items()},
             "meeting": self.session.meeting.meta() if self.session else None,
             "source": self.source_name,
+            "source_kind": self._source_kind(),
         }
 
     def snapshot(self) -> dict:
@@ -161,7 +165,8 @@ class Pipeline:
                     self._audio_q.get_nowait()
                 except queue.Empty:
                     break
-            src = source or self._make_source()
+            via_browser_fallback = source is None and self.settings.input_source == "mic" and self._mic_blocked
+            src = source or (PushSource(self.push_audio) if via_browser_fallback else self._make_source())
             self._proc_thread = threading.Thread(target=self._proc_loop, args=(sess,), name="processor", daemon=True)
             self._proc_thread.start()
             try:
@@ -172,11 +177,15 @@ class Pipeline:
                 self.store.finish(meeting)
                 raise RuntimeError(f"Could not open the microphone: {e}") from e
             self.source = src
+            if via_browser_fallback:
+                self.source_name = "This browser's microphone"
             self.state = "listening"
             self._keep_awake(True)
         self.publish({"type": "session", "meeting": meeting.meta(),
                       "lines": [self._line_dict(ln) for ln in meeting.lines]})
         self.publish(self.status())
+        if via_browser_fallback:
+            self.publish({"type": "browser_audio_needed", "reason": "permission"})
         self.publish({"type": "meetings_changed"})
         if not self.llm_state.get("model_ready"):
             threading.Thread(target=self._warm_llm, daemon=True).start()
@@ -374,6 +383,9 @@ class Pipeline:
         started = time.monotonic()
         silent_warned = False
         got_audio = False
+        first_audio_t = None
+        recovery_started = False
+        self._recovery_done_at = 0.0
         while True:
             try:
                 x, rate = self._audio_q.get(timeout=0.25)
@@ -392,6 +404,8 @@ class Pipeline:
             if x.size == 0:
                 continue
             got_audio = True
+            if first_audio_t is None:
+                first_audio_t = time.monotonic()
             if cfg_version != self._seg_cfg_version:
                 cfg_version = self._seg_cfg_version
                 fe.configure(self.settings)
@@ -407,10 +421,18 @@ class Pipeline:
                     self.publish({"type": "level", "db": round(db, 1), "speech": seg.in_speech,
                                   "boost": round(fe.boost_db(), 1)})
                 last_lvl = now
-            if not silent_warned and now - started > 4 and fe.peak == 0.0:
+            # Exact digital silence never comes from a working microphone (a quiet room still
+            # has noise): the input is blocked by macOS or is a silent/virtual device. Fix it.
+            if (not recovery_started and first_audio_t is not None and now - first_audio_t > 2.0
+                    and fe.peak == 0.0 and isinstance(self.source, MicSource)):
+                recovery_started = True
+                threading.Thread(target=self._recover_silent_mic, args=(sess,), name="mic-recovery",
+                                 daemon=True).start()
+            if (recovery_started and not silent_warned and self._recovery_done_at
+                    and time.monotonic() - self._recovery_done_at > 8 and fe.peak == 0.0):
                 silent_warned = True
-                self._notice("error", "The microphone is completely silent. On a Mac: System Settings → Privacy & "
-                                      "Security → Microphone → allow Terminal, then restart Live Translator.")
+                self._notice("error", "Still no sound from any microphone. Check System Settings → Sound → Input: "
+                                      "pick the MacBook microphone and raise the input volume. Then Stop and Start.")
             # live preview of the line being spoken
             # (only while words are coming: when a pause starts, the final pass is due soon
             # and must not wait behind a preview)
@@ -426,6 +448,86 @@ class Pipeline:
         for segment in fe.flush():
             self._asr_q.put(("final", sess, segment))
         self._cur_seg_start = None
+
+    def _source_kind(self) -> str:
+        src = self.source
+        if isinstance(src, PushSource):
+            return "browser"
+        if isinstance(src, MicSource):
+            return "mic"
+        return "file" if src is not None else ""
+
+    def _recover_silent_mic(self, sess: Session) -> None:
+        """The microphone delivers digital silence. In order:
+        1. reopen it (fixes a macOS permission that was granted after recording started),
+        2. try the other inputs - built-in microphone first, virtual devices last,
+        3. otherwise capture in the browser, which asks for permission itself."""
+        def live() -> bool:
+            return self.session is sess and self.state == "listening"
+
+        with self._lock:
+            if not live() or not isinstance(self.source, MicSource):
+                return
+            old, old_name = self.source, self.source_name
+            self.source = None
+        old.stop()
+        log.warning("microphone %r delivers digital silence - recovering", old_name)
+        self.publish({"type": "mic_check", "state": "checking", "device": old_name})
+        self._notice("warn", f"No sound from '{old_name}' - checking the microphones…")
+        try:
+            perm = mic_permission_status()
+            if perm == "not_determined":
+                perm = request_mic_permission(timeout=45)
+            found, tried = None, []
+            if perm not in ("denied", "restricted"):
+                time.sleep(0.3)
+                devices = list_input_devices(refresh=True)
+                order = [d for d in devices if d["name"] == old_name] + preferred_order(devices, exclude=old_name)
+                for d in order:
+                    if not live():
+                        return
+                    r = probe_device(d)
+                    tried.append(r)
+                    log.info("probe %s: ok=%s peak=%s %s", d["name"], r["ok"], r["peak_db"], r["error"])
+                    if r["ok"]:
+                        found = d
+                        break
+            with self._lock:
+                if not live():
+                    return
+                if found:
+                    src = MicSource(found["name"], self.push_audio)
+                    try:
+                        self.source_name = src.start()
+                        self.source = src
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("could not open %s: %s", found["name"], e)
+                        found = None
+                if not found:
+                    push = PushSource(self.push_audio)
+                    push.start()
+                    self.source = push
+                    self.source_name = "This browser's microphone"
+            if found:
+                if found["name"] != old_name:
+                    self.cfg.update({"input_device": found["name"]})
+                    self.publish({"type": "settings", "settings": self.settings.to_dict()})
+                    self._notice("ok", f"Switched to '{found['name']}' ('{old_name}' gave no sound). "
+                                       "This microphone is now remembered in Settings.")
+                else:
+                    self._notice("ok", f"'{found['name']}' works now.")
+            else:
+                blocked = perm in ("denied", "restricted") or (tried and not any(r["ok"] for r in tried))
+                self._mic_blocked = bool(blocked)
+                self.publish({"type": "browser_audio_needed", "reason": "permission" if blocked else "silent",
+                              "permission": perm})
+                self._notice("warn", "macOS gives Live Translator no microphone sound (Privacy & Security → "
+                                     "Microphone). Using this browser's microphone instead - click Allow if the "
+                                     "browser asks. For the Mac microphone: allow Terminal there, quit Terminal "
+                                     "(⌘Q) and start Live Translator again.")
+        finally:
+            self._recovery_done_at = time.monotonic()
+            self.publish(self.status())
 
     # ================================================================ ASR
     def _load_asr(self) -> None:

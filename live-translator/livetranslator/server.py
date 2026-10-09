@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .audio_io import PushSource, list_input_devices
+from .audio_io import PushSource, list_input_devices, mic_permission_status, preferred_order, probe_device
 from .config import APP_NAME, ASR_MODELS, RECOMMENDED_LLMS, SettingsStore, home_dir, logs_dir
 from .pipeline import Pipeline
 from .storage import MeetingStore
@@ -242,7 +242,22 @@ def create_app(pipeline_factory=None, store: MeetingStore | None = None, setting
 
     @app.get("/api/devices")
     async def devices():
-        return await asyncio.to_thread(list_input_devices)
+        # re-scan only while no microphone is open (a re-scan restarts the audio library)
+        return await asyncio.to_thread(list_input_devices, P().state == "idle" and P().source is None)
+
+    @app.post("/api/mictest")
+    async def mictest():
+        """Record ~1 s from every input: which ones actually hear something?"""
+        p = P()
+        if p.state != "idle":
+            raise HTTPException(409, "Stop the meeting first - the microphone is in use")
+
+        def run():
+            devs = list_input_devices(refresh=True)
+            return {"permission": mic_permission_status(),
+                    "devices": [probe_device(d) for d in preferred_order(devs)]}
+
+        return await asyncio.to_thread(run)
 
     @app.get("/api/models")
     async def models():

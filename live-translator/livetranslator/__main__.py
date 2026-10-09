@@ -74,6 +74,43 @@ def cmd_devices(_a) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- mictest
+def cmd_mictest(_a) -> int:
+    """Record ~1 s from every input and show which ones really hear something."""
+    from .audio_io import list_input_devices, mic_permission_status, preferred_order, probe_device, request_mic_permission
+
+    perm = mic_permission_status()
+    if perm == "not_determined":
+        print("macOS will now ask whether Terminal may use the microphone - click Allow.")
+        perm = request_mic_permission()
+    print(f"Microphone permission for this Terminal app: {perm}")
+    devs = list_input_devices(refresh=True)
+    if not devs:
+        print("No input devices found.")
+        return 1
+    print("Speak or play something now - testing each input for 1 second…\n")
+    good = []
+    for d in preferred_order(devs):
+        r = probe_device(d, seconds=1.0)
+        if r["error"]:
+            state = f"error: {r['error']}"
+        elif not r["ok"]:
+            state = "SILENT (digital zeros - blocked or a virtual device)"
+        else:
+            state = f"hears sound  (peak {r['peak_db']} dB, average {r['rms_db']} dB)"
+            good.append(d["name"])
+        tag = " [system default]" if d.get("default") else ""
+        print(f"  {d['name']}{tag}  [{d['kind']}]\n      -> {state}")
+    print()
+    if good:
+        print(f"OK - use: {good[0]}   (Live Translator picks a working microphone automatically)")
+        return 0
+    print("No input delivers sound. macOS is blocking the microphone for Terminal:")
+    print("  System Settings → Privacy & Security → Microphone → turn on Terminal, then quit Terminal (⌘Q) and retry.")
+    print("  (Live Translator will meanwhile use the browser's microphone automatically.)")
+    return 2
+
+
 # ---------------------------------------------------------------- download
 def cmd_download(a) -> int:
     from .asr import resolve_hf_model
@@ -289,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--ssl-keyfile", default=os.environ.get("LT_SSL_KEY") or None)
     sp.add_argument("-v", "--verbose", action="store_true")
     sub.add_parser("devices", help="list microphones")
+    sub.add_parser("mictest", help="test which microphones hear sound")
     dp = sub.add_parser("download", help="download the models")
     dp.add_argument("--all", action="store_true", help="also the alternative speech model")
     dp.add_argument("--skip-llm", action="store_true")
@@ -303,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(a)
     if a.cmd == "devices":
         return cmd_devices(a)
+    if a.cmd == "mictest":
+        return cmd_mictest(a)
     if a.cmd == "download":
         return cmd_download(a)
     if a.cmd == "selftest":

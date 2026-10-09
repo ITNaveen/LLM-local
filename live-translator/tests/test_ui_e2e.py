@@ -153,3 +153,81 @@ def test_live_meeting_in_browser(server, meeting_wav):
         assert not any(day.iterdir()) if day.exists() else True
         assert not errors, errors
         browser.close()
+
+
+def test_blocked_mac_microphone_falls_back_to_browser(tmp_path, meeting_wav):
+    """The user's situation: macOS gives every Mac microphone digital silence. Pressing Start must
+    still produce lines - the page switches to the browser's microphone by itself."""
+    port = free_port()
+    proc = subprocess.Popen([sys.executable, str(ROOT / "tools" / "demo_server.py"), "--port", str(port),
+                             "--home", str(tmp_path), "--source", "mic", "--fake-mics", "all-silent"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(100):
+            try:
+                urlopen(url + "/api/info", timeout=1)
+                break
+            except Exception:  # noqa: BLE001
+                time.sleep(0.2)
+        with pw.sync_playwright() as p:
+            kw = {"executable_path": CHROME} if Path(CHROME).exists() else {}
+            browser = p.chromium.launch(args=[
+                "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+                f"--use-file-for-fake-audio-capture={meeting_wav}"], **kw)
+            page = browser.new_page(viewport={"width": 1280, "height": 820})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(url)
+            page.wait_for_selector("#startBtn:not([disabled])")
+            page.wait_for_selector("#asrPill.ok")
+            page.click("#startBtn")                      # nothing else - no clicks on browser-audio buttons
+            page.wait_for_selector("#browserAudio:not([hidden])", timeout=30000)
+            assert "macOS gives no sound" in page.inner_text("#baText")
+            page.wait_for_function("document.querySelector('#baState').textContent.includes('sending')", timeout=15000)
+            page.wait_for_function("document.querySelectorAll('#liveFeed .line').length >= 2", timeout=90000)
+            assert "browser" in page.inner_text("#srcName").lower()
+            page.screenshot(path=str(SHOTS / "06-browser-fallback.png"))
+            page.click("#startBtn")
+            page.wait_for_selector("#startBtn.primary", timeout=30000)
+            assert page.inner_text("#baState") == ""     # browser capture stopped with the meeting
+            assert not errors, errors
+            browser.close()
+    finally:
+        proc.terminate()
+        proc.wait(10)
+
+
+def test_mic_test_panel(tmp_path):
+    port = free_port()
+    proc = subprocess.Popen([sys.executable, str(ROOT / "tools" / "demo_server.py"), "--port", str(port),
+                             "--home", str(tmp_path), "--source", "mic", "--fake-mics", "default-silent"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(100):
+            try:
+                urlopen(url + "/api/info", timeout=1)
+                break
+            except Exception:  # noqa: BLE001
+                time.sleep(0.2)
+        with pw.sync_playwright() as p:
+            kw = {"executable_path": CHROME} if Path(CHROME).exists() else {}
+            browser = p.chromium.launch(**kw)
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.goto(url)
+            page.click("#settingsBtn")
+            page.click("#micTestBtn")
+            page.wait_for_selector(".mic-row", timeout=20000)
+            rows = page.eval_on_selector_all(".mic-row", "els => els.map(e => e.innerText)")
+            assert any("MacBook Pro Microphone (system default)" in r and "silent" in r for r in rows), rows
+            assert any("External USB Mic" in r and "hears sound" in r for r in rows), rows
+            page.screenshot(path=str(SHOTS / "07-mic-test.png"))
+            page.click(".mic-row:not(.bad) button")
+            page.wait_for_selector("#savedMark:not([hidden])", timeout=5000)
+            assert json.loads(urlopen(url + "/api/settings").read())["input_device"] in (
+                "External USB Mic", "iPhone Microphone", "Microsoft Teams Audio")
+            browser.close()
+    finally:
+        proc.terminate()
+        proc.wait(10)
