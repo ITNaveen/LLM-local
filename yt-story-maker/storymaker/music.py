@@ -135,55 +135,177 @@ def beats_from_signal(x, sr):
     return [round(float((phase + i * period) / fps), 3) for i in range(int((n - phase) / period))]
 
 
-# ------------------------------------------------------------------ fallback music
+# ------------------------------------------------------------------ built-in score
+# Used when the music folder is empty: a generated news-thriller bed in the style of Hindi news
+# packages - a dark drone, a ticking pulse, a heartbeat, a pluck ostinato and a low "braam" hit
+# every few bars. Everything is plain sine/noise synthesis, so nothing is copyrighted.
+MINOR = [[0, 3, 7], [-4, 0, 3], [3, 7, 10], [-2, 2, 5]]       # i - VI - III - VII
+MAJOR = [[0, 4, 7], [5, 9, 12], [-3, 0, 4], [7, 11, 14]]      # I - IV - vi - V
 MOOD_SYNTH = {
-    # (root Hz, chord intervals per bar (semitones), bpm, pulse strength, brightness)
-    "epic":       (73.42, [[0, 3, 7], [-4, 0, 3], [-9, -5, -2], [-2, 2, 5]], 88, 0.9, 0.7),
-    "tense":      (65.41, [[0, 3, 6], [0, 3, 7], [1, 4, 8], [0, 3, 6]], 104, 0.8, 0.5),
-    "emotional":  (98.00, [[0, 4, 7], [-3, 0, 4], [-8, -5, -1], [-5, -1, 2]], 72, 0.0, 0.6),
-    "triumphant": (87.31, [[0, 4, 7], [5, 9, 12], [-3, 0, 4], [7, 11, 14]], 96, 0.7, 0.9),
-    "calm":       (110.0, [[0, 4, 7], [5, 9, 12], [-3, 0, 4], [-5, -1, 2]], 66, 0.0, 0.4),
-    "dark":       (55.00, [[0, 3, 7], [1, 5, 8], [0, 3, 7], [-2, 1, 5]], 70, 0.5, 0.3),
+    #              root Hz  chords bpm  drone tick heart ostinato drums pad  braam every
+    "tense":      (55.00, MINOR, 112, 0.55, 0.30, 0.70, 0.45, 0.00, 0.00, 8),
+    "dark":       (49.00, MINOR, 92, 0.75, 0.18, 0.85, 0.30, 0.00, 0.00, 8),
+    "epic":       (55.00, MINOR, 96, 0.50, 0.20, 0.00, 0.50, 0.90, 0.25, 4),
+    "triumphant": (65.41, MAJOR, 100, 0.35, 0.20, 0.00, 0.45, 0.75, 0.45, 4),
+    "emotional":  (65.41, MINOR, 72, 0.25, 0.00, 0.00, 0.40, 0.00, 0.70, 0),
+    "calm":       (65.41, MAJOR, 70, 0.20, 0.00, 0.00, 0.25, 0.00, 0.70, 0),
 }
 
 
+def _place(out, sound, at, gain=1.0):
+    """Add a (mono or stereo) sound into out at sample index `at`."""
+    if at >= len(out) or at + len(sound) <= 0:
+        return
+    s0, e = max(0, at), min(len(out), at + len(sound))
+    piece = sound[s0 - at:e - at]
+    out[s0:e] += gain * (piece[:, None] if piece.ndim == 1 else piece)
+
+
+def _tone(freq, seconds, decay, harmonics=(1.0, 0.3, 0.12), attack=0.004, sr=SR):
+    t = np.arange(int(seconds * sr)) / sr
+    env = np.minimum(1.0, t / attack) * np.exp(-t / decay)
+    wave = sum(a * np.sin(2 * np.pi * freq * (k + 1) * t) for k, a in enumerate(harmonics))
+    return (wave * env).astype(np.float32)
+
+
+def _thump(seconds=0.45, f0=95.0, f1=42.0, decay=0.16, sr=SR):
+    """Kick / heartbeat: a sine that drops in pitch."""
+    t = np.arange(int(seconds * sr)) / sr
+    freq = f1 + (f0 - f1) * np.exp(-t * 18)
+    phase = 2 * np.pi * np.cumsum(freq) / sr
+    return (np.sin(phase) * np.exp(-t / decay) * np.minimum(1, t / 0.002)).astype(np.float32)
+
+
+def _noise(n, rng):
+    return rng.standard_normal(n).astype(np.float32)
+
+
+def _smooth(x, length):
+    """Moving average (a gentle low-pass); length may vary per sample."""
+    cs = np.concatenate([[0.0], np.cumsum(x, dtype=np.float64)])
+    idx = np.arange(1, len(x) + 1)
+    L = np.clip(np.asarray(length, dtype=int) if np.ndim(length) else np.full(len(x), int(length)), 1, None)
+    lo = np.maximum(0, idx - L)
+    return ((cs[idx] - cs[lo]) / (idx - lo)).astype(np.float32)
+
+
+def _tick(rng, sr=SR):
+    n = int(0.05 * sr)
+    x = np.diff(_noise(n + 1, rng))                        # high-passed noise: a hi-hat tick
+    return (x * np.exp(-np.arange(n) / (0.012 * sr))).astype(np.float32)
+
+
 def synth_bed(mood, seconds, seed=0):
-    """A simple generated cinematic pad + pulse. Placeholder until you add real tracks."""
-    root, chords, bpm, pulse, bright = MOOD_SYNTH.get(mood, MOOD_SYNTH["epic"])
+    """Generated cinematic news bed (stereo float32, about -20 dBFS)."""
+    root, chords, bpm, drone, tick, heart, ost, drums, pad, braam_every = \
+        MOOD_SYNTH.get(mood, MOOD_SYNTH["tense"])
     rng = np.random.default_rng(seed)
     n = int(seconds * SR)
-    t = np.arange(n) / SR
     out = np.zeros((n, 2), dtype=np.float32)
+    t = np.arange(n) / SR
     beat = 60.0 / bpm
     bar = beat * 4
-    for b in range(int(seconds / bar) + 1):
-        s0 = int(b * bar * SR)
-        s1 = min(n, int((b + 1) * bar * SR + 0.6 * SR))
-        if s0 >= n:
-            break
-        tt = t[s0:s1] - b * bar
-        env = np.minimum(1, tt / 0.8) * np.exp(-np.maximum(0, tt - bar) * 4)
-        for semi in chords[b % len(chords)]:
-            f = root * 2 ** (semi / 12) * 2
-            for k, amp in ((1, 1.0), (2, 0.35 * bright), (3, 0.15 * bright)):
-                for ch, det in ((0, 0.997), (1, 1.003)):
-                    out[s0:s1, ch] += (0.05 * amp * env *
-                                       np.sin(2 * np.pi * f * k * det * tt + rng.random() * 6))
-        # sub bass
-        out[s0:s1, :] += (0.08 * env * np.sin(2 * np.pi * root * 2 ** (chords[b % len(chords)][0] / 12) * tt))[:, None]
-    if pulse:
-        k_len = int(0.35 * SR)
-        kt = np.arange(k_len) / SR
-        kick = (np.sin(2 * np.pi * (45 + 60 * np.exp(-kt * 30)) * kt) * np.exp(-kt * 9)).astype(np.float32)
-        for i in range(int(seconds / beat)):
-            s = int(i * beat * SR)
-            e = min(n, s + k_len)
-            out[s:e, :] += (pulse * 0.35 * kick[: e - s])[:, None]
-    fade = min(n, int(1.5 * SR))
-    out[:fade] *= np.linspace(0, 1, fade)[:, None]
-    out[n - fade:] *= np.linspace(1, 0, fade)[:, None]
-    peak = np.abs(out).max() or 1.0
-    return out / peak * 0.6
+    n_bars = int(seconds / bar) + 1
+
+    if drone:   # two slightly detuned voices per note, slow swell
+        swell = 0.75 + 0.25 * np.sin(2 * np.pi * 0.05 * t + rng.random() * 6)
+        for semi, amp in ((0, 1.0), (7, 0.5), (12, 0.35)):
+            f = root * 2 ** (semi / 12)
+            for ch, det in ((0, 0.998), (1, 1.002)):
+                for k, ha in enumerate((1.0, 0.45, 0.22, 0.1)):
+                    out[:, ch] += (drone * 0.07 * amp * ha * swell *
+                                   np.sin(2 * np.pi * f * det * (k + 1) * t + k)).astype(np.float32)
+    for b in range(n_bars):
+        bar_start = int(b * bar * SR)
+        chord = chords[(b // 2) % len(chords)]
+        if pad:     # soft chord pad, one per two bars
+            if b % 2 == 0:
+                for semi in chord:
+                    f = root * 4 * 2 ** (semi / 12)
+                    note = _tone(f, bar * 2 + 1.0, decay=bar * 1.6, harmonics=(1.0, 0.2), attack=0.6)
+                    _place(out, note, bar_start, pad * 0.05)
+        if ost:     # 8th/16th-note pluck ostinato over the chord
+            notes = [chord[0], chord[1], chord[2], chord[1] + 12 if bpm > 90 else chord[2]]
+            steps = 8 if bpm > 90 else 4
+            for k in range(steps):
+                semi = notes[k % len(notes)] + 12
+                f = root * 4 * 2 ** (semi / 12)
+                pl = _tone(f, 0.45, decay=0.11 if bpm > 90 else 0.5, harmonics=(1.0, 0.35, 0.1))
+                pan = 0.35 + 0.3 * (k % 2)
+                at = bar_start + int(k * bar / steps * SR)
+                _place(out, np.stack([pl * (1 - pan), pl * pan], axis=1), at, ost * 0.22)
+        if heart:   # lub-dub every bar
+            th = _thump(0.4, 80, 40, 0.12)
+            _place(out, th, bar_start, heart * 0.30)
+            _place(out, th, bar_start + int(beat * 0.45 * SR), heart * 0.18)
+        if drums:   # taiko-like hits on 1 and 3, ghost on 4+
+            for at_beat, g in ((0, 1.0), (2, 0.8), (3.5, 0.45)):
+                hit = _thump(0.6, 120, 48, 0.2) + 0.25 * _smooth(_noise(int(0.6 * SR), rng), 6) * \
+                    np.exp(-np.arange(int(0.6 * SR)) / (0.04 * SR))
+                _place(out, hit.astype(np.float32), bar_start + int(at_beat * beat * SR), drums * 0.32 * g)
+        if tick:    # ticking clock: 8th notes, accented on the beat
+            for k in range(8):
+                _place(out, _tick(rng), bar_start + int(k * beat / 2 * SR), tick * (0.16 if k % 2 == 0 else 0.09))
+        if braam_every and b % braam_every == 0 and b > 0:
+            br = sum(_tone(root * m * 2 ** (chord[0] / 12), 3.2, decay=1.1, harmonics=(1.0, 0.6, 0.4, 0.25),
+                           attack=0.02) for m in (1, 2, 3))
+            _place(out, br, bar_start, 0.07)            # an accent, never louder than a voice
+            _place(out, _thump(1.2, 70, 30, 0.45), bar_start, 0.2)
+    fade = min(n // 2, int(1.5 * SR))
+    if fade:
+        out[:fade] *= np.linspace(0, 1, fade)[:, None]
+        out[n - fade:] *= np.linspace(1, 0, fade)[:, None]
+    return _level(out, 0.10)
+
+
+def _level(x, rms):
+    """Bring to a target loudness, then a soft limiter so hits never clip."""
+    cur = float(np.sqrt((x ** 2).mean())) or 1.0
+    y = x * (rms / cur)
+    return (np.tanh(y * 1.25) / 1.25).astype(np.float32)
+
+
+# ------------------------------------------------------------------ sound effects
+SFX_KINDS = ("whoosh", "hit", "boom", "riser")
+
+
+def sfx(kind, seed=0):
+    """Generated sound effects (stereo float32): whoosh (transition), hit (cut in the teaser),
+    boom (title / big reveal), riser (tension build into the climax, ends at its start)."""
+    rng = np.random.default_rng(seed + SFX_KINDS.index(kind) * 101)
+    if kind == "whoosh":
+        n = int(0.75 * SR)
+        x = np.linspace(0, 1, n)
+        env = np.sin(np.pi * np.clip(x / 0.75, 0, 1)) ** 2 * np.where(x < 0.75, 1.0, 0.0)
+        env += np.where(x >= 0.75, np.exp(-(x - 0.75) * 30), 0.0)
+        noise = _noise(n, rng)
+        sweep = _smooth(noise, 40 - 34 * np.sin(np.pi * x)) - _smooth(noise, 160)
+        mono = sweep * env
+        pan = x
+        st = np.stack([mono * (1 - pan * 0.7), mono * (0.3 + pan * 0.7)], axis=1)
+        return (st / (np.abs(st).max() or 1) * 0.6).astype(np.float32)
+    if kind in ("hit", "boom"):
+        long = kind == "boom"
+        n = int((2.6 if long else 1.2) * SR)
+        body = np.zeros(n, dtype=np.float32)
+        th = _thump(2.4 if long else 1.0, 110, 32, 0.5 if long else 0.28)
+        body[:len(th)] += th
+        burst = _smooth(_noise(n, rng), 3) * np.exp(-np.arange(n) / (0.05 * SR))
+        body += 0.5 * burst
+        tail = _smooth(_noise(n, rng), 12) * np.exp(-np.arange(n) / ((0.9 if long else 0.35) * SR)) * 0.25
+        st = np.stack([body + tail, body + np.roll(tail, 331)], axis=1)
+        return (st / (np.abs(st).max() or 1) * (0.95 if long else 0.8)).astype(np.float32)
+    if kind == "riser":
+        n = int(3.0 * SR)
+        x = np.linspace(0, 1, n)
+        noise = _noise(n, rng)
+        swish = _smooth(noise, 60 - 57 * x) - _smooth(noise, 200)
+        freq = 140 * (9 ** x)
+        tone = np.sin(2 * np.pi * np.cumsum(freq) / SR) * 0.35
+        mono = (swish * 2.5 + tone) * x ** 2.2
+        st = np.stack([mono, np.roll(mono, 240)], axis=1)
+        return (st / (np.abs(st).max() or 1) * 0.7).astype(np.float32)
+    raise ValueError(kind)
 
 
 # ------------------------------------------------------------------ bed rendering
@@ -226,13 +348,19 @@ def envelope(n, points, ramp=0.35, rate=1000):
 
 
 def render_act_bed(out_path, act_seconds, track, mood, gain_points, narration, seed=0,
-                   generate=True):
-    """Write one act's bed: ducked music + narration placed at their times."""
+                   generate=True, effects=()):
+    """Write one act's bed: ducked music + sound effects + narration placed at their times."""
     n = int(round(act_seconds * SR))
     music = load_track(track, act_seconds, mood, seed, generate)
     if len(music) < n:
         music = np.pad(music, ((0, n - len(music)), (0, 0)))
     bed = music * envelope(n, gain_points)[:, None]
+    for i, fx in enumerate(effects):         # not ducked: they punctuate the cut
+        sound = sfx(fx["kind"], seed=seed * 31 + i)
+        at = int(round(fx["t"] * SR))
+        if fx["kind"] == "riser":             # a riser ends exactly on its moment
+            at -= len(sound)
+        _place(bed, sound[:max(0, n - max(0, at))] if at >= 0 else sound, at, fx.get("gain", 0.5))
     for item in narration:
         voice = decode(item["file"], channels=1)
         s = int(round(item["t"] * SR))

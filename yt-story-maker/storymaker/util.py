@@ -95,6 +95,10 @@ STOPWORDS = {
     "full", "video", "videos", "new", "latest", "news", "hindi", "live", "today",
     "का", "की", "के", "है", "में", "और", "को", "से", "पर", "ने", "भी", "हैं", "था", "थी",
     "ये", "यह", "वो", "वह", "एक", "तो", "ही", "कि", "जो", "हुआ", "हुई", "कर",
+    # Hinglish written in English letters
+    "ki", "ka", "ke", "hai", "hain", "aur", "bhi", "ab", "kal", "aaj", "ye", "yeh", "wo", "woh",
+    "se", "me", "mein", "ko", "ne", "par", "hi", "nahi", "kya", "hogi", "hoga", "honge", "tha",
+    "thi", "hua", "hui", "kar", "ek", "jo", "ho", "rahe", "raha", "rahi",
 }
 
 

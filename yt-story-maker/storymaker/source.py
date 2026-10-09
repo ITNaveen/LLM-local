@@ -415,7 +415,7 @@ class FixtureSource:
         w, h = (1280, 720) if i % 4 else (960, 720)  # some 4:3 sources
         dur = max(0.5, end - start)
         freq = 180 + i * 40
-        font = str(FONT_FILE).replace(":", r"\:")
+        font = str(FONT_FILE.parent / "NotoSans-Bold.ttf").replace(":", r"\:")
         label = (f"drawtext=fontfile='{font}':text='{video_id}  %{{pts\\:hms\\:{start:.3f}}}':"
                  f"fontcolor=white:fontsize=48:x=40:y=40:box=1:boxcolor=black@0.5")
         # each video / scene looks different (real footage does), so duplicate checks work

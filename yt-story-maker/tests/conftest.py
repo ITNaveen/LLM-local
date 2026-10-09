@@ -45,27 +45,30 @@ class FakeLLM:
         raise RuntimeError("no embeddings")
 
     def chat_json(self, system, user, **kw):
+        from storymaker import editor, publish, research
         self.calls.append(system[:40])
-        if "research assistant" in system:
+        if system == research.QUERY_SYSTEM:
             return {"queries": ["virat kohli century", "विराट कोहली शतक", "kohli press conference"],
                     "must_keywords": ["kohli"], "nice_keywords": ["century", "west indies"],
                     "years": ["2026"]}
-        if "select raw footage" in system:
+        if system == research.RERANK_SYSTEM:
             n = len(re.findall(r"^\d+\. ", user, flags=re.M))
             return {"keep": list(range(n, 0, -1))}
-        if "strict researcher" in system:
+        if system == editor.SCREEN_SYSTEM:
             title = re.search(r"Video title: (.*)", user).group(1)
             ok = "comedy" not in title.lower()
             return {"relevant": ok, "kind": "news" if ok else "comedy", "reason": "test verdict"}
-        if "help a top Hindi documentary editor" in system:
-            n = len(re.findall(r"^\d+\. \[", user, flags=re.M))
+        if system == editor.ANNOTATE_SYSTEM:
+            items = re.findall(r"^(\d+)\. \[\d+s\] (.*)$", user, flags=re.M)
             english = "only hears Hindi" in user
-            return {"passages": [{"n": i, "use": True, "summary": f"speaker makes point {i}",
-                                  "topic": "result" if i <= n // 2 else "reaction",
-                                  "strength": 3 + i % 3, "standalone": True,
-                                  **({"hindi": f"वक्ता ने साफ़ कहा कि यह मुद्दा नंबर {i} बेहद गंभीर है।"}
-                                     if english else {})} for i in range(1, n + 1)]}
-        if "The film\nis too short" in system:
+            return {"passages": [{"n": int(k), "use": True, "summary": f"speaker makes point {k}",
+                                  "topic": "result" if int(k) <= len(items) // 2 else "reaction",
+                                  "strength": 3 + int(k) % 3, "standalone": True,
+                                  "emotion": ["anger", "pride", "shock"][int(k) % 3],
+                                  "punch": " ".join(text.split()[:7]),
+                                  **({"hindi": f"वक्ता ने साफ़ कहा कि यह मुद्दा नंबर {k} बेहद गंभीर है।"}
+                                     if english else {})} for k, text in items]}
+        if system == editor.EXTEND_SYSTEM:
             unused = re.findall(r"^(P\d+) \| ([^|]+)\|", user.split("UNUSED PASSAGES")[1], flags=re.M)
             n = len(re.findall(r"^\d+ \| ", user.split("UNUSED PASSAGES")[0], flags=re.M))
             ins = []
@@ -73,8 +76,9 @@ class FakeLLM:
                 ins.append({"after": max(1, n - k % max(1, n - 1)), "type": "dialogue", "use": pid,
                             "link": "continues this thread"})
             ins.append({"after": 2, "type": "dialogue", "use": "P999"})            # invalid: ignored
+            ins.append({"after": 3, "type": "narration", "text": "एक और बात।"})    # narration: ignored
             return {"insert": ins}
-        if "lead editor" in system:
+        if system == editor.ARCHITECT_SYSTEM:
             if self.broken_outline:
                 return {"scenes": [{"type": "dance", "use": "P999"}, "junk"]}
             pids = re.findall(r"^(P\d+) \|", user, flags=re.M)
@@ -91,19 +95,32 @@ class FakeLLM:
                     {"act": "opening", "type": "text", "text": "दो पारियाँ, दो नाकामियाँ।", "link": "context"},
                     {"act": "buildup", "type": "narration", "text": "सवाल उठने लगे थे, लेकिन विराट चुप रहे।", "link": "bridge"},
                     dia("buildup"), dia("buildup"), {"act": "buildup", "type": "dialogue", "use": "P999"},
+                    {"act": "buildup", "type": "narration", "text": "देख रहे हो ये लाइटें? ये तूफ़ान है।", "link": "invented"},
                     {"act": "rising", "type": "text", "text": "और फिर आया आख़िरी टेस्ट।", "link": "new chapter"},
                     dia("rising"), dia("rising"),
+                    {"act": "rising", "type": "narration", "text": "प्रधानमंत्री ने भी विराट को बधाई दी।", "link": "invented"},
                     {"act": "buildup", "type": "dialogue", "use": pids[1], "link": "acts never go back"},
                     dia("climax"), {"act": "climax", "type": "montage", "use": vids[:2], "seconds": 40},
                     {"act": "ending", "type": "narration", "text": "और इस तरह, एक बार फिर, विराट ने इतिहास लिख दिया।", "link": "close"},
                     dia("ending"),
                 ]}
-        if "ruthless senior editor" in system:
-            n = len(re.findall(r"^\d+ \| ", user, flags=re.M))
-            order = [i for i in range(1, n + 1) if i != 5]      # drop scene 5
-            return {"order": order, "bridges": [{"before": 8, "type": "text", "text": "इसी बीच मैदान पर।"}],
+        if system == editor.CRITIC_SYSTEM:
+            rows = re.findall(r"^(\d+) \| (\w+) \| (\w+) \|", user, flags=re.M)
+            order = [int(n) for n, _a, _t in rows if int(n) != 5]      # drop scene 5
+            opener = next((int(n) for n, a, t in rows if a == "climax" and t == "dialogue"), None)
+            between = next((int(n) for n, a, t in rows[6:] if t == "dialogue"), None)
+            return {"order": order,
+                    "bridges": [{"before": opener, "type": "narration", "text": "और फिर आया वो दिन, जिसका सबको इंतज़ार था।"},
+                                {"before": between, "type": "narration", "text": "बीच में बोलने वाली लाइन।"}],
                     "score": 7, "issues": ["scene 5 repeated the previous point"]}
-        if "YouTube metadata" in system:
+        if system == editor.TEASER_SYSTEM:
+            n = len(re.findall(r"^B\d+ \|", user, flags=re.M))
+            return {"bites": [f"B{min(n, 3)}", "B1", "B2"][:max(2, min(3, n))],
+                    "hook_line": "क्या विराट का करियर खत्म हो चुका था? या ये तूफ़ान से पहले की शांति थी?"}
+        if system.startswith(editor.FACT_SYSTEM[:60]):
+            lines = re.findall(r"^(\d+)\. (.*)$", user.split("NARRATOR LINES:")[1], flags=re.M)
+            return {"lines": [{"n": int(k), "text": t} for k, t in lines]}
+        if system == publish.META_SYSTEM:
             return {"youtube_title": "विराट कोहली का सबसे बड़ा जवाब | Virat Kohli Century",
                     "description_hi": "विराट की वापसी की पूरी कहानी।",
                     "tags": ["virat kohli", "विराट कोहली"]}

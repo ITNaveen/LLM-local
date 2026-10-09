@@ -6,28 +6,67 @@
   silent: placeholder (used in tests / when nothing else works)."""
 
 import asyncio
+import os
 import platform
+import re
 from pathlib import Path
 
 from .util import PipelineError, estimate_speech_seconds, ffmpeg, has_tool, media_duration, run
 
-# Warm, broadcast-style narration chain: trim silence, de-mud, gentle compression, level.
+# A YouTuber's mic: trim silence, de-mud, presence, firm compression, level.
 VOICE_CHAIN = ("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.05,"
                "areverse,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15,"
-               "areverse,highpass=f=70,equalizer=f=250:t=q:w=1:g=-2,"
-               "equalizer=f=3500:t=q:w=1.2:g=2.5,"
-               "acompressor=threshold=-20dB:ratio=3:attack=10:release=150,"
-               "loudnorm=I=-16:TP=-2:LRA=7,aresample=48000")
+               "areverse,highpass=f=75,equalizer=f=250:t=q:w=1:g=-2.5,"
+               "equalizer=f=3200:t=q:w=1.2:g=3,equalizer=f=9000:t=q:w=1:g=1.5,"
+               "acompressor=threshold=-22dB:ratio=4:attack=5:release=120:makeup=2,"
+               "loudnorm=I=-16:TP=-2:LRA=6,aresample=48000")
+
+
+def speech_parts(text, base_rate="+10%", base_pitch="+0Hz"):
+    """Split a line into sentences, each with its own delivery: questions rise, exclamations hit
+    harder and faster, '...' leaves a dramatic pause. -> [(sentence, rate, pitch, volume, pause)]."""
+    def num(v, default=0):
+        m = re.search(r"[-+]?\d+", str(v))
+        return int(m.group()) if m else default
+    rate, pitch = num(base_rate, 10), num(base_pitch)
+    out = []
+    for part in [x.strip() for x in re.split(r"(?<=[।!?])\s+|(?<=\.\.\.)\s*", text or "") if re.search(r"\w", x)]:
+        if part.endswith("!"):
+            r, pt, vol, pause = rate + 8, pitch + 3, 10, 0.12
+        elif part.endswith("?"):
+            r, pt, vol, pause = rate + 2, pitch + 7, 5, 0.22
+        elif part.endswith("..."):
+            r, pt, vol, pause = rate - 2, pitch, 0, 0.38
+        else:
+            r, pt, vol, pause = rate, pitch, 0, 0.10
+        out.append((part, f"{r:+d}%", f"{pt:+d}Hz", f"{vol:+d}%", pause))
+    return out
 
 
 def _edge(text, out, settings):
+    """Microsoft neural voice, sentence by sentence with varied energy and tight pauses - a
+    person talking, not one flat read."""
     import edge_tts
+    parts = speech_parts(text, settings.get("edge_rate", "+10%"), settings.get("edge_pitch", "+0Hz"))
+    files = [Path(f"{out}.part{i}.mp3") for i in range(len(parts))]
 
     async def go():
-        comm = edge_tts.Communicate(text, settings["edge_voice"], rate=settings["edge_rate"],
-                                    pitch=settings["edge_pitch"])
-        await comm.save(str(out))
-    asyncio.run(go())
+        for (sentence, rate, pitch, volume, _pause), f in zip(parts, files):
+            await edge_tts.Communicate(sentence, settings["edge_voice"], rate=rate, pitch=pitch,
+                                       volume=volume).save(str(f))
+    try:
+        asyncio.run(go())
+        trim = ("silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.02,areverse,"
+                "silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.02,areverse")
+        chains = ";".join(f"[{i}:a]aresample=48000,{trim},apad=pad_dur={parts[i][4]}[p{i}]"
+                          for i in range(len(parts)))
+        joined = "".join(f"[p{i}]" for i in range(len(parts)))
+        inputs = [x for f in files for x in ("-i", str(f))]
+        ffmpeg(*inputs, "-filter_complex", f"{chains};{joined}concat=n={len(parts)}:v=0:a=1[a]",
+               "-map", "[a]", "-ac", "1", str(out))
+    finally:
+        for f in files:
+            f.unlink(missing_ok=True)
 
 
 def _say(text, out, settings):
@@ -56,19 +95,45 @@ def _silent(text, out, settings):
 # ------------------------------------------------------------------ emotional voice (Parler)
 ROOT = Path(__file__).resolve().parent.parent
 PARLER_PY = ROOT / ".venv-voice" / "bin" / "python"
+PARLER_READY = ROOT / ".venv-voice" / "READY"
+PARLER_MODEL = "models--ai4bharat--indic-parler-tts"
 PARLER_SPEAKERS = {"male": "Rohit", "female": "Divya"}
+UNLOCK_HELP = ("The emotional voice is installed but still locked: double-click "
+               "install-emotional-voice.command again and follow its 2 steps (accept the model's "
+               "free licence, paste a free Hugging Face token). Using the Microsoft voice for now.")
+
+
+def parler_state():
+    """'missing' (not installed), 'locked' (installed, model not downloaded yet - usually the
+    Hugging Face licence wasn't accepted) or 'ready'."""
+    if not PARLER_PY.exists():
+        return "missing"
+    hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub" / PARLER_MODEL
+    if PARLER_READY.exists() or any(hub.glob("snapshots/*/*.safetensors")):
+        return "ready"
+    return "locked"
 
 
 def parler_available():
-    return PARLER_PY.exists()
+    return parler_state() == "ready"
 
 
-def parler_description(settings):
+ANGRY = re.compile(r"!|गुस्सा|शर्म|बर्दाश्त|हिम्मत|धमकी|चेतावनी|बस करो|नहीं छोड़")
+
+
+def parler_description(settings, text=""):
+    """How the emotional voice should say this line (the model follows a description)."""
     speaker = settings.get("parler_speaker") or "Rohit"
-    return (settings.get("parler_style") or
-            "{speaker} speaks in an excited, energetic and highly expressive tone, like a passionate "
-            "YouTube presenter, at a moderately fast pace, with a very clear, close-sounding "
-            "recording and no background noise.").format(speaker=speaker)
+    if settings.get("parler_style"):
+        return settings["parler_style"].format(speaker=speaker)
+    if ANGRY.search(text or ""):
+        mood = "an angry, intense and powerful"
+    elif "?" in (text or ""):
+        mood = "a surprised, urgent and questioning"
+    else:
+        mood = "an excited, energetic and highly expressive"
+    return (f"{speaker} speaks in {mood} tone, like a passionate Hindi YouTube news presenter, at "
+            "a fast pace, with a very clear, close-sounding recording and no background noise.")
 
 
 def parler_batch(lines, out_dir, settings, log):
@@ -80,8 +145,10 @@ def parler_batch(lines, out_dir, settings, log):
     if not todo:
         return
     job = out_dir / "parler_job.json"
-    job.write_text(json.dumps({"lines": todo, "out_dir": str(out_dir),
-                               "description": parler_description(settings)}, ensure_ascii=False))
+    job.write_text(json.dumps({"lines": {k: {"text": v, "description": parler_description(settings, v)}
+                                         for k, v in todo.items()},
+                               "out_dir": str(out_dir), "description": parler_description(settings)},
+                              ensure_ascii=False))
     log(f"Recording {len(todo)} lines with the emotional Hindi voice (this can take a while)...")
     proc = subprocess.Popen([str(PARLER_PY), str(ROOT / "storymaker" / "voice_parler.py"), str(job)],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -92,7 +159,14 @@ def parler_batch(lines, out_dir, settings, log):
         if line.startswith("PROGRESS") or line.startswith("Loading"):
             log(f"  {line.replace('PROGRESS', 'voice line')}")
     if proc.wait() != 0:
-        raise PipelineError("emotional voice failed: " + " | ".join(tail)[-300:])
+        msg = " | ".join(tail)[-300:]
+        if re.search(r"gated|401|403|Unauthorized|restricted", msg, re.I):
+            log(UNLOCK_HELP)
+        raise PipelineError("emotional voice failed: " + msg)
+    try:
+        PARLER_READY.touch()
+    except OSError:
+        pass
 
 
 def _parler(text, out, settings):
@@ -100,12 +174,14 @@ def _parler(text, out, settings):
         raise PipelineError("emotional voice line missing")
 
 
-ENGINES = {"parler": (_parler, "wav"), "edge": (_edge, "mp3"), "piper": (_piper, "wav"),
+ENGINES = {"parler": (_parler, "wav"), "edge": (_edge, "wav"), "piper": (_piper, "wav"),
            "say": (_say, "aiff"), "silent": (_silent, "wav")}
 
 
 def engine_order(settings):
     choice = settings.get("tts_engine", "auto")
+    if choice == "parler" and not parler_available():
+        choice = "auto"                     # chosen but not ready: don't waste time loading it
     if choice != "auto":
         return [choice, "silent"]
     order = ["parler", "edge"] if parler_available() else ["edge"]

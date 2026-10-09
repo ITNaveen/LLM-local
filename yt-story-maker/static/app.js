@@ -61,13 +61,15 @@ async function refreshStatus() {
     const tracks = Object.values(s.music).reduce((a, b) => a + b, 0);
     const pills = [
       [s.ffmpeg ? (s.ffmpeg_text ? "ok" : "warn") : "bad",
-        s.ffmpeg ? (s.ffmpeg_text ? "ffmpeg" : "ffmpeg: no Hindi text (brew install ffmpeg-full)") : "ffmpeg missing"],
+        s.ffmpeg ? (s.ffmpeg_text ? "ffmpeg + Hindi text" : "no Hindi text yet (restart StoryMaker)") : "ffmpeg missing"],
       [s.yt_dlp ? "ok" : "bad", s.yt_dlp ? `yt-dlp ${s.yt_dlp}` : "yt-dlp missing"],
       [s.js_runtime ? "ok" : "warn", s.js_runtime ? "JS runtime" : "install deno for YouTube"],
       [s.llm_ready ? "ok" : (s.ollama ? "warn" : "bad"),
         s.llm_ready ? "AI ready" : (s.ollama ? "pick a model in Settings" : "Ollama off: basic mode")],
-      [tracks ? "ok" : "warn", tracks ? `${tracks} music tracks` : "no music tracks yet"],
-      [s.emotional_voice ? "ok" : "warn", s.emotional_voice ? "emotional voice" : "basic voice (run install-emotional-voice)"],
+      [tracks ? "ok" : "warn", tracks ? `${tracks} music tracks` : "built-in score (add tracks to music/)"],
+      [s.emotional_voice === "ready" ? "ok" : "warn",
+        { ready: "emotional voice", locked: "emotional voice LOCKED: run install-emotional-voice again" }[s.emotional_voice]
+        || "basic voice (run install-emotional-voice)"],
     ];
     $("#pills").innerHTML = pills.map(([c, t]) => `<span class="pill ${c}">${esc(t)}</span>`).join("");
     window.__models = s.models;
@@ -182,6 +184,8 @@ async function refreshDetail() {
   let html = `<div class="copyrow"><h2>${esc(st.request.topic)}</h2><div>`;
   if (["running", "queued"].includes(st.status)) html += `<button class="ghost small" data-act="cancel">Cancel</button>`;
   if (["failed", "cancelled"].includes(st.status)) html += `<button class="secondary small" data-act="retry">Resume</button> `;
+  if (["done", "failed", "cancelled", "awaiting_review"].includes(st.status))
+    html += `<button class="ghost small" data-act="reedit" title="Keep the research and transcripts, plan and cut the film again with the current editor">Re-edit</button> `;
   if (st.status !== "running") html += ` <button class="ghost small" data-act="delete">Delete</button>`;
   html += `</div></div><div class="steps">${steps}</div>`;
   if (["running", "queued"].includes(st.status)) {
@@ -226,8 +230,8 @@ async function refreshDetail() {
   if (log) log.scrollTop = log.scrollHeight;
 }
 
-const KIND_NAMES = { hook: "Hook", dialogue: "Clip audio", narration: "Narrator", text: "Text on screen",
-  montage: "Montage", voiceover: "Hindi voice-over" };
+const KIND_NAMES = { hook: "Hook", teaser: "Teaser bite", title: "Title sting", dialogue: "Clip audio",
+  narration: "Narrator", text: "Headline", montage: "Montage", voiceover: "Hindi voice-over" };
 
 function storyboard(story, editable) {
   let html = `<h3>Storyboard – “${esc(story.title_hi)}”${story.source === "template" ? " (built-in, no AI)" : ""}</h3>`;
@@ -244,7 +248,8 @@ function storyboard(story, editable) {
     for (const b of act.beats) {
       const kind = b.kind || (b.teaser ? "hook" : b.audio);
       const clips = (b.clips || []).map((c) =>
-        `<a href="https://www.youtube.com/watch?v=${esc(c.video_id)}&t=${Math.floor(c.start)}s" target="_blank" rel="noopener" title="${esc(c.video_title)}">
+        `<a href="https://www.youtube.com/watch?v=${esc(c.video_id)}&t=${Math.floor(c.start)}s" target="_blank" rel="noopener"
+            class="${c.audio ? "cutaway" : ""}" title="${esc(c.video_title)}${c.audio ? " — cutaway: the speaker keeps talking over this" : ""}">
           <img loading="lazy" src="https://i.ytimg.com/vi/${esc(c.video_id)}/mqdefault.jpg" alt="" onerror="this.style.visibility='hidden'"><span>${fmt(c.end - c.start)}</span></a>`).join("");
       let body = "";
       if (kind === "narration" || kind === "text" || kind === "voiceover") {
@@ -252,7 +257,7 @@ function storyboard(story, editable) {
                         : `<div class="narr">${kind === "text" ? "▣ " : ""}“${esc(b.narration)}”</div>`;
       }
       if (b.said) body += `<div class="said"><b>${esc(b.source)}</b><br>“${esc(b.said.slice(0, 260))}${b.said.length > 260 ? "…" : ""}”</div>`;
-      const keep = editable && b.scene_id ? `<label class="keep"><input type="checkbox" checked data-keep="${esc(b.scene_id)}"> Keep</label>` : "";
+      const keep = editable && b.scene_id && !["teaser", "title"].includes(kind) ? `<label class="keep"><input type="checkbox" checked data-keep="${esc(b.scene_id)}"> Keep</label>` : "";
       html += `<div class="beat"><div class="mode ${esc(b.audio)}">${KIND_NAMES[kind] || esc(kind)}<br><small>${fmt(b.seconds || 0)}</small>${keep}</div>
         <div>${body}${b.idea ? `<div class="idea">↳ ${esc(b.idea)}</div>` : ""}<div class="thumbs">${clips}</div></div></div>`;
     }
@@ -274,6 +279,10 @@ $("#detail").addEventListener("click", async (e) => {
   const url = `/api/jobs/${encodeURIComponent(selected)}`;
   if (act === "cancel") await api(`${url}/cancel`, { method: "POST" });
   if (act === "retry") await api(`${url}/retry`, { method: "POST" });
+  if (act === "reedit") {
+    if (!confirm("Plan and cut this video again with the current editor? The research and transcripts are kept; the old video is replaced.")) return;
+    await api(`${url}/reedit`, { method: "POST" });
+  }
   if (act === "delete") {
     if (!confirm("Delete this video and all its files?")) return;
     await api(url, { method: "DELETE" });

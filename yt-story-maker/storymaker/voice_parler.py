@@ -67,8 +67,11 @@ class Voice:
                                   prompt_attention_mask=prompt.attention_mask)
         return gen.cpu().float().numpy().squeeze()
 
-    def say(self, text):
+    def say(self, text, description=None):
         import numpy as np
+        if description and description != getattr(self, "_desc_text", None):
+            self.set_description(description)
+            self._desc_text = description
         pause = np.zeros(int(0.12 * self.sampling_rate), dtype="float32")
         chunks = []
         for part in split_sentences(text):
@@ -92,11 +95,14 @@ def run_job(job_path):
     out_dir = Path(job["out_dir"])
     voice = Voice(job.get("description") or DEFAULT_DESCRIPTION, job.get("model") or MODEL_ID)
     lines = job["lines"]
-    for i, (nid, text) in enumerate(lines.items(), 1):
+    for i, (nid, line) in enumerate(lines.items(), 1):
         target = out_dir / f"{nid}.raw.wav"
         if target.exists():
             continue
-        audio = voice.say(text)
+        if isinstance(line, dict):            # {"text", "description"}: this line's emotion
+            audio = voice.say(line["text"], line.get("description"))
+        else:
+            audio = voice.say(line)
         sf.write(str(target), audio, voice.sampling_rate)
         print(f"PROGRESS {i}/{len(lines)} {nid}", flush=True)
     print("DONE", flush=True)

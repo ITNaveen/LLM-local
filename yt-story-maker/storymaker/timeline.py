@@ -5,8 +5,11 @@ YouTube chapters."""
 import re
 
 # How loud the footage's own audio and the music are, per beat type.
-CLIP_GAIN = {"original": 1.0, "narration": 0.12, "music": 0.16, "text": 0.22}
-MUSIC_GAIN = {"original": 0.10, "narration": 0.26, "music": 0.9, "card": 0.85, "text": 0.8}
+CLIP_GAIN = {"original": 1.0, "teaser": 1.0, "narration": 0.12, "music": 0.16, "text": 0.22}
+MUSIC_GAIN = {"original": 0.14, "teaser": 0.32, "narration": 0.26, "music": 0.9, "card": 0.85,
+              "text": 0.85}
+# Sound effects at beat starts, and how loud they sit in the mix.
+SFX_GAIN = {"hit": 0.55, "boom": 0.75, "whoosh": 0.45, "riser": 0.5}
 NARRATION_LEAD = 0.35     # voice starts this long after its beat begins
 NARRATION_TAIL = 0.55     # breathing room after the voice ends
 ACT_FADE = 0.4
@@ -20,7 +23,7 @@ def snap_to_beats(durations, modes, beats, max_shift=0.3, min_len=1.0):
     out, t = list(durations), 0.0
     for i, d in enumerate(out):
         end = t + d
-        if modes[i] != "original" and i < len(out) - 1:
+        if modes[i] not in ("original", "teaser") and i < len(out) - 1:
             nearest = min(beats, key=lambda b: abs(b - end))
             if abs(nearest - end) <= max_shift and nearest - t >= min_len:
                 out[i] = nearest - t
@@ -33,7 +36,7 @@ def frames(seconds, fps):
 
 
 # Without a music track the footage's own sound carries montages and bridges.
-CLIP_GAIN_NO_MUSIC = {"original": 1.0, "narration": 0.18, "music": 0.75, "text": 0.35}
+CLIP_GAIN_NO_MUSIC = {"original": 1.0, "teaser": 1.0, "narration": 0.18, "music": 0.75, "text": 0.35}
 TEXT_CARD_FADE = 0.35
 
 
@@ -44,7 +47,7 @@ def build(story, voice, tracks, beat_grids, settings):
     n_acts = len(story["acts"])
     for ai, act in enumerate(story["acts"]):
         act_start = t
-        has_music = bool(tracks.get(act["key"])) or settings.get("generated_music", False)
+        has_music = bool(tracks.get(act["key"])) or settings.get("builtin_music", True)
         clip_gain = CLIP_GAIN if has_music else CLIP_GAIN_NO_MUSIC
         # 1. flatten the act into items (clips and on-screen text cards), in order
         items, mins = [], {}
@@ -55,10 +58,12 @@ def build(story, voice, tracks, beat_grids, settings):
                               "text": beat.get("narration", ""), "mode": "card"})
                 continue
             first = len(items)
+            mode = "teaser" if beat.get("kind") == "teaser" else audio
             for c in beat.get("clips", []):
                 items.append({"kind": "clip", "beat": bi, "dur": c["end"] - c["start"],
-                              "clip": c, "mode": audio,
-                              "overlay": beat.get("narration", "") if audio == "text" else ""})
+                              "clip": c, "mode": mode,
+                              "overlay": beat.get("narration", "") if audio == "text" else "",
+                              "overlay_style": beat.get("overlay_style", "headline")})
             if audio == "narration" and beat.get("narration_id") in voice and len(items) > first:
                 mins[bi] = voice[beat["narration_id"]]["duration"] + NARRATION_LEAD + NARRATION_TAIL
         if not items:
@@ -74,6 +79,7 @@ def build(story, voice, tracks, beat_grids, settings):
 
         # 2. segments
         act_segments, narration, gain_points, beat_start = [], [], [], {}
+        sound_at = {}     # cutaways: where the speaker's sound continues (frame-exact, no stutter)
         for i, it in enumerate(items):
             beat_start.setdefault(it["beat"], t)
             if it["kind"] == "card":
@@ -95,6 +101,21 @@ def build(story, voice, tracks, beat_grids, settings):
                 }
                 if it.get("overlay"):
                     seg["overlay"] = it["overlay"]   # the text fades, the footage keeps moving
+                    if it.get("overlay_style") == "title":
+                        seg["overlay_style"] = "title"
+                if c.get("fx"):
+                    seg["fx"] = c["fx"]
+                    seg["zoom"] = bool(c.get("zoom", True))
+                # One speaker's sound, split over several pictures, continues sample-exactly.
+                a_vid = (c.get("audio") or {}).get("video_id") or c["video_id"]
+                a_start = (c.get("audio") or {}).get("start", c["start"])
+                prev = sound_at.get((it["beat"], a_vid))
+                moved = prev is not None and 0.0005 < abs(prev - a_start) < 0.12
+                if moved:
+                    a_start = prev
+                if c.get("audio") or moved:
+                    seg["audio_src"] = {"video_id": a_vid, "src_start": round(a_start, 4)}
+                sound_at[(it["beat"], a_vid)] = a_start + durs[i]
                 gain_points.append((t - act_start, t - act_start + durs[i], MUSIC_GAIN[mode]))
             act_segments.append(seg)
             t += durs[i]
@@ -111,8 +132,18 @@ def build(story, voice, tracks, beat_grids, settings):
                                   "abs": round(vt, 4), "duration": voice[nid]["duration"]})
                 subtitles.extend(split_subtitles(beat["narration"], vt, voice[nid]["duration"]))
 
-        # Title card right after the opening act (hook -> title -> story).
-        if ai == 0 and settings.get("title_card", True):
+        effects = []
+        for bi, beat in enumerate(act["beats"]):
+            if beat.get("sfx") in SFX_GAIN and bi in beat_start:
+                effects.append({"t": round(beat_start[bi] - act_start, 4), "kind": beat["sfx"],
+                                "gain": SFX_GAIN[beat["sfx"]]})
+        if ai + 1 < n_acts and story["acts"][ai + 1]["key"] == "climax":
+            effects.append({"t": round(t - act_start, 4), "kind": "riser", "gain": SFX_GAIN["riser"]})
+
+        # Title card right after the opening act (hook -> title -> story), unless the story
+        # already has its title sting over footage.
+        has_title = any(b.get("kind") == "title" for a in story["acts"] for b in a["beats"])
+        if ai == 0 and settings.get("title_card", True) and not has_title:
             card_dur = frames(TITLE_CARD_SECONDS, fps) / fps
             act_segments.append({
                 "type": "card", "text": story.get("title_hi", ""), "dur": card_dur,
@@ -129,6 +160,7 @@ def build(story, voice, tracks, beat_grids, settings):
             "start": round(act_start, 4), "end": round(t, 4),
             "frames": sum(s["frames"] for s in act_segments),
             "track": tracks.get(act["key"]), "gain_points": gain_points, "narration": narration,
+            "effects": effects,
         })
         segments.extend(act_segments)
 

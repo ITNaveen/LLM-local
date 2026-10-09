@@ -137,29 +137,33 @@ def test_card_and_thumbnail_render_hindi(tmp_path):
     assert (s["width"], s["height"]) == (1280, 720)
 
 
-def _ink_columns(png):
-    import subprocess
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(png), "-vf", "format=gray",
-                          "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
-    img = np.frombuffer(raw, dtype=np.uint8).reshape(120, 400)
-    cols = np.where(img.max(axis=0) > 128)[0]
-    return img[:, cols.min():cols.min() + 12] > 128
+def _ink_columns(img):
+    a = np.asarray(img.convert("L"))
+    cols = np.where(a.max(axis=0) > 128)[0]
+    return a[:, cols.min():cols.min() + 12] > 128
 
 
-def test_hindi_matra_is_shaped_correctly(tmp_path):
+def test_hindi_matra_is_shaped_correctly():
     """'वि' must start with the ि sign (drawn left of व). With broken (simple) shaping it
     starts with व exactly like 'व' alone. This is what made विराट show as वरिट."""
+    from PIL import Image, ImageDraw
+
+    from storymaker import textimg
+    assert textimg.available()
     imgs = {}
     for name, text in (("va", "व"), ("vi", "वि")):
-        ass = tmp_path / f"{name}.ass"
-        ass.write_text(render.ass_header(400, 120, 70, 0) +
-                       f"Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{{\\an7\\pos(20,10)}}{text}\n",
-                       encoding="utf-8")
-        png = tmp_path / f"{name}.png"
-        ffmpeg("-f", "lavfi", "-i", "color=c=black:s=400x120", "-vf", render.ass_filter(ass),
-               "-frames:v", "1", str(png))
-        imgs[name] = _ink_columns(png)
+        img = Image.new("L", (400, 120), 0)
+        textimg.draw_line(ImageDraw.Draw(img), 20, 90, text, 70, 255)
+        imgs[name] = _ink_columns(img)
     assert (imgs["va"] != imgs["vi"]).mean() > 0.05
+
+
+def test_english_words_inside_hindi_use_the_latin_font():
+    from storymaker import textimg
+    assert textimg.runs("पुलिस vs CJP: 23000 जवान") == [
+        ("पुलिस ", False), ("vs", True), (" ", False), ("CJP", True), (": 23000 जवान", False)]
+    # every letter has a real glyph (the Hindi font alone draws empty boxes for Latin)
+    assert textimg.line_width("CJP", 60) > textimg.line_width("।", 60) * 2
 
 
 def test_thumbnail_text_keeps_every_word():

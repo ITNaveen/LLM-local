@@ -102,10 +102,53 @@ def test_plan_story_with_ai_and_editor_review(material):
     used = [s["pid"] for s in scenes if s["type"] == "dialogue"]
     assert len(used) == len(set(used))                            # each passage plays once
     assert all(pid in out["catalog"] for pid in used)             # P999 was thrown away
-    assert sum(s["type"] == "hook" for s in scenes) <= 2
-    assert any(s["text"] == "इसी बीच मैदान पर।" for s in scenes if s["type"] == "text")  # bridge
-    assert all(s["type"] != "montage" or s["seconds"] <= 25 for s in scenes)
     assert any("Editor review" in line for line in logs)
+    texts = " ".join(s.get("text", "") for s in scenes)
+    # the critic may set the base as an act opens, never talk between clips of a thread
+    assert "और फिर आया वो दिन" in texts and "बीच में बोलने वाली लाइन" not in texts
+    assert "एक और बात" not in texts                              # extend adds clips, not talk
+    # invented lines are gone: a picture description, a big name nobody in the footage mentions
+    assert "देख रहे हो" not in texts and "प्रधानमंत्री" not in texts
+    assert any("doesn't support" in line and "प्रधानमंत्री" in line for line in logs)
+
+
+def test_narrator_only_sets_the_base(material):
+    out = editor.plan_story(material["llm"], TOPIC, DESC, "sensational", 8, "medium",
+                            material["passages"], material["videos"], lambda m: None)
+    scenes = out["scenes"]
+    kinds = [s["type"] for s in scenes]
+    assert all(not (a == b == "narration") for a, b in zip(kinds, kinds[1:]))
+    narr = [s for s in scenes if s["type"] == "narration"]
+    assert len(narr) <= editor.NARRATION_LIMITS["medium"] + 1        # + the closing question
+    for act in ACT_KEYS:
+        assert sum(s["act"] == act for s in narr) <= 2
+    assert sum(s["type"] == "voiceover" for s in scenes) <= editor.VOICEOVER_LIMITS["medium"]
+    assert all(len(s["text"].split()) <= editor.NARRATION_WORDS + 8 for s in narr)
+    assert editor.CTA_LINE in narr[-1]["text"]                       # asks the viewer at the end
+    pmap = {p["id"]: p for p in material["passages"]}
+    cat = {k: pmap[v] for k, v in out["catalog"].items()}
+    talk = editor.estimate_seconds([s for s in scenes if s["type"] in ("narration", "voiceover")], cat, 20)
+    assert talk <= 0.25 * editor.estimate_seconds(scenes, cat, 20)   # the clips carry the story
+
+
+def test_cold_open_teaser(material):
+    logs = []
+    out = editor.plan_story(material["llm"], TOPIC, DESC, "sensational", 8, "medium",
+                            material["passages"], material["videos"], logs.append)
+    teaser = out["teaser"]
+    assert 2 <= len(teaser) <= 4
+    assert len({b["video_id"] for b in teaser}) == len(teaser)      # different sources
+    pmap = {p["id"]: p for p in material["passages"]}
+    for b in teaser:
+        p = pmap[b["passage_id"]]
+        assert p["start"] <= b["start"] < b["end"] <= p["end"] and 1.5 <= b["end"] - b["start"] <= 8
+        assert editor._speaks_hindi(p)
+    body = {out["catalog"][s["pid"]] for s in out["scenes"] if s.get("pid")}
+    assert not body & {b["passage_id"] for b in teaser}               # never replayed later
+    assert not any(s["type"] == "hook" for s in out["scenes"])
+    first = out["scenes"][0]
+    assert first["type"] == "narration" and first["text"].startswith("क्या विराट")
+    assert any("Cold open" in line for line in logs)
 
 
 def test_broken_ai_output_falls_back_to_rules(material):
@@ -165,7 +208,7 @@ def test_rules_variety_and_no_repeats():
     scenes = [{"act": "buildup", "type": "dialogue", "pid": f"P{i}"} for i in range(1, 7)]
     out = editor.enforce_rules(scenes, cat, "light")
     used = [s["pid"] for s in out if s["type"] == "dialogue"]
-    assert used == ["P1", "P2", "P6"]          # max 2 per video, P5 repeats P1
+    assert used == ["P1", "P2", "P3", "P6"]    # max 3 per video, P5 repeats P1
 
 
 def test_rules_text_cards():
@@ -180,9 +223,8 @@ def test_rules_text_cards():
     assert types.count("text") == 1 and "narration" not in types       # no 2 cards, no repeat
     spoken = editor.enforce_rules(scenes, cat, "light", can_text=False)
     assert "text" not in [s["type"] for s in spoken]                   # narrator says them
-    # never two narration lines in a row: they become one stronger line
-    assert [s["text"] for s in spoken if s["type"] == "narration"] == \
-        ["पहली लाइन यहाँ है दूसरी अलग लाइन"]
+    # never two narration lines in a row: the narrator says one line, then the clips talk
+    assert [s["text"] for s in spoken if s["type"] == "narration"] == ["पहली लाइन यहाँ है।"]
 
 
 # ------------------------------------------------------------------ assembly
@@ -195,32 +237,48 @@ def _assemble(material, minutes, narration="light"):
     return outline, asm.build(outline, voice, "epic"), voice
 
 
+def _sound(c):
+    """(video, start, end) of what a clip plays: its own sound, or the speaker's for a cutaway."""
+    a = c.get("audio")
+    return (a["video_id"], a["start"], a["start"] + c["end"] - c["start"]) if a else \
+        (c["video_id"], c["start"], c["end"])
+
+
 def test_dialogue_scenes_play_one_continuous_passage(material):
     outline, story, _ = _assemble(material, 6)
     pmap = {p["id"]: p for p in material["passages"]}
+    cutaways = 0
     for act in story["acts"]:
         for b in act["beats"]:
             if b["kind"] == "dialogue":
-                assert len({c["video_id"] for c in b["clips"]}) == 1   # one source per scene
-                starts = [c["start"] for c in b["clips"]]
-                assert starts == sorted(starts)                        # speaker moves forward
-                c, p = b["clips"][0], pmap[b["passage_id"]]
-                assert c["video_id"] == p["video_id"]
-                assert c["start"] <= p["start"] and c["end"] >= p["end"] - 0.01
+                sounds = [_sound(c) for c in b["clips"]]
+                assert len({v for v, _s, _e in sounds}) == 1           # one voice per scene
+                assert [s for _v, s, _e in sounds] == sorted(s for _v, s, _e in sounds)
+                p = pmap[b["passage_id"]]
+                assert sounds[0][0] == p["video_id"] and b["clips"][0]["video_id"] == p["video_id"]
+                assert sounds[0][1] <= p["start"]                      # the speaker is seen first
+                # cutaways keep the words continuous: each piece starts where the last ended
+                for (_v1, _s1, e1), (_v2, s2, _e2) in zip(sounds, sounds[1:]):
+                    assert s2 >= e1 - 0.02
+                cutaways += sum(bool(c.get("audio")) for c in b["clips"])
+                assert all(c["video_id"] != p["video_id"] for c in b["clips"] if c.get("audio"))
                 assert b["said"].startswith(p["text"][:40])
-            if b["kind"] == "hook":
+            if b["kind"] == "teaser":
                 c = b["clips"][0]
-                assert c["end"] - c["start"] <= 9.5
-                hook_passage = b["passage_id"]
+                assert c["end"] - c["start"] <= 8.5 and c["fx"] == "punch"
             if b["kind"] == "voiceover":                 # English speaker, Hindi narrator
                 p = pmap[b["passage_id"]]
                 assert p["lang"] == "en" and b["narration"] and b["narration_id"]
                 assert b["clips"][0]["video_id"] == p["video_id"]
-            if b["kind"] in ("dialogue", "hook"):        # everything heard is Hindi
+            if b["kind"] in ("dialogue", "teaser"):      # everything heard is Hindi
                 assert pmap[b["passage_id"]]["lang"] in editor.DIALOGUE_LANGS
-    dialogue_passages = [b["passage_id"] for a in story["acts"] for b in a["beats"]
-                         if b["kind"] in ("dialogue", "voiceover")]
-    assert hook_passage not in dialogue_passages              # the hook is never replayed
+    assert cutaways                                       # long soundbites show the action
+    beats = [b for a in story["acts"] for b in a["beats"]]
+    assert [b["kind"] for b in beats[:2]] == ["teaser", "teaser"]
+    assert any(b["kind"] == "title" and b["sfx"] == "boom" for b in beats)
+    teaser = {b["passage_id"] for b in beats if b["kind"] == "teaser"}
+    dialogue_passages = [b["passage_id"] for b in beats if b["kind"] in ("dialogue", "voiceover")]
+    assert not teaser & set(dialogue_passages)            # cold-open lines are never replayed
     assert len(dialogue_passages) == len(set(dialogue_passages))
 
 
@@ -251,12 +309,15 @@ def test_too_little_material_is_reported_not_padded(material):
 
 
 def test_timeline_with_text_cards_and_no_music(material, settings):
+    settings["builtin_music"] = False
     outline, story, voice_d = _assemble(material, 6)
     voice = {k: {"file": "x.wav", "duration": v} for k, v in voice_d.items()}
     tl = timeline.build(story, voice, {k: None for k in ACT_KEYS}, {}, settings)
     segs = tl["segments"]
     cards = [s for s in segs if s["type"] == "card"]
-    assert sum(s.get("style") == "title" for s in cards) == 1
+    # the title sits on moving action footage (not a frozen card), with a boom
+    assert not cards and sum(s.get("overlay_style") == "title" for s in segs) == 1
+    assert any(fx["kind"] == "boom" for fx in tl["acts"][0]["effects"])
     # on-screen text sits on moving footage, never on a frozen frame
     assert any(s["type"] == "clip" and s.get("overlay") for s in segs)
     assert not any(s.get("style") == "text" for s in cards)
@@ -310,12 +371,20 @@ def test_hindi_news_style_cuts_clips_to_their_sharpest_part(material):
     asm = editor.Assembler(material["passages"], material["videos"], material["visuals"],
                            DEFAULT_STYLE, 5 * 60)
     story = asm.build(outline, {n: 5.0 for n in editor.narration_lines(outline)}, "sensational")
-    hooks = [b for a in story["acts"] for b in a["beats"] if b["kind"] == "hook"]
-    assert len(hooks) == 1
+    teaser = [b for a in story["acts"] for b in a["beats"] if b["kind"] == "teaser"]
+    assert 2 <= len(teaser) <= 4 and story["acts"][0]["beats"][0]["kind"] == "teaser"
     for a in story["acts"]:
         for b in a["beats"]:
             if b["kind"] == "dialogue":
-                assert len(b["clips"]) <= 2
-                assert all(c["end"] - c["start"] <= editor.CLIP_CAP + 0.6 + 1e-6 for c in b["clips"])
+                # what is heard: max 2 cuts of the speaker, each within the cap (pictures may
+                # change underneath - cutaways - while the words run on)
+                groups = []
+                for v, s0, e0 in (_sound(c) for c in b["clips"]):
+                    if groups and abs(groups[-1][1] - s0) < 0.005:      # cutaway pieces join exactly
+                        groups[-1][1] = e0
+                    else:
+                        groups.append([s0, e0])
+                assert len(groups) <= 2
+                assert all(e0 - s0 <= editor.CLIP_CAP + 0.6 + 1e-6 for s0, e0 in groups)
     kinds = [b["kind"] for a in story["acts"] for b in a["beats"]]
     assert all(not (x == y == "narration") for x, y in zip(kinds, kinds[1:]))

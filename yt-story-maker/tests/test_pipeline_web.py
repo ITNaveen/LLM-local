@@ -175,3 +175,17 @@ def test_one_video_refusing_download_still_finishes(settings, fake_llm):
     tl = json.loads(job.path("timeline.json").read_text())
     assert all(s["video_id"] != bad[0] for s in tl["segments"] if s["type"] == "clip")
     assert any("re-editing around them" in line for line in job.state["log"])
+
+
+def test_reedit_keeps_research_and_redoes_the_edit(client):
+    job = pipeline.Job.create({"topic": "x", "minutes": 8})
+    for name in ("research.json", "moments.json", "outline.json", "story.json", "timeline.json"):
+        job.path(name).write_text("{}")
+    (job.path("voice")).mkdir()
+    job.set(status="done", outputs={"video": "final.mp4"})
+    assert client.post(f"/api/jobs/{job.id}/reedit").status_code == 200
+    job = pipeline.Job(job.dir)
+    assert job.path("research.json").exists() and job.path("moments.json").exists()
+    assert not job.path("outline.json").exists() and not job.path("story.json").exists()
+    assert not job.path("voice").exists()
+    assert job.state["status"] == "queued" and not job.state["outputs"]

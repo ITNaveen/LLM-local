@@ -119,6 +119,7 @@
     <label>Piper Hindi voice (.onnx path) <input name="piper_model"></label>
     <h3>Footage &amp; music</h3>
     <label>Music folder <input name="music_dir"></label>
+    <label class="toggle"><input type="checkbox" name="builtin_music"> Built-in news score when the music folder is empty</label>
     <label>Videos to look at <input name="max_candidates" type="number" min="50" max="1000"></label>
     <label>Videos to study closely <input name="shortlist_size" type="number" min="6" max="60"></label>
     <label class="toggle"><input type="checkbox" name="force_ipv4"> Force IPv4 for YouTube (fixes very slow searches)</label>
@@ -127,7 +128,7 @@
       <select name="cookies_from_browser"><option value="">Off</option><option>chrome</option><option>safari</option><option>firefox</option><option>brave</option><option>edge</option></select></label>
     <h3>Render</h3>
     <label class="toggle"><input type="checkbox" name="burn_subtitles"> Burn Hindi subtitles into the video</label>
-    <label class="toggle"><input type="checkbox" name="title_card"> Title card after the opening</label>
+    <label class="toggle"><input type="checkbox" name="title_card"> Title sting after the opening</label>
     <label>Port <input name="port" type="number"></label>
     <div class="actions">
       <button value="cancel" class="ghost">Close</button>

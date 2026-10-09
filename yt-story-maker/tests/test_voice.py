@@ -17,7 +17,8 @@ job = json.load(open(sys.argv[2]))
 print("Loading the Hindi voice model on cpu...", flush=True)
 if not {works!r}:
     print("RuntimeError: model is gated", flush=True); sys.exit(1)
-for i, (nid, text) in enumerate(job["lines"].items(), 1):
+for i, (nid, line) in enumerate(job["lines"].items(), 1):
+    assert "speaks in" in line["description"] and line["text"]
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
                     "sine=frequency=300:duration=2", "-ac", "1",
                     job["out_dir"] + "/" + nid + ".raw.wav"], check=True)
@@ -29,8 +30,14 @@ assert "Divya" in job["description"]
     return script
 
 
+def _ready(tmp_path, monkeypatch, works=True):
+    monkeypatch.setattr(voice, "PARLER_PY", _fake_parler(tmp_path, works))
+    monkeypatch.setattr(voice, "PARLER_READY", tmp_path / "READY")
+    (tmp_path / "READY").touch()
+
+
 def test_emotional_voice_renders_all_lines_in_one_run(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "PARLER_PY", _fake_parler(tmp_path))
+    _ready(tmp_path, monkeypatch)
     logs = []
     s = dict(config.DEFAULTS, parler_speaker="Divya")
     out = voice.synthesize({"n01": "सोचिए ज़रा!", "n02": "ये है असली खेल।"}, tmp_path / "v", s, logs.append)
@@ -40,12 +47,13 @@ def test_emotional_voice_renders_all_lines_in_one_run(tmp_path, monkeypatch):
 
 
 def test_emotional_voice_failure_falls_back(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "PARLER_PY", _fake_parler(tmp_path, works=False))
+    _ready(tmp_path, monkeypatch, works=False)
     logs = []
     s = dict(config.DEFAULTS, parler_speaker="Divya")
     out = voice.synthesize({"n01": "नमस्ते दोस्तों"}, tmp_path / "v", s, logs.append)
     assert out["n01"]["engine"] != "parler" and media_duration(out["n01"]["file"]) > 0
     assert any("emotional voice failed" in line and "gated" in line for line in logs)
+    assert any("still locked" in line for line in logs)              # tells how to unlock it
 
 
 def test_old_slow_voice_settings_are_upgraded(tmp_path, monkeypatch):
@@ -53,7 +61,10 @@ def test_old_slow_voice_settings_are_upgraded(tmp_path, monkeypatch):
     f.write_text(json.dumps({"edge_rate": "-6%", "edge_pitch": "-4Hz", "crf": 23}))
     monkeypatch.setattr(config, "SETTINGS_FILE", f)
     s = config.load_settings()
-    assert s["edge_rate"] == "+8%" and s["edge_pitch"] == "+0Hz" and s["crf"] == 23
+    assert s["edge_rate"] == "+10%" and s["edge_pitch"] == "+0Hz" and s["crf"] == 23
+    f.write_text(json.dumps({"edge_rate": "+8%", "builtin_music": False}))
+    s = config.load_settings()
+    assert s["edge_rate"] == "+10%" and s["builtin_music"] is False   # a choice is kept
 
 
 def test_sentence_splitting_for_the_voice_model():

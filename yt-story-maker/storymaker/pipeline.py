@@ -1,7 +1,6 @@
 """Runs the whole editor, stage by stage. Every stage saves its result in the job folder,
 so a failed or edited job resumes from where it stopped instead of starting over."""
 
-import copy
 import json
 import threading
 import time
@@ -159,8 +158,8 @@ def run_job(job, settings, source=None, llm=None):
             log("Planning the film scene by scene...")
             can_text = render.can_draw_text()
             if not can_text:
-                log("ffmpeg can't draw Hindi text here, so on-screen lines are spoken by the "
-                    "narrator instead (install ffmpeg-full for text cards).")
+                log("Hindi text can't be drawn yet (the Pillow package installs on the next "
+                    "start), so on-screen lines are spoken by the narrator this time.")
             outline = editor.plan_story(llm, topic, desc, req.get("theme", "auto"), minutes,
                                         req.get("narration", "light"), mom["passages"],
                                         mom["videos"], log, can_text=can_text,
@@ -202,8 +201,9 @@ def run_job(job, settings, source=None, llm=None):
         share, _ = stage("timeline")
         tracks = music.choose_tracks(st["acts"], settings["music_dir"], seed=zlib.crc32(job.id.encode()) % 1000)
         if not any(tracks.values()):
-            log("Music library is empty - the film uses the footage's own sound. Add royalty-free "
-                "tracks to the music/ folder for build-ups and the climax.")
+            log("Music folder is empty - using the built-in news score. Royalty-free tracks in the "
+                "music/ folder sound even better." if settings.get("builtin_music", True) else
+                "Music folder is empty - the film uses the footage's own sound.")
         grids = {k: music.beat_times(t) if t else [] for k, t in tracks.items()}
         tl = timeline.build(st, vo, tracks, grids, settings)
         tl["title_hi"] = st.get("title_hi", topic)
@@ -222,7 +222,7 @@ def run_job(job, settings, source=None, llm=None):
             if render.drop_missing(files):
                 log("Some downloaded files disappeared - re-editing around them.")
             clip_segs = [s for s in tl["segments"] if s["type"] == "clip"]
-            gone = [s for s in clip_segs if not render.locate(files, s)[0]
+            gone = [s for s in clip_segs if not render.shot_available(files, s)
                     or (s["video_id"], round(s["src_start"], 2)) in dupes]
             if len(gone) == len(clip_segs):
                 raise RuntimeError("No footage could be downloaded. " + "; ".join(failed[:2]))
@@ -231,17 +231,13 @@ def run_job(job, settings, source=None, llm=None):
                 # them, so a temporary network problem never loses footage from the plan.
                 log(f"{len(gone)} shots unavailable - re-editing around them.")
                 gone_keys |= {(s["video_id"], round(s["src_start"], 2)) for s in gone}
-                pruned = copy.deepcopy(st)
-                for act in pruned["acts"]:
-                    for b in act["beats"]:
-                        b["clips"] = [c for c in b["clips"]
-                                      if (c["video_id"], round(c["start"], 2)) not in gone_keys]
+                pruned = editor.without_clips(st, gone_keys)
                 tl = timeline.build(pruned, vo, tracks, grids, settings)
                 tl["title_hi"] = st.get("title_hi", topic)
                 write_json(job.path("timeline.json"), tl)
             # Re-cutting can lengthen a neighbouring shot: fetch those extra seconds.
             short = [s for s in tl["segments"] if s["type"] == "clip"
-                     and render.locate(files, s)[0] and not render.locate(files, s, strict=True)[0]]
+                     and render.shot_available(files, s) and not render.shot_available(files, s, strict=True)]
             if not gone and not short:
                 break
             if short:
@@ -303,6 +299,18 @@ def apply_review_edits(job, edits, remove=()):
         for name in ("voice.json", "story.json", "timeline.json"):
             job.path(name).unlink(missing_ok=True)
     return changed
+
+
+def reset_edit(job):
+    """Forget the plan, voice, cut and render (keep research, transcripts and downloads) so the
+    job is edited again from the story stage on."""
+    import shutil
+    for name in ("outline.json", "voice.json", "story.json", "timeline.json", "final.mp4",
+                 "thumbnail.jpg", "narration_hi.srt", "youtube.json", "youtube.txt"):
+        job.path(name).unlink(missing_ok=True)
+    shutil.rmtree(job.path("voice"), ignore_errors=True)
+    job.set(status="queued", error="", approved=False, outputs=None, progress=0.0)
+    job.log("Re-editing with the current editor (research and transcripts kept)...")
 
 
 def understand_videos(source, llm, topic, desc, res, settings, log, sub):

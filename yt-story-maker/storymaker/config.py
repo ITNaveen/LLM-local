@@ -36,13 +36,13 @@ DEFAULTS = {
     "parler_speaker": "Rohit",    # emotional voice: Rohit / Aman (male), Divya / Rani (female)
     "parler_style": "",           # optional custom description of how the voice should sound
     "edge_voice": "hi-IN-MadhurNeural",
-    "edge_rate": "+8%",           # energetic, not a slow news reader
+    "edge_rate": "+10%",          # energetic, not a slow news reader
     "edge_pitch": "+0Hz",
     "say_voice": "Lekha",
     "piper_model": "",            # path to a Hindi .onnx voice for fully offline TTS
     # Music
     "music_dir": str(ROOT / "music"),
-    "generated_music": False,     # plain generated pad when the library is empty (off = no music)
+    "builtin_music": True,        # built-in news-thriller score when the music folder is empty
     # Render
     "width": 1920,
     "height": 1080,
@@ -58,7 +58,7 @@ DEFAULTS = {
 
 
 # Earlier defaults that turned out wrong; saved copies of them are upgraded automatically.
-_OLD_DEFAULTS = {"edge_rate": "-6%", "edge_pitch": "-4Hz"}
+_OLD_DEFAULTS = {"edge_rate": ("-6%", "+8%"), "edge_pitch": ("-4Hz",)}
 
 
 def load_settings():
@@ -67,7 +67,7 @@ def load_settings():
         try:
             saved = json.loads(SETTINGS_FILE.read_text())
             settings.update({k: v for k, v in saved.items()
-                             if k in DEFAULTS and _OLD_DEFAULTS.get(k) != v})
+                             if k in DEFAULTS and v not in _OLD_DEFAULTS.get(k, ())})
         except (OSError, ValueError):
             pass
     return settings

@@ -5,23 +5,41 @@ burn Hindi subtitles, and export a YouTube-ready MP4 + SRT + thumbnail."""
 import hashlib
 import json
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import music
-from .config import FONT_NAME, FONTS_DIR
-from .util import PipelineError, ffmpeg, ffmpeg_has_filter, has_video, probe, srt_ts  # noqa: F401
+from . import music, textimg
+from .util import PipelineError, ffmpeg, has_video, probe, srt_ts
 
 AUDIO_SR = 48000
 
 
 # ------------------------------------------------------------------ downloads
+def audio_seg(seg):
+    """The sound a cutaway shot plays: the speaker's own passage, as a pseudo-segment."""
+    a = seg["audio_src"]
+    return {"type": "clip", "video_id": a["video_id"], "src_start": a["src_start"], "dur": seg["dur"]}
+
+
+def footage_needs(segments):
+    """Every (picture or sound) range the clips need from the sources."""
+    for s in segments:
+        if s["type"] == "clip":
+            yield s
+            if s.get("audio_src"):
+                yield audio_seg(s)
+
+
+def shot_available(files, seg, strict=False):
+    return bool(locate(files, seg, strict)[0]) and (
+        not seg.get("audio_src") or bool(locate(files, audio_seg(seg), strict)[0]))
+
+
 def plan_downloads(segments, pad=1.0, merge_gap=6.0):
     """Merge each video's needed ranges into as few downloads as possible."""
     ranges = {}
-    for s in segments:
-        if s["type"] != "clip":
-            continue
+    for s in footage_needs(segments):
         ranges.setdefault(s["video_id"], []).append(
             (max(0.0, s["src_start"] - pad), s["src_start"] + s["dur"] + pad))
     plan = []
@@ -168,56 +186,78 @@ def _stream_info(path):
     return w, h, a
 
 
-def render_segment(seg, src, offset, out_v, out_a, tl, settings):
+def render_segment(seg, src, offset, out_v, out_a, tl, settings, asrc=None, aoffset=0.0):
+    """One shot: picture from `src` at `offset`; sound from the same file, or from `asrc` at
+    `aoffset` for a cutaway (a speaker keeps talking while we show what they talk about)."""
     W, H, fps = tl["width"], tl["height"], tl["fps"]
     n, dur = seg["frames"], seg["frames"] / fps
     samples = int(round(dur * AUDIO_SR))
     w, h, has_audio = _stream_info(src)
-    if not w:   # no picture at all (should have been caught at download): never fail the film
-        src_inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={fps}:d={dur + 1:.2f}"]
+    args, count = [], 0
+
+    def add(*inp):
+        nonlocal count
+        args.extend(inp)
+        count += 1
+        return count - 1
+
+    clip_in = ["-ss", f"{max(0, offset):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", str(src)]
+    if w:
+        v_in = add(*clip_in)
+    else:   # no picture at all (should have been caught at download): never fail the film
+        v_in = add("-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={fps}:d={dur + 1:.2f}")
+    if asrc:
+        a_has = _stream_info(asrc)[2]
+        a_in = add("-ss", f"{max(0, aoffset):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", str(asrc)) if a_has else None
+    else:
+        a_has = has_audio
+        a_in = (v_in if w else add(*clip_in)) if a_has else None
+    if a_in is None:
+        a_in = add("-f", "lavfi", "-i", f"anullsrc=r={AUDIO_SR}:cl=stereo")
+
     aspect = w / h if h else 16 / 9
+    zoom = 1.12 if seg.get("fx") == "punch" and seg.get("zoom", True) else 1.0
     if abs(aspect - W / H) < 0.04:
-        vchain = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}[v0];"
+        vchain = (f"[{v_in}:v]scale={int(W * zoom) // 2 * 2}:{int(H * zoom) // 2 * 2}:"
+                  f"force_original_aspect_ratio=increase,crop={W}:{H}[v0];")
     else:  # vertical / 4:3: blurred copy fills the frame behind the real shot
-        vchain = (f"[0:v]split=2[bgs][fgs];[bgs]scale={W}:{H}:force_original_aspect_ratio=increase,"
+        vchain = (f"[{v_in}:v]split=2[bgs][fgs];[bgs]scale={W}:{H}:force_original_aspect_ratio=increase,"
                   f"crop={W}:{H},boxblur=luma_radius=40:luma_power=2,eq=brightness=-0.12[bg];"
                   f"[fgs]scale={W}:{H}:force_original_aspect_ratio=decrease[fg];"
                   f"[bg][fg]overlay=(W-w)/2:(H-h)/2[v0];")
+    darken = ""
+    text_png = None
+    if seg.get("overlay") and can_draw_text():
+        style = seg.get("overlay_style", "headline")
+        text_png = Path(out_v).with_suffix(".text.png")
+        (textimg.title if style == "title" else textimg.headline)(text_png, W, H, seg["overlay"])
+        darken = (",eq=brightness=-0.22:saturation=0.8" if style == "title"
+                  else ",eq=brightness=-0.3:saturation=0.75")
+    vchain += (f"[v0]setsar=1,fps={fps},eq=contrast=1.05:saturation=1.08,"
+               f"tpad=stop_mode=clone:stop_duration={max(4.0, dur + 1):.1f}{darken}[vb];")
+    last = "vb"
+    if text_png:
+        t_in = add("-i", str(text_png))       # decoded once, repeated by the loop filter
+        fade_t = min(0.35, dur / 4)
+        vchain += (f"[{t_in}:v]format=rgba,loop=loop={n + 30}:size=1,fps={fps},"
+                   f"fade=t=in:st=0:d={fade_t:.2f}:alpha=1,"
+                   f"fade=t=out:st={max(0, dur - fade_t):.3f}:d={fade_t:.2f}:alpha=1[tx];"
+                   f"[vb][tx]overlay=0:0:shortest=0[vt];")
+        last = "vt"
     fades = ""
-    if seg["fade_in"]:
+    if seg.get("fx") == "punch":       # flash-cut: the shot bursts in from white
+        fades += ",fade=t=in:st=0:d=0.16:color=white"
+    elif seg["fade_in"]:
         fades += f",fade=t=in:st=0:d={seg['fade_in']}"
     if seg["fade_out"]:
         fades += f",fade=t=out:st={max(0, dur - seg['fade_out']):.3f}:d={seg['fade_out']}"
-    overlay = ""
-    if seg.get("overlay"):       # on-screen text over darkened, still-moving footage
-        overlay = ",eq=brightness=-0.28:saturation=0.75,gblur=sigma=3"
-        if can_draw_text():
-            ass = Path(out_v).with_suffix(".ass")
-            ass.write_text(ass_header(W, H, int(H * 0.075), 0, outline=int(H * 0.018), box=True) +
-                           f"Dialogue: 0,{_ass_ts(0)},{_ass_ts(dur)},Default,,{int(W * 0.1)},{int(W * 0.1)},0,,"
-                           f"{{\\an5\\q0\\fad(300,300)\\fscx100\\fscy100\\t(0,{int(dur * 1000)},\\fscx104\\fscy104)}}"
-                           f"{_ass_escape(seg['overlay'])}\n", encoding="utf-8")
-            overlay += f",{ass_filter(ass)}"
-    vchain += (f"[v0]setsar=1,fps={fps},eq=contrast=1.05:saturation=1.08,"
-               f"tpad=stop_mode=clone:stop_duration={max(4.0, dur + 1):.1f}{overlay}{fades},format=yuv420p[v]")
+    vchain += f"[{last}]null{fades},format=yuv420p[v]"
     gain = seg["clip_gain"]
-    afades = f"afade=t=in:d={max(0.03, seg['fade_in'])}"
+    afades = f"afade=t=in:d={max(0.03, seg['fade_in'] if seg.get('fx') != 'punch' else 0.03)}"
     afades += f",afade=t=out:st={max(0, dur - max(0.06, seg['fade_out'])):.3f}:d={max(0.06, seg['fade_out'])}"
-    a_in = "[0:a]" if has_audio else "[1:a]"
-    achain = (f"{a_in}aresample={AUDIO_SR},aformat=sample_fmts=fltp:channel_layouts=stereo,"
-              + ("loudnorm=I=-18:TP=-3:LRA=9," if has_audio else "")
+    achain = (f"[{a_in}:a]aresample={AUDIO_SR},aformat=sample_fmts=fltp:channel_layouts=stereo,"
+              + ("loudnorm=I=-18:TP=-3:LRA=9," if a_has else "")
               + f"aresample={AUDIO_SR},volume={gain:.3f},{afades},apad,atrim=end_sample={samples}[a]")
-    args = ["-ss", f"{max(0, offset):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", src]
-    if not w:
-        # input 0 = black picture, input 1 = the file's sound
-        args = src_inputs + ["-ss", f"{max(0, offset):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", src]
-        a_in = "[1:a]" if has_audio else None
-        if not has_audio:
-            args += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_SR}:cl=stereo"]
-            a_in = "[2:a]"
-        achain = achain.replace(achain[:achain.index("aresample")], a_in, 1)
-    elif not has_audio:
-        args += ["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_SR}:cl=stereo"]
     ffmpeg(*args, "-filter_complex", vchain + ";" + achain,
            "-map", "[v]", "-frames:v", str(n), "-an", "-c:v", "libx264",
            "-preset", settings["preset"], "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(fps),
@@ -225,69 +265,32 @@ def render_segment(seg, src, offset, out_v, out_a, tl, settings):
            "-map", "[a]", "-vn", "-c:a", "pcm_s16le", "-ar", str(AUDIO_SR), str(out_a))
 
 
-def _ass_escape(text):
-    return (text or "").replace("{", "(").replace("}", ")").replace("\n", " ")
-
-
-def _filter_path(path):
-    return str(path).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
-
-
 def can_draw_text():
-    return ffmpeg_has_filter("ass")
-
-
-def ass_filter(path):
-    """libass with *complex* shaping: required for Hindi (e.g. the ि sign in विराट is drawn
-    before its consonant). ffmpeg's 'subtitles' filter uses simple shaping and breaks it."""
-    return f"ass='{_filter_path(path)}':fontsdir='{_filter_path(FONTS_DIR)}':shaping=complex"
-
-
-def ass_header(W, H, size, margin_v, outline=3, primary="&H00FFFFFF", bold=-1, box=False):
-    return (
-        "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n"
-        f"PlayResX: {W}\nPlayResY: {H}\n\n[V4+ Styles]\n"
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
-        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
-        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{FONT_NAME},{size},{primary},&H000000FF,"
-        f"{'&H50000000' if box else '&H00000000'},&H96000000,"
-        f"{bold},0,0,0,100,100,0,0,{3 if box else 1},{outline},{0 if box else 1},2,60,60,{margin_v},1\n\n"
-        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
-
-
-def _ass_ts(t):
-    cs = int(round(t * 100))
-    h, rem = divmod(cs, 360000)
-    m, rem = divmod(rem, 6000)
-    s, cs = divmod(rem, 100)
-    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+    """Hindi text is drawn by Pillow (any ffmpeg works); see textimg.py."""
+    return textimg.available()
 
 
 def render_card(seg, background_png, out_v, out_a, tl, settings, work):
+    """A text card on a background picture (only used when no footage could be found)."""
     W, H, fps = tl["width"], tl["height"], tl["fps"]
     dur = seg["frames"] / fps
-    ass = Path(work) / f"card_{seg['i']}.ass"
-    if seg.get("style") == "text":   # story text card: calmer, smaller, slow push-in
-        size, tags = int(H * 0.058), (f"{{\\an5\\q0\\fad(350,350)\\fscx100\\fscy100"
-                                      f"\\t(0,{int(dur * 1000)},\\fscx104\\fscy104)}}")
-    else:                            # title card
-        size, tags = int(H * 0.085), (f"{{\\an5\\fad(500,500)\\fscx108\\fscy108"
-                                      f"\\t(0,{int(dur * 1000)},\\fscx100\\fscy100)}}")
-    ass.write_text(ass_header(W, H, size, 0, outline=4) +
-                   f"Dialogue: 0,{_ass_ts(0)},{_ass_ts(dur)},Default,,{int(W * 0.1)},{int(W * 0.1)},0,,"
-                   f"{tags}{_ass_escape(seg['text'])}\n", encoding="utf-8")
     if background_png and Path(background_png).exists():
         inputs = ["-loop", "1", "-framerate", str(fps), "-i", str(background_png)]
         bg = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-              f"boxblur=luma_radius=25:luma_power=2,eq=brightness=-0.3:saturation=0.8,")
+              f"boxblur=luma_radius=25:luma_power=2,eq=brightness=-0.3:saturation=0.8,setsar=1[bg]")
     else:
         inputs = ["-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:r={fps}"]
-        bg = "[0:v]"
-    text = f"{ass_filter(ass)}," if can_draw_text() else ""
-    vf = (f"{bg}setsar=1,{text}"
-          f"fade=t=in:st=0:d={seg['fade_in']},fade=t=out:st={dur - seg['fade_out']:.3f}:"
-          f"d={seg['fade_out']},format=yuv420p[v]")
+        bg = "[0:v]setsar=1[bg]"
+    last = "bg"
+    if can_draw_text():
+        png = Path(work) / f"card_{seg['i']}.png"
+        (textimg.title if seg.get("style") == "title" else textimg.headline)(png, W, H, seg["text"])
+        inputs += ["-i", str(png)]
+        bg += (f";[1:v]format=rgba,loop=loop={seg['frames'] + 30}:size=1,fps={fps}[tx];"
+               "[bg][tx]overlay=0:0[bt]")
+        last = "bt"
+    vf = (f"{bg};[{last}]fade=t=in:st=0:d={seg['fade_in']},"
+          f"fade=t=out:st={dur - seg['fade_out']:.3f}:d={seg['fade_out']},format=yuv420p[v]")
     ffmpeg(*inputs, "-filter_complex", vf, "-map", "[v]", "-frames:v", str(seg["frames"]),
            "-c:v", "libx264", "-preset", settings["preset"], "-crf", "18", "-pix_fmt", "yuv420p",
            "-r", str(fps), "-video_track_timescale", str(fps * 1000), str(out_v))
@@ -303,12 +306,30 @@ def write_srt(subtitles, path):
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_subtitle_ass(subtitles, path, W, H):
-    body = ass_header(W, H, int(H * 0.048), int(H * 0.07))
-    for s in subtitles:
-        body += (f"Dialogue: 0,{_ass_ts(s['start'])},{_ass_ts(s['end'])},Default,,0,0,0,,"
-                 f"{_ass_escape(s['text'])}\n")
-    Path(path).write_text(body, encoding="utf-8")
+def subtitle_track(subtitles, W, H, duration, work):
+    """Narration subtitles as one transparent video track (Pillow pictures, so it works with
+    any ffmpeg), laid over the film in the final export."""
+    d = Path(work) / "subs"
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True)
+    blank = textimg.subtitle(d / "blank.png", W, H, "")
+    lines, t = [], 0.0
+    for i, sub in enumerate(sorted(subtitles, key=lambda x: x["start"])):
+        start = max(t, sub["start"])
+        end = max(sub["end"], start + 0.2)
+        if start - t > 0.01:
+            lines += [f"file '{blank.name}'", f"duration {start - t:.3f}"]
+        png = d / f"s{i:04d}.png"
+        textimg.subtitle(png, W, H, sub["text"])
+        lines += [f"file '{png.name}'", f"duration {end - start:.3f}"]
+        t = end
+    lines += [f"file '{blank.name}'", f"duration {max(0.1, duration - t + 1):.3f}", f"file '{blank.name}'"]
+    (d / "list.txt").write_text("\n".join(lines) + "\n")
+    out = d / "subs.mov"
+    # one frame per change (variable frame rate): the overlay holds each until the next
+    ffmpeg("-f", "concat", "-safe", "0", "-i", str(d / "list.txt"), "-fps_mode", "passthrough",
+           "-c:v", "qtrle", "-pix_fmt", "argb", str(out))
+    return out
 
 
 def thumbnail_text(title):
@@ -321,16 +342,13 @@ def thumbnail_text(title):
 
 
 def make_thumbnail(frame_png, title, out_jpg, work):
-    ass = Path(work) / "thumb.ass"
-    text = thumbnail_text(title)
-    ass.write_text(ass_header(1280, 720, 92, 40, outline=7, primary="&H0000F0FF") +
-                   f"Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{_ass_escape(text)}\n",
-                   encoding="utf-8")
-    text = f",{ass_filter(ass)}" if can_draw_text() else ""
+    if can_draw_text():
+        return textimg.thumbnail(frame_png, out_jpg, title)
     ffmpeg("-i", str(frame_png), "-vf",
-           f"scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,"
-           f"eq=contrast=1.15:saturation=1.3:brightness=-0.03{text}",
+           "scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,"
+           "eq=contrast=1.15:saturation=1.3:brightness=-0.03",
            "-frames:v", "1", "-q:v", "3", str(out_jpg))
+    return out_jpg
 
 
 def extract_frame(video, t, out_png):
@@ -368,9 +386,14 @@ def render(tl, files, settings, job_dir, log, progress=None):
         src, offset = locate(files, seg)
         if not src:
             raise PipelineError(f"no footage for segment {seg['i']} ({seg['video_id']})")
+        asrc, aoffset = None, 0.0
+        if seg.get("audio_src"):          # cutaway: the speaker's voice over other footage
+            asrc, aoffset = locate(files, audio_seg(seg))
+            if not asrc:
+                raise PipelineError(f"no sound for segment {seg['i']} ({seg['audio_src']['video_id']})")
         # write under temporary names: a shot interrupted half-way is never mistaken for done
         tmp_v, tmp_a = out_v.with_suffix(".tmp.mp4"), out_a.with_suffix(".tmp.wav")
-        render_segment(seg, src, offset, tmp_v, tmp_a, tl, settings)
+        render_segment(seg, src, offset, tmp_v, tmp_a, tl, settings, asrc, aoffset)
         os.replace(tmp_a, out_a)
         os.replace(tmp_v, out_v)
         return seg
@@ -416,7 +439,8 @@ def render(tl, files, settings, job_dir, log, progress=None):
         path = work / f"bed{i}.wav"
         music.render_act_bed(path, seconds, act["track"], act["mood"], act["gain_points"],
                              act["narration"], seed=i,
-                             generate=bool(settings.get("generated_music", False)))
+                             generate=bool(settings.get("builtin_music", True)),
+                             effects=act.get("effects", []))
         bed_files.append(path)
     blist = work / "bed.txt"
     blist.write_text("".join(f"file '{p.name}'\n" for p in bed_files))
@@ -429,20 +453,21 @@ def render(tl, files, settings, job_dir, log, progress=None):
            f"loudnorm=I={settings['target_lufs']}:TP=-1.5:LRA=11,aresample={AUDIO_SR}[a]")
     burn = settings.get("burn_subtitles") and tl["subtitles"]
     if burn and not can_draw_text():
-        log("Your ffmpeg cannot draw text (no libass) - subtitles saved as .srt only. "
-            "For burned-in Hindi subtitles and titles: brew install ffmpeg-full")
+        log("Hindi text needs the Pillow package (it installs on the next start) - "
+            "subtitles saved as .srt only this time.")
         burn = False
+    extra = []
     if burn:
-        sub_ass = work / "subs.ass"
-        write_subtitle_ass(tl["subtitles"], sub_ass, tl["width"], tl["height"])
+        subs = subtitle_track(tl["subtitles"], tl["width"], tl["height"], tl["duration"], work)
+        extra = ["-i", str(subs)]
         video_args = ["-filter_complex",
-                      f"[0:v]{ass_filter(sub_ass)}[v];" + mix,
+                      "[0:v][3:v]overlay=0:H-h:eof_action=pass:format=auto,format=yuv420p[v];" + mix,
                       "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", settings["preset"],
                       "-crf", str(settings["crf"]), "-pix_fmt", "yuv420p"]
     else:
         video_args = ["-filter_complex", mix, "-map", "0:v", "-map", "[a]", "-c:v", "copy"]
     ffmpeg("-i", str(work / "video.mp4"), "-i", str(work / "clips.wav"), "-i", str(work / "bed.wav"),
-           *video_args, "-c:a", "aac", "-b:a", "192k", "-ar", str(AUDIO_SR),
+           *extra, *video_args, "-c:a", "aac", "-b:a", "192k", "-ar", str(AUDIO_SR),
            "-movflags", "+faststart", str(final))
 
     make_thumbnail(hero_png, tl.get("title_hi") or "", job_dir / "thumbnail.jpg", work)

@@ -119,3 +119,5 @@ button:disabled { opacity: .7; cursor: default; }
 .keep input { width: auto; margin: 0; accent-color: var(--accent); }
 .mode.text { color: var(--card); }
 .banner ul { margin: 6px 0 0; padding-left: 18px; }
+
+.thumbs a.cutaway img { outline: 2px dashed #f4a261; outline-offset: -2px; }

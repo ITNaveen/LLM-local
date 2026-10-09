@@ -10,18 +10,22 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from .llm import LLMError
 from .util import keywords, tokens
 
-QUERY_SYSTEM = """You are the research assistant of a top Indian YouTube documentary editor.
-Given a topic and a story description, produce YouTube search queries that will find the
-best raw footage: speeches, match highlights, news reports, press conferences, crowd
-reactions, interviews, behind-the-scenes, ground reports. Mix Hindi (Devanagari) and English
-queries the way Indians actually search. Return JSON only."""
+QUERY_SYSTEM = """You are the research assistant of a viral Hindi news YouTube channel. Given a
+topic and a story description, produce YouTube search queries that find the most DRAMATIC raw
+material for this story: clashes, lathicharge (लाठीचार्ज), stone pelting (पथराव), हंगामा, बवाल,
+emotional interviews of victims and families, angry statements, threats and warnings, press
+conferences, heated debates, viral videos, ground reports, CCTV, and the big Hindi channels'
+coverage (Aaj Tak, ABP News, Zee News, News18 India, TV9 Bharatvarsh, NDTV India, The Lallantop).
+Cover the whole story: the background and earlier incidents too. Mix Hindi (Devanagari),
+Hinglish and English the way Indians actually search. Never just repeat a slogan from the topic -
+search for the events and people behind it. Return JSON only."""
 
 QUERY_USER = """Topic: {topic}
 Story description: {description}
 
 Return JSON:
 {{
-  "queries": ["10 to 14 diverse YouTube search queries, Hindi and English"],
+  "queries": ["12 to 14 diverse YouTube search queries: at least half in Hindi/Hinglish, several aimed at dramatic footage"],
   "must_keywords": ["2-4 words that a relevant video title almost always contains"],
   "nice_keywords": ["6-12 related words: people, places, events, years"],
   "years": ["relevant years as strings, e.g. 2024"]
@@ -59,7 +63,10 @@ def make_queries(llm, topic, description, log):
     queries = [q.strip() for q in plan.get("queries") or [] if isinstance(q, str) and q.strip()]
     base = topic.strip()
     detail = " ".join(kw[:6])
-    fallback = [f"{base} {s}".strip() for s in SUFFIXES]
+    fallback = []
+    if len(base.split()) > 6:        # a long slogan finds nothing on YouTube: search its keywords
+        fallback, base = [base], " ".join(keywords(f"{description} {topic}")[:4]) or base
+    fallback += [f"{base} {s}".strip() for s in SUFFIXES]
     if detail and detail.lower() != base.lower():
         fallback += [f"{base} {detail}", detail]
     seen, merged = set(), []

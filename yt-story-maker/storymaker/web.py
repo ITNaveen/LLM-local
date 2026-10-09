@@ -9,12 +9,12 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 
-from . import pipeline, style as style_mod, voice as voice_mod
+from . import pipeline, render, style as style_mod, voice as voice_mod
 from .config import JOBS_DIR, ROOT, STYLES_DIR, CACHE_DIR, ensure_dirs, load_settings, save_settings
 from .llm import OllamaLLM
 from .music import MOODS, scan_library
 from .source import YouTubeSource
-from .util import ffmpeg_has_filter, has_tool, read_json
+from .util import has_tool, read_json
 
 app = Flask(__name__, template_folder=str(ROOT / "templates"), static_folder=str(ROOT / "static"))
 work_queue = queue.Queue()
@@ -61,7 +61,7 @@ def status():
         ytv = ""
     return jsonify({
         "ffmpeg": has_tool("ffmpeg"),
-        "ffmpeg_text": has_tool("ffmpeg") and ffmpeg_has_filter("ass"),
+        "ffmpeg_text": has_tool("ffmpeg") and render.can_draw_text(),
         "yt_dlp": ytv,
         "js_runtime": has_tool("deno") or has_tool("node"),
         "ollama": bool(models),
@@ -71,7 +71,7 @@ def status():
         "music": {m: len(lib[m]) for m in MOODS},
         "music_dir": s["music_dir"],
         "mac": platform.system() == "Darwin",
-        "emotional_voice": voice_mod.parler_available(),
+        "emotional_voice": voice_mod.parler_state(),
         "queue": work_queue.qsize(),
     })
 
@@ -180,6 +180,17 @@ def retry(job_id):
     if job_id not in running:
         job.set(status="queued", error="")
         work_queue.put(job_id)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/jobs/<job_id>/reedit")
+def reedit(job_id):
+    """Plan and cut again with the current editor; research and transcripts are kept."""
+    job = _job_or_404(job_id)
+    if job_id in running:
+        return jsonify({"error": "Cancel the job first."}), 409
+    pipeline.reset_edit(job)
+    work_queue.put(job_id)
     return jsonify({"ok": True})
 
 
