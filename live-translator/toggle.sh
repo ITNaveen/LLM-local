@@ -129,6 +129,13 @@ do_stop() {
       is_ours || break
       sleep 0.5
     done
+    # the English of the last lines is written in the background: let it finish (max ~30 s)
+    for i in $(seq 1 60); do
+      info | grep -q '"pending":0' && break
+      is_ours || break
+      [ "$i" = 1 ] && echo "• Finishing the last translations…"
+      sleep 0.5
+    done
     echo "✓ Meeting saved"
   fi
   if [ -n "$pid" ]; then

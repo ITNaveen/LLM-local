@@ -38,6 +38,7 @@ function toast(level, text, ms) {
   for (const t of $$(".toast", box)) if (t.dataset.text === text) return;
   const el = document.createElement("div");
   el.className = "toast " + (level === "error" ? "error" : level === "warn" ? "warn" : level === "ok" ? "ok" : "");
+  if (level === "error") el.setAttribute("role", "alert");
   el.dataset.text = text;
   el.textContent = text;
   const x = document.createElement("button");
@@ -72,7 +73,7 @@ function lineEl(line) {
   const el = document.createElement("article");
   el.className = "line";
   el.dataset.id = line.id;
-  el.innerHTML = '<div class="t"></div><div class="body"><div class="de"></div><div class="en"></div></div>';
+  el.innerHTML = '<div class="t"></div><div class="body"><div class="de" lang="de"></div><div class="en" lang="en"></div></div>';
   fillLine(el, line);
   return el;
 }
@@ -125,6 +126,7 @@ async function retranslate(mid, lineId, btn) {
 }
 
 function resetLive(meeting, lines) {
+  hideDoneCard();
   S.live.meeting = meeting || null;
   S.live.feedMeetingId = meeting ? meeting.id : null;
   S.live.lines = new Map();
@@ -144,7 +146,7 @@ function resetLive(meeting, lines) {
   feed.appendChild(frag);
   updateMeetingHeader();
   updateEmpty();
-  scrollToEnd(true);
+  if (!S.view) scrollToEnd(true);      // (closeView scrolls the live feed when it comes back)
 }
 
 function waitingText(line) {
@@ -190,6 +192,8 @@ function onTr(ev) {
     if (!ln) return;
     ln.en = ev.en;
     if (ev.final) { ln.done = true; ln.ok = ev.ok !== false; if (ev.lat) ln.lat = ev.lat; }
+    // screen readers: announce each finished English line once (not every streamed word)
+    if (ev.final && ev.ok !== false && ev.en && store === S.live.lines) $("#srLive").textContent = ev.en;
     const el = els.get(ev.id);
     if (el) fillLine(el, ln, mid);
   };
@@ -207,7 +211,7 @@ function setPartial(text) {
 }
 
 function updateEmpty() {
-  const showing = S.view ? S.view.lines.size : S.live.lines.size;
+  const showing = S.view ? S.view.lines.size : S.live.lines.size || S.done;
   const listening = S.status && S.status.state !== "idle";
   $("#emptyState").hidden = !!(showing || listening || S.view);
 }
@@ -237,9 +241,10 @@ function applyStatus(st) {
   S.status = st;
   const btn = $("#startBtn");
   btn.disabled = false;
+  btn.title = "";
   btn.classList.remove("stop", "primary");
   if (st.state === "listening") { btn.textContent = "Stop"; btn.classList.add("stop"); }
-  else if (st.state === "stopping") { btn.textContent = "Saving…"; btn.disabled = true; }
+  else if (st.state === "stopping") { btn.textContent = "Finishing…"; btn.disabled = true; btn.title = "Saving the last line"; }
   else { btn.textContent = "Start"; btn.classList.add("primary"); }
 
   if (st.meeting && st.state !== "idle" && (!S.live.meeting || S.live.meeting.id === st.meeting.id)) S.live.meeting = st.meeting;
@@ -266,6 +271,15 @@ function applyStatus(st) {
   }
   l.className = "pill " + cls;
   l.title = tip;
+  // thermal governor: shown while it is easing off
+  const g = st.governor || {};
+  const gp = $("#govPill");
+  gp.hidden = !(st.state === "listening" && g.level > 0);
+  if (!gp.hidden) {
+    $("b", gp).textContent = g.level >= 3 ? "Minimal mode" : g.level === 2 ? "Cool mode" : "Eco mode";
+    gp.title = `Keeping the Mac cool${g.reason ? " - " + g.reason : ""}: the live preview is ` +
+      `${g.level >= 3 ? "paused" : "slowed down"}. Every line is still translated.`;
+  }
   $("#llmPill b").textContent = llm.fallback_active ? "Translator (fast)" : "Translator";
 
   // timer
@@ -279,6 +293,10 @@ function applyStatus(st) {
     $("#meter").classList.remove("clip");
     $("#meterFill").style.width = "0";
     $("#meterVoice").classList.remove("on");
+  }
+  if (S.view) {
+    $("#vbContinue").disabled = st.state !== "idle";
+    $("#vbBack").textContent = st.state === "listening" ? "Back to live" : "Back";
   }
   updateBrowserAudioBar();
   $("#srcName").textContent = st.state === "listening" && st.source ? "Listening with: " + st.source : "";
@@ -319,7 +337,10 @@ function onEvent(ev) {
       S.settings = ev.settings;
       applySettings();
       applyStatus(ev.status);
-      resetLive(ev.status.meeting, ev.lines);
+      // a reconnect after Stop keeps the finished transcript and its Saved card on screen (and catches up
+      // with English or a rename / delete that happened while the connection was down)
+      if (S.done && ev.status.state === "idle" && !ev.status.meeting) resyncDone();
+      else resetLive(ev.status.meeting, ev.lines);
       setPartial(ev.partial && ev.partial.text);
       break;
     case "status": applyStatus(ev); break;
@@ -328,19 +349,51 @@ function onEvent(ev) {
       if (S.view) closeView();
       break;
     case "session_end":
-      if (ev.removed) toast("info", "Nothing was said - the empty meeting was not kept.");
-      else if (ev.meeting) toast("ok", `Saved: ${ev.meeting.title} (${ev.meeting.line_count} lines)`);
-      // the transcript stays on screen; the header is ready for the next meeting
       stopBrowserAudio();
-      S.live.meeting = null;
-      $("#meetingName").dataset.pending = "";
-      updateMeetingHeader();
+      {
+        const inp = $("#meetingName");
+        if (document.activeElement === inp) {      // was renaming the meeting that just ended: keep that name
+          clearTimeout(renameTimer);
+          const v = inp.value.trim();
+          if (v && ev.meeting && !ev.removed && v !== (ev.meeting.name || "")) {
+            api(`/api/meetings/${encodeURIComponent(ev.meeting.id)}/rename`, { body: { name: v } })
+              .catch((e) => toast("error", e.message));
+            ev.meeting = { ...ev.meeting, name: v, title: v };
+          }
+          inp.blur();
+        }
+        inp.dataset.pending = "";
+        inp.value = "";
+      }
       setPartial("");
+      if (ev.removed || !ev.meeting) {
+        toast("info", "Nothing was said - the empty meeting was not kept.");
+        clearLive();
+      } else {
+        // the finished transcript stays on screen with a "Saved" card; "New meeting" clears it
+        S.live.meeting = null;
+        updateMeetingHeader();
+        showDoneCard(ev.meeting);
+      }
       break;
     case "meeting":
       if (S.live.meeting && ev.meeting.id === S.live.meeting.id) { S.live.meeting = ev.meeting; updateMeetingHeader(); }
+      if (S.done && ev.meeting.id === S.done.id) {
+        S.done = ev.meeting;
+        if (document.activeElement !== $("#dcName")) $("#dcName").value = ev.meeting.name || "";
+        $("#dcName").placeholder = ev.meeting.title || "Name this meeting…";
+      }
+      if (S.view && ev.meeting.id === S.view.meta.id) { S.view.meta = ev.meeting; $("#vbTitle").textContent = ev.meeting.title; }
       break;
-    case "line": ev.line.lat = ev.lat; addLiveLine(ev.line); setPartial(""); break;
+    case "meeting_deleted":
+      if (S.view && S.view.meta.id === ev.id) closeView();
+      if (S.done && S.done.id === ev.id) clearLive();
+      break;
+    case "line":
+      // a late line of another meeting (or of the one cleared with "New meeting")
+      if (ev.meeting && ev.meeting !== S.live.feedMeetingId &&
+          (S.live.feedMeetingId || !S.status || S.status.state !== "listening")) break;
+      ev.line.lat = ev.lat; addLiveLine(ev.line); setPartial(""); break;
     case "tr": onTr(ev); break;
     case "partial": setPartial(ev.text); break;
     case "partial_en":
@@ -374,6 +427,62 @@ function connect() {
     S.wsDelay = Math.min(S.wsDelay * 2, 5000);
   };
 }
+
+// ------------------------------------------------------------------ after Stop: saved card / new meeting
+function showDoneCard(meta) {
+  S.done = meta;
+  $("#dcName").value = meta.name || "";
+  $("#dcName").placeholder = meta.title || "Name this meeting…";
+  const n = meta.line_count || 0;
+  $("#dcInfo").textContent = `${n} line${n === 1 ? "" : "s"} · ${fmtDur(meta.duration_s)}`;
+  $("#doneCard").hidden = !!S.view;          // shown again when the opened meeting is closed
+  if (S.view) return;
+  // move the focus only if it was on the Stop button (or nowhere): never out of a field or a drawer
+  const a = document.activeElement;
+  const drawerOpen = $$(".drawer").some((d) => !d.hidden);
+  if (!drawerOpen && (!a || a === document.body || a === $("#startBtn"))) $("#dcNew").focus({ preventScroll: true });
+  scrollToEnd(true);
+}
+async function resyncDone() {
+  const id = S.done && S.done.id;
+  if (!id) return;
+  let d;
+  try { d = await api(`/api/meetings/${encodeURIComponent(id)}`); }
+  catch (e) { if (S.done && S.done.id === id && /not found/i.test(e.message)) clearLive(); return; }
+  if (!S.done || S.done.id !== id) return;
+  for (const ln of d.lines) {
+    if (S.live.lines.has(ln.id)) onTr({ meeting: id, id: ln.id, en: ln.en, final: ln.done, ok: ln.ok });
+    else { addLiveLine(ln); }
+  }
+  onEvent({ type: "meeting", meeting: d.meta });
+}
+function hideDoneCard() {
+  S.done = null;
+  $("#doneCard").hidden = true;
+}
+function clearLive() {
+  // empty screen, ready for the next meeting (the finished one stays in Meetings)
+  resetLive(null, []);
+  setPartial("");
+  updateMeetingHeader();     // (keeps a name already typed for the next meeting)
+  updateEmpty();
+}
+$("#dcNew").onclick = clearLive;
+$("#dcOpen").onclick = () => { if (S.done) openView(S.done.id); };
+let dcRenameTimer = null;
+async function renameDone() {
+  clearTimeout(dcRenameTimer);
+  const m = S.done;
+  const v = $("#dcName").value.trim();
+  if (!m || v === (m.name || "")) return;
+  try {
+    const meta = await api(`/api/meetings/${encodeURIComponent(m.id)}/rename`, { body: { name: v } });
+    if (meta && S.done && S.done.id === meta.id) { S.done = meta; $("#dcName").placeholder = meta.title; }
+  } catch (e) { toast("error", e.message); }
+}
+$("#dcName").addEventListener("input", () => { clearTimeout(dcRenameTimer); dcRenameTimer = setTimeout(renameDone, 700); });
+$("#dcName").addEventListener("change", renameDone);
+$("#dcName").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
 
 // ------------------------------------------------------------------ start / stop / rename
 $("#startBtn").onclick = async () => {
@@ -491,8 +600,10 @@ async function openView(id) {
   $("#vbDownloadMd").href = base + "?fmt=md";
   $("#vbDownloadTxt").href = base + "?fmt=txt";
   $("#vbContinue").disabled = S.status && S.status.state !== "idle";
+  $("#vbBack").textContent = S.status && S.status.state === "listening" ? "Back to live" : "Back";
   $("#viewBanner").hidden = false;
   $("#liveFeed").hidden = true;
+  $("#doneCard").hidden = true;
   feed.hidden = false;
   showSummary(data.summary, false);
   $("#jumpLive").hidden = true;
@@ -506,6 +617,7 @@ function closeView() {
   $("#viewFeed").hidden = true;
   $("#viewFeed").innerHTML = "";
   $("#liveFeed").hidden = false;
+  $("#doneCard").hidden = !S.done;
   $("#summaryBox").hidden = true;
   S.follow = true;
   updateEmpty();
@@ -517,9 +629,11 @@ $("#vbDelete").onclick = async () => {
   if (!S.view) return;
   if (!confirm(`Delete "${S.view.meta.title}" permanently?\n\nThe transcript files will be removed from disk.`)) return;
   try {
-    await api(`/api/meetings/${encodeURIComponent(S.view.meta.id)}`, { method: "DELETE" });
+    const gone = S.view.meta.id;
+    await api(`/api/meetings/${encodeURIComponent(gone)}`, { method: "DELETE" });
     toast("ok", "Meeting deleted.");
     closeView();
+    if (S.done && S.done.id === gone) clearLive();
   } catch (e) { toast("error", e.message); }
 };
 $("#vbFolder").onclick = async () => {

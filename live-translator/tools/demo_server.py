@@ -58,6 +58,8 @@ def main():
 
         asr = (lambda s: EchoASR(SENTENCES[5][0], delay=0.2)) if a.preview else (lambda s: ScriptedASR(texts, delay=0.25))
         p = Pipeline(st, store, publish, asr_factory=asr)
+        if not a.preview:
+            p.early_enabled = False   # (ScriptedASR plays its lines in call order: no extra passes)
         if a.slow_llm:   # same logic, shorter clock than on a real Mac (8 s)
             p.SLOW_FIRST_S = 1.5
         return p

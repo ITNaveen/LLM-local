@@ -121,7 +121,8 @@ def clean_transcript(
     if n in _EXACT_FAKE or _FILLER_RE.match(n):
         return ""
     weak = no_speech_prob > 0.5 or avg_logprob < -0.9
-    if n in _SUSPICIOUS and weak:
+    # polite closings are what Whisper (and its German fine-tune) "hears" in noise: need clear speech
+    if n in _SUSPICIOUS and (weak or no_speech_prob > 0.3 or avg_logprob < -0.6):
         return ""
     if weak and no_speech_prob > 0.8 and avg_logprob < -0.7:
         return ""
@@ -129,4 +130,62 @@ def clean_transcript(
     if prompt_terms and len(n) > 12 and _norm(prompt_terms).find(n) >= 0:
         return ""
     t = collapse_repeats(t)
-    return t
+    return fix_eszett(t)
+
+
+# The German fine-tuned model writes "ss" for "ß" (a known quirk). Only unambiguous words are fixed.
+_ESZETT = {
+    "strasse": "straße", "strassen": "straßen", "gross": "groß", "grosse": "große", "grossen": "großen",
+    "grosser": "großer", "grosses": "großes", "grösse": "größe", "grössen": "größen", "grösser": "größer",
+    "grösste": "größte", "grössten": "größten", "heisst": "heißt", "heissen": "heißen", "weiss": "weiß",
+    "schliesslich": "schließlich", "ausserdem": "außerdem", "ausser": "außer", "äusserst": "äußerst",
+    "massstab": "maßstab", "massnahme": "maßnahme", "massnahmen": "maßnahmen", "gruss": "gruß",
+    "grüsse": "grüße", "grüssen": "grüßen", "fuss": "fuß", "spass": "spaß", "gemäss": "gemäß",
+    "regelmässig": "regelmäßig", "mässig": "mäßig", "grossartig": "großartig", "draussen": "draußen",
+    "begrüssen": "begrüßen", "abschliessen": "abschließen", "schliessen": "schließen"
+}
+_ESZETT_RE = re.compile(r"\b(" + "|".join(sorted((k for k in _ESZETT if "ss" in k), key=len, reverse=True)) + r")\b",
+                        re.I)
+
+
+# nouns are capitalised anywhere; any other listed word capitalised mid-sentence is a name (Herr Gross, Frau Weiss)
+_ESZETT_NOUNS = {"strasse", "strassen", "grösse", "grössen", "massstab", "massnahme", "massnahmen", "gruss", "grüsse",
+                 "fuss", "spass"}
+
+
+def fix_eszett(text: str) -> str:
+    def sub(m: re.Match) -> str:
+        w = m.group(0)
+        if w[0].isupper() and w.lower() not in _ESZETT_NOUNS:
+            before = text[:m.start()].rstrip()
+            if before and before[-1] not in ".!?:„\"(":
+                return w                       # mid-sentence capital: a surname, leave it
+        fixed = _ESZETT[w.lower()]
+        if w.isupper():
+            return fixed.upper()
+        return fixed[0].upper() + fixed[1:] if w[0].isupper() else fixed
+    return _ESZETT_RE.sub(sub, text) if "ss" in text.lower() else text
+
+
+# --------------------------------------------------------------------- end of a line?
+# Words after which a German sentence cannot be over (the speaker is just taking a breath):
+# conjunctions, articles and contracted prepositions. Verbs, pronouns, "nicht" and separable
+# particles ("an", "auf", "mit", ...) are left out on purpose - German sentences often end with them.
+_OPEN_END_WORDS = {
+    "und", "oder", "aber", "sondern", "dass", "daß", "weil", "wenn", "ob", "obwohl", "falls", "bevor",
+    "nachdem", "sodass", "sowie", "beziehungsweise", "bzw", "sowohl", "entweder", "weder",
+    "eine", "einen", "einem", "einer", "eines", "des", "dem", "den",
+    "zum", "zur", "beim", "vom", "im", "am", "für", "von", "ähm", "äh", "ehm", "öhm",
+}
+_LAST_WORD_RE = re.compile(r"[a-zäöüß]+", re.I)
+
+
+def sounds_unfinished(text: str) -> bool:
+    """True when the words so far clearly continue (trailing comma, "und", "dass", "für", ...)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.endswith((",", ";", ":", "-", "–", "—", "…", "...")):
+        return True
+    words = _LAST_WORD_RE.findall(t.lower())
+    return bool(words) and words[-1] in _OPEN_END_WORDS

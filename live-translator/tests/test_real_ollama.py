@@ -50,7 +50,10 @@ def test_every_line_is_translated_by_real_ollama(tmp_path):
     done = threading.Event()
     pipe.start(name="real", source=FileSource(str(wav), pipe.push_audio, speed=1.0, on_end=done.set))
     assert done.wait(120)
-    pipe.stop(wait=True)
+    pipe.stop(wait=True)        # 1.4: Stop does not wait for the English - it keeps arriving and is saved
+    end = time.time() + 120
+    while len({e["id"] for e in events if e["type"] == "tr" and e.get("final")}) < n and time.time() < end:
+        time.sleep(0.2)
     finals = {e["id"]: e for e in events if e["type"] == "tr" and e.get("final")}
     lines = [e["line"] for e in events if e["type"] == "line"]
     assert len(lines) == n

@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pytest
@@ -110,7 +110,9 @@ def test_live_meeting_in_browser(server, meeting_wav):
 
         page.click("#startBtn")  # stop
         page.wait_for_selector("#startBtn.primary", timeout=30000)
-        page.wait_for_selector(".toast.ok")
+        page.wait_for_selector("#doneCard:not([hidden])")          # "Saved" card with New meeting / Open
+        assert page.input_value("#dcName") == "Weekly sync with Thomas"
+        page.screenshot(path=str(SHOTS / "02b-saved.png"))
 
         # saved on disk under Meetings/<date>/<HH-MM> - <name>/
         day = Path(home) / "Meetings" / datetime.now().strftime("%Y-%m-%d")
@@ -152,6 +154,62 @@ def test_live_meeting_in_browser(server, meeting_wav):
         page.click("#vbDelete")
         page.wait_for_selector("#viewBanner", state="hidden")
         assert not any(day.iterdir()) if day.exists() else True
+        assert not errors, errors
+        browser.close()
+
+
+def test_saved_card_new_meeting_and_a_second_tab(server, meeting_wav):
+    """After Stop both open tabs show the Saved card. A rename or delete in one tab shows in the
+    other; "New meeting" keeps a name typed for the next meeting; the card never steals the focus
+    from an open drawer and survives a reconnect; late lines of the cleared meeting stay away."""
+    url, home = server
+    with pw.sync_playwright() as p:
+        kw = {"executable_path": CHROME} if Path(CHROME).exists() else {}
+        browser = p.chromium.launch(args=[
+            "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+            f"--use-file-for-fake-audio-capture={meeting_wav}", "--autoplay-policy=no-user-gesture-required"], **kw)
+        ctx = browser.new_context(viewport={"width": 1280, "height": 820})
+        a, b = ctx.new_page(), ctx.new_page()
+        errors = []
+        for pg in (a, b):
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            pg.goto(url)
+            pg.wait_for_selector("#startBtn:not([disabled])")
+            pg.wait_for_selector("#asrPill.ok")
+        a.click("#startBtn")
+        a.wait_for_selector("#startBtn.stop")
+        a.click("#baMic")
+        a.wait_for_function("document.querySelectorAll('#liveFeed .line').length >= 2", timeout=90000)
+        b.click("#settingsBtn")                                  # tab B is busy in Settings
+        b.wait_for_selector("#settingsDrawer:not([hidden])")
+        b.focus("#settingsDrawer select")
+        a.click("#startBtn")                                     # Stop
+        for pg in (a, b):
+            pg.wait_for_selector("#doneCard:not([hidden])", timeout=30000)
+        assert a.evaluate("document.activeElement.id") == "dcNew"
+        assert b.evaluate("document.activeElement.closest('#settingsDrawer') !== null")   # focus not stolen
+        b.keyboard.press("Escape")
+        mid = a.evaluate("S.done.id")
+
+        b.fill("#dcName", "Renamed in tab B")
+        b.press("#dcName", "Enter")
+        a.wait_for_function("document.querySelector('#dcName').value === 'Renamed in tab B'", timeout=5000)
+
+        b.evaluate("S.ws.close()")                               # reconnect: the card and lines stay
+        b.wait_for_timeout(1500)
+        assert b.is_visible("#doneCard") and b.evaluate("document.querySelectorAll('#liveFeed .line').length") >= 2
+
+        a.fill("#meetingName", "Next one")                       # name the next meeting, then clear
+        a.click("#dcNew")
+        assert a.is_hidden("#doneCard") and a.evaluate("document.querySelectorAll('#liveFeed .line').length") == 0
+        assert a.input_value("#meetingName") == "Next one"
+        a.evaluate("""(mid) => onEvent({type: 'line', meeting: mid, lat: null,
+                         line: {id: 99, time: '10:00:00', offset: 1, de: 'Spät', en: '', done: false}})""", mid)
+        assert a.evaluate("document.querySelectorAll('#liveFeed .line').length") == 0
+
+        urlopen(Request(f"{url}/api/meetings/{mid}", method="DELETE"))
+        b.wait_for_selector("#doneCard", state="hidden", timeout=5000)
+        assert b.evaluate("document.querySelectorAll('#liveFeed .line').length") == 0
         assert not errors, errors
         browser.close()
 

@@ -24,6 +24,7 @@ class Segment:
     forced: bool = False    # cut in the middle of speech (no pause found)
     voiced_s: float = 0.0   # seconds of actual speech inside
     detected_at: float = 0.0  # stream time at which the line was closed
+    last_strong: int = -1     # index of the last frame with clear speech (prob >= threshold)
 
 
 @dataclass
@@ -31,7 +32,8 @@ class _Cur:
     frames: list = field(default_factory=list)
     probs: list = field(default_factory=list)
     start_frame: int = 0
-    last_voiced: int = -1
+    last_voiced: int = -1     # last frame above the (lower) hold-on threshold
+    last_strong: int = -1     # last frame with clear speech
     voiced: int = 0
     silence_run: int = 0
 
@@ -60,6 +62,10 @@ class Segmenter:
         self.n = 0                  # frames seen so far
         self._pending = []          # candidate start frames (idle state)
         self.cur: _Cur | None = None
+        # Optional advisor, asked on every frame of an open line: advisor(self, cur, required_pause)
+        # -> "wait" (keep the line open for now), "close" (end it now) or None (normal rule).
+        # The pipeline uses it to transcribe a line while the pause is still running.
+        self.advisor = None
 
     def configure(self, threshold: float, pause_ms: int, max_line_s: float) -> None:
         """Change sensitivity / pause length while running."""
@@ -118,11 +124,23 @@ class Segmenter:
         self._append(frame, prob)
         c = self.cur
         length = len(c.frames)
-        if c.silence_run >= self._required_pause(length):
+        required = self._required_pause(length)
+        decision = self.advisor(self, c, required) if self.advisor is not None else None
+        if decision == "close" and c.silence_run < self.post_pad:
+            decision = None             # the line's trailing pad must be there first
+        if decision == "close" or (decision != "wait" and c.silence_run >= required):
             out.extend(self._close(c.last_voiced + 1 + self.post_pad, forced=False))
         elif length >= self.hard_frames:
             out.extend(self._force_cut())
         return out
+
+    def line_end_audio(self) -> tuple[np.ndarray, float, int] | None:
+        """The audio this line would have if it closed now: (audio, start, frames)."""
+        c = self.cur
+        if c is None:
+            return None
+        upto = min(len(c.frames), c.last_voiced + 1 + self.post_pad)
+        return np.concatenate(c.frames[:upto]), c.start_frame * self.frame_s, upto
 
     def flush(self) -> list[Segment]:
         if self.cur is None:
@@ -147,6 +165,7 @@ class Segmenter:
             c.silence_run = 0
             if prob >= self.on:
                 c.voiced += 1
+                c.last_strong = len(c.frames) - 1
         else:
             c.silence_run += 1
 
@@ -164,6 +183,7 @@ class Segmenter:
             forced=forced,
             voiced_s=voiced * self.frame_s,
             detected_at=self.n * self.frame_s,
+            last_strong=min(c.last_strong, upto - 1),
         )
 
     def _close(self, upto: int, forced: bool) -> list[Segment]:

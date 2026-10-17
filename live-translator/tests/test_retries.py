@@ -318,3 +318,153 @@ def test_english_preview_gives_way_to_a_finished_line(tmp_path):
         assert all(d != long_de for d, _ in pipe.translator.history)
         pipe.stop(wait=True)
         pipe.shutdown()
+
+
+# ----------------------------------------------------------------- 1.4: Stop does not wait for translations
+def test_stop_is_quick_and_the_last_english_still_arrives(tmp_path):
+    beh = {"gemma3:4b": {"first_s": 2.0}}                       # a slow translator
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005, behaviour=beh) as fo:
+        pipe, events = make_pipeline(tmp_path, fo)
+        pipe.start(name="t", source=PushSource(pipe.push_audio))
+        sess = pipe.session
+        lines = [add_line(pipe, sess, f"Satz Nummer {i}.") for i in range(3)]
+        for ln in lines:
+            live(pipe, sess, ln)
+        t0 = time.monotonic()
+        pipe.stop(wait=True)
+        assert time.monotonic() - t0 < 2.0 and pipe.state == "idle"      # not 3 x 2 s
+        assert wait_for(lambda: all(x.done and x.ok for x in lines), 30)  # English still arrives ...
+        m = pipe.store.load(sess.meeting.id)
+        assert [x.en for x in m.lines] == [f"[EN] Satz Nummer {i}." for i in range(3)]   # ... and is saved
+        md = (m.folder / "transcript.md").read_text()
+        assert md.count("DE: Satz Nummer 0.") == 1 and "EN: [EN] Satz Nummer 2." in md   # no duplicates
+        pipe.shutdown()
+
+
+def test_the_next_meeting_goes_before_the_previous_backlog(tmp_path):
+    beh = {"gemma3:4b": {"first_s": 1.0}}
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005, behaviour=beh) as fo:
+        pipe, events = make_pipeline(tmp_path, fo)
+        pipe.start(name="a", source=PushSource(pipe.push_audio))
+        a = pipe.session
+        old = [add_line(pipe, a, f"Alter Satz {i}.") for i in range(4)]
+        for ln in old:
+            live(pipe, a, ln)
+        pipe.stop(wait=True)
+        pipe.start(name="b", source=PushSource(pipe.push_audio))
+        b = pipe.session
+        new = add_line(pipe, b, "Neuer Satz.")
+        t0 = time.monotonic()
+        live(pipe, b, new)
+        assert wait_for(lambda: new.done and new.ok, 15)
+        assert time.monotonic() - t0 < 3.5                                # at most one old line in front
+        assert wait_for(lambda: all(x.done and x.ok for x in old), 40)   # the old ones follow
+        pipe.stop(wait=True)
+        pipe.shutdown()
+
+
+def test_lines_waiting_at_stop_survive_the_next_meeting_stopping(tmp_path):
+    beh = {"gemma3:4b": {"first_s": 0.8}}
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005, behaviour=beh) as fo:
+        pipe, events = make_pipeline(tmp_path, fo)
+        pipe.start(name="a", source=PushSource(pipe.push_audio))
+        a = pipe.session
+        old = [add_line(pipe, a, f"Alter Satz {i}.") for i in range(4)]
+        for ln in old:
+            live(pipe, a, ln)
+        pipe.stop(wait=True)
+        pipe.start(name="b", source=PushSource(pipe.push_audio))          # B starts and stops at once:
+        pipe.stop(wait=True)                                             # A is no longer the last meeting
+        assert wait_for(lambda: all(x.done and x.ok for x in old), 40), [(x.done, x.ok) for x in old]
+        assert all(x.en for x in pipe.store.load(a.meeting.id).lines)
+        pipe.shutdown()
+
+
+def test_quitting_right_after_stop_finishes_the_english_first(tmp_path):
+    beh = {"gemma3:4b": {"first_s": 0.7}}
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005, behaviour=beh) as fo:
+        pipe, events = make_pipeline(tmp_path, fo)
+        pipe.start(name="t", source=PushSource(pipe.push_audio))
+        sess = pipe.session
+        lines = [add_line(pipe, sess, f"Satz Nummer {i}.") for i in range(4)]
+        for ln in lines:
+            live(pipe, sess, ln)
+        pipe.stop(wait=True)
+        assert pipe.pending_translations() > 0
+        pipe.shutdown()                                   # e.g. the Desktop icon right after Stop
+        disk = pipe.store.load(sess.meeting.id)
+        assert all(x.ok and x.en for x in disk.lines), [(x.de, x.en) for x in disk.lines]
+
+
+def test_lines_cut_off_by_a_quit_get_their_english_on_continue(tmp_path):
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005) as fo:
+        pipe, events = make_pipeline(tmp_path, fo)
+        store = pipe.store
+        m = store.create("t")
+        for i in range(3):
+            store.add_line(m, Line(id=i + 1, time="10:00:00", offset=float(i), de=f"Satz Nummer {i}."))
+        store.set_translation(m, 1, "[EN] Satz Nummer 0.", True)     # the app was quit before 2 and 3
+        store.finish(m)
+        pipe.start(continue_id=m.id, source=PushSource(pipe.push_audio))
+        new = pipe.session
+        assert wait_for(lambda: all(x.done and x.ok and x.en for x in new.meeting.lines), 20)
+        assert not any(r["body"]["messages"][-1]["content"] == "Satz Nummer 0." for r in fo.chats())
+        pipe.stop(wait=True)
+        pipe.shutdown()
+    assert all(x.ok and x.en for x in store.load(m.id).lines)
+
+
+def test_lines_cut_off_by_a_quit_survive_another_meeting_and_md_has_each_line_once(tmp_path):
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005) as fo:
+        pipe, events = make_pipeline(tmp_path, fo)
+        store = pipe.store
+        m = store.create("t")
+        for i in range(3):
+            store.add_line(m, Line(id=i + 1, time="10:00:00", offset=float(i), de=f"Satz Nummer {i}."))
+        store.set_translation(m, 1, "[EN] Satz Nummer 0.", True)
+        store.finish(m)                                  # quit: lines 2 and 3 saved as "…"
+        pipe._safe_set_llm(stuck=True)                   # (Ollama hiccup: they have to wait)
+        pipe._last_tr_fail = time.monotonic()
+        pipe.RETRY_FIRST_S = 3600.0
+        pipe.start(continue_id=m.id, source=PushSource(pipe.push_audio))
+        new = pipe.session
+        assert all(e.get("deferred") for e in pipe._retry_pending.values()) and len(pipe._retry_pending) == 2
+        pipe.stop(wait=True)
+        pipe.start(name="other", source=PushSource(pipe.push_audio))
+        pipe.stop(wait=True)                             # another meeting stopped: the lines are still waiting
+        pipe._safe_set_llm(stuck=False)
+        pipe._retry_soon()
+        assert wait_for(lambda: all(x.done and x.ok and x.en for x in new.meeting.lines), 20)
+        pipe.shutdown()
+    md = (new.meeting.folder / "transcript.md").read_text()
+    for i in range(3):
+        assert md.count(f"DE: Satz Nummer {i}.") == 1, md
+    assert "…" not in md.split("DE: Satz Nummer 0.")[1], md
+
+
+def test_continuing_a_meeting_whose_backlog_waits_writes_into_the_continued_copy(tmp_path):
+    beh = {"gemma3:4b": {"first_s": 0.5}}
+    with FakeOllama(models=["gemma3:4b"], token_delay=0.005, behaviour=beh) as fo:
+        pipe, events = make_pipeline(tmp_path, fo)
+        pipe.RETRY_FIRST_S = 3600.0
+        pipe.start(name="A", source=PushSource(pipe.push_audio))
+        a = pipe.session
+        lines = [add_line(pipe, a, f"Alter Satz {i}.") for i in range(4)]
+        for ln in lines:
+            live(pipe, a, ln)
+        pipe.stop(wait=True)                              # quick Stop: A's English still waiting
+        pipe._safe_set_llm(stuck=True)                    # (Ollama hiccup: the backlog has to wait)
+        pipe._last_tr_fail = time.monotonic()
+        pipe.start(name="B", source=PushSource(pipe.push_audio))
+        pipe.stop(wait=True)
+        pipe.start(continue_id=a.meeting.id, source=PushSource(pipe.push_audio))   # A again, loaded from disk
+        cont = pipe.session
+        assert cont.meeting is not a.meeting
+        pipe._safe_set_llm(stuck=False)
+        pipe._retry_soon()
+        assert wait_for(lambda: all(x.done and x.ok and x.en for x in cont.meeting.lines), 30), \
+            [(x.de, x.en, x.done) for x in cont.meeting.lines]
+        pipe.stop(wait=True)
+        md = (cont.meeting.folder / "transcript.md").read_text()
+        assert all(f"[EN] Alter Satz {i}." in md for i in range(4)), md
+        pipe.shutdown()

@@ -48,15 +48,18 @@ def _ollama_stats(done: dict) -> dict:
 
 SYSTEM_PROMPT = """You are an expert German-to-English interpreter working live in a business meeting.
 
-You receive the meeting one line at a time, exactly as speech recognition heard it. Reply to each line with the English translation of that line only.
+You receive the meeting one line at a time, exactly as automatic speech recognition (ASR) wrote it down. Reply to each line with the English translation of that line only.
 
 Rules:
-- Be faithful and complete. Keep every number, date, time, amount, name, negation (nicht, kein, nie) and condition exactly as said.
-- Write natural, clear English, the way a native speaker would say it in a meeting.
-- Lines are cut at the speaker's pauses, so a line may be an unfinished sentence that continues in the next line. Translate what is there and use the previous lines to understand it. Do not invent the missing part.
-- Speech recognition makes mistakes. If a word was clearly misheard, translate what the speaker most likely meant, given the context.
-- Drop pure filler words (ähm, äh, also, ne) unless they carry meaning.
-- Keep names of people, companies, products, systems and abbreviations as they are.
+- Be faithful and complete. Keep every name, number, amount, date, time, unit and condition exactly as said.
+- Negations are critical: nicht, kein, nie, nichts, niemand - and the dialect forms net, ned, nit, nöd, koa, nix - all negate. Never drop or add a negation.
+- Numbers and times: 1.500,50 = 1,500.50; Milliarde = billion; Billion = trillion; zwo = two; halb drei = 2:30; viertel nach drei = 3:15; dreiviertel drei = 2:45; KW 12 = calendar week 12; Jänner = January.
+- Speakers have regional accents and dialects (Bavarian, Swabian, Saxon, Franconian, Austrian, Swiss). Translate the meaning into neutral English: mir/mia as subject = we, i = I, des = das, heuer = this year, passt/basst = OK, gell/gelle/ne/oder at the end = "right?"; particles like fei, halt, eben, doch, ja, schon usually need no translation.
+- Business false friends: aktuell = currently, eventuell = possibly, Termin = appointment or deadline, Abstimmung = alignment, Chef = boss, Handy = mobile phone, bekommen = get, Angebot = quote or offer, Freigabe = approval.
+- Speech recognition makes mistakes. If a word makes no sense, translate what the speaker most likely said, judging from the previous lines and the meeting topic. If you cannot tell, translate it literally. Never invent content.
+- A line may be an unfinished sentence cut at a pause; it continues in the next line. Translate only what is there and use the previous lines to understand it. Do not complete it.
+- Leave out pure fillers (äh, ähm, also, sozusagen) unless they carry meaning.
+- Keep names of people, companies, products, systems and abbreviations unchanged.
 - Never answer, comment, explain or add notes. Output only the English translation."""
 
 
@@ -97,9 +100,93 @@ def clean_translation(text: str, source: str = "") -> str:
     return t
 
 
-def _thinking_model(name: str) -> bool:
-    n = name.lower()
-    return any(k in n for k in ("qwen3", "deepseek-r1", "qwq", "magistral"))
+def is_translategemma(model: str) -> bool:
+    return model.lower().startswith("translategemma")
+
+
+# TranslateGemma is trained on exactly this instruction (no system prompt; two blank lines before
+# the text). It takes no glossary or topic, so the general models stay the default.
+TG_PREFIX = ("You are a professional German (de) to English (en) translator. Your goal is to accurately convey the "
+             "meaning and nuances of the original German text while adhering to English grammar, vocabulary, and "
+             "cultural sensitivities.\nProduce only the English translation, without any additional explanations "
+             "or commentary. Please translate the following German text into English:\n\n\n")
+TG_HISTORY = 6
+
+# standard negations (any case) and dialect forms (lower case, not ".NET 8" / "Net Zero" / "Koalition")
+_NEG_DE = re.compile(r"\b(nicht|nichts|kein\w*|nie|niemals|niemand|nirgends|weder|nix)\b", re.I)
+_NEG_DIALECT = re.compile(r"(?<![.\w])(net|ned|nit|nöd|koa|koan|koane|koana|koans|koam)\b")   # lower case only
+# a tag question ("…, oder nicht?", "gell, ned?", "nicht wahr?") asks for agreement - it negates nothing
+# (also after a comma at the end of a line without the "?", and with a name after it: "…, oder nicht, Herr
+# Müller?" - but "Das ist nicht wahr." and "ob wir das schaffen oder nicht" are real negations)
+_TAG_WORDS = r"(?:(?:oder|oda|odr|gell|ne)(?:\s*,)?\s+(?:etwa\s+)?(?:nicht|net|ned|nit|nöd)|nicht wahr)"
+_TAG_END = r"(?=\s*(?:,\s*[\w.]+(?:\s+[\w.]+){0,2}\s*)?[?.!]?\s*$)"
+_TAG_Q = re.compile(rf",\s*{_TAG_WORDS}\b{_TAG_END}|,?\s*\b{_TAG_WORDS}\s*\?", re.I)
+_NEG_EN = re.compile(r"\b(not|no|never|nobody|nothing|none|neither|nor|cannot|without|nowhere|no-one|unable)\b|n[’']t\b",
+                     re.I)
+# German times and dates are written differently in English (15 Uhr = 3 pm, 15.3. = March 15)
+_TIME_RE = re.compile(r"\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}\.\d{1,2}\.(?:\d{2,4})?(?!\d)")
+_UHR_RE = re.compile(r"\b(\d{1,2})\s*Uhr(?:\s*(\d{1,2})\b)?", re.I)
+_NUM_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_WORDS = {0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
+          9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
+          16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty", 30: "thirty", 40: "forty",
+          50: "fifty", 60: "sixty", 70: "seventy", 80: "eighty", 90: "ninety", 100: "hundred", 1000: "thousand"}
+_ORDINALS = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth", 7: "seventh", 8: "eighth",
+             9: "ninth", 10: "tenth", 11: "eleventh", 12: "twelfth"}
+
+
+def _num_de(n: str) -> str:
+    """German number spelling -> plain digits (1.500,50 -> 1500.50; 1.500 -> 1500)."""
+    if "," in n or re.fullmatch(r"\d{1,3}(\.\d{3})+", n):
+        return n.replace(".", "").replace(",", ".")
+    return n
+
+
+def check_translation(german: str, english: str) -> list[str]:
+    """Cheap checks for the two mistakes that hurt most: a lost negation and a changed number.
+    Returns what to keep (empty = looks fine)."""
+    problems = []
+    de_neg = _TAG_Q.sub("?", german)
+    if (_NEG_DE.search(de_neg) or _NEG_DIALECT.search(de_neg)) and not _NEG_EN.search(english):
+        problems.append("the negation")
+    en_nums = {x.replace(",", "") for x in _NUM_RE.findall(english)}
+    en_low = english.lower()
+    missing = []
+    for m in _UHR_RE.finditer(german):                    # 15 Uhr = 3 pm; 14 Uhr 30 = 2:30
+        h = int(m.group(1))
+        if not ({str(h), str(h - 12) if h > 12 else str(h + 12)} & en_nums):
+            missing.append(m.group(0))
+    de = _TIME_RE.sub(" ", _UHR_RE.sub(" ", german))
+    for n in _NUM_RE.findall(de):
+        v = _num_de(n)
+        if v in en_nums or ("." in v and v.rstrip("0").rstrip(".") in en_nums):
+            continue
+        if v.isdigit() and ((int(v) in _WORDS and re.search(rf"\b{_WORDS[int(v)]}", en_low))
+                            or (int(v) in _ORDINALS and re.search(rf"\b{_ORDINALS[int(v)]}\b", en_low))):
+            continue
+        missing.append(n)
+    if missing:
+        problems.append("the numbers " + ", ".join(missing))
+    return problems
+
+
+_DE_COMMON = {"und", "der", "die", "das", "nicht", "ist", "wir", "ich", "sie", "mit", "auf", "für", "dass", "noch",
+              "auch", "haben", "werden", "wird", "sind", "ein", "eine", "den", "dem", "zu"}
+
+
+def _untranslated(german: str, english: str) -> bool:
+    """The model gave the German back. "Okay." -> "Okay.", a name or a list of names ("Müller,
+    Schäfer, Köhler?") is a correct translation, so only clearly German text (several words with
+    German function words) counts as an echo."""
+    a = re.sub(r"\W+", " ", german.lower()).strip()
+    b = re.sub(r"\W+", " ", english.lower()).strip()
+    de_words = a.split()
+    if a and a == b:
+        lower_umlaut = any(re.search(r"[äöüß]", t) for t in re.findall(r"\w+", german)[1:] if t.islower())
+        return len(de_words) >= 3 and (any(x in _DE_COMMON for x in de_words) or lower_umlaut)
+    # lower-case German function words in the English (names keep their capitals: "Die Mobiliar")
+    w = re.findall(r"\w+", english)
+    return len(w) >= 6 and sum(x in _DE_COMMON for x in w) / len(w) > 0.25
 
 
 @dataclass
@@ -129,6 +216,7 @@ class OllamaTranslator:
         self.context_lines = context_lines
         self.system = build_system_prompt(topic, terms)
         self.history: list[tuple[str, str]] = []
+        self._gen = 0              # bumped by reset() / seed_history(): a new meeting's context
         self._lock = threading.Lock()
         self._client = httpx.Client(timeout=httpx.Timeout(60.0, connect=3.0), trust_env=False)
 
@@ -148,10 +236,12 @@ class OllamaTranslator:
     def reset(self) -> None:
         with self._lock:
             self.history = []
+            self._gen += 1
 
     def seed_history(self, pairs: list[tuple[str, str]]) -> None:
         with self._lock:
             self.history = [(d, e) for d, e in pairs if d and e][-self.context_lines:]
+            self._gen += 1
 
     # ------------------------------------------------------------- service
     def health(self) -> dict:
@@ -182,12 +272,20 @@ class OllamaTranslator:
                 on_progress(obj)
 
     # ------------------------------------------------------------- translate
-    def _messages(self, german: str) -> list[dict]:
+    def _messages(self, german: str, model: str, hint: str = "", history: list | None = None) -> list[dict]:
+        history = self.history if history is None else history
+        if is_translategemma(model):
+            msgs = []                    # its template has no system role
+            for de, en in history[-TG_HISTORY:]:
+                msgs.append({"role": "user", "content": TG_PREFIX + de})
+                msgs.append({"role": "assistant", "content": en})
+            msgs.append({"role": "user", "content": TG_PREFIX + german})
+            return msgs
         msgs = [{"role": "system", "content": self.system}]
-        for de, en in self.history:
+        for de, en in history:
             msgs.append({"role": "user", "content": de})
             msgs.append({"role": "assistant", "content": en})
-        msgs.append({"role": "user", "content": german})
+        msgs.append({"role": "user", "content": german + hint})
         return msgs
 
     MAX_HISTORY_CHARS = 6000   # ~1.8k tokens: system prompt + history + line + answer stay well inside NUM_CTX
@@ -213,27 +311,66 @@ class OllamaTranslator:
         must not become context for the next lines - it would derail and slow them."""
         return 0 < len(english) <= 3 * len(german) + 80
 
+    CHECK_WITHIN_S = 3.0     # a line that took longer is not asked again (the translator is busy)
+    recheck = True           # the thermal governor switches the second question off when the Mac is hot
+
     def translate(self, german: str, on_delta: Callable[[str], None] | None = None, record: bool = True,
                   first_token_timeout: float = 60.0, max_gen_s: float = 45.0,
                   model: str | None = None) -> TranslationResult:
         """Translate one line. Gives up if Ollama sends nothing for `first_token_timeout`
-        seconds (model stuck loading / machine out of memory) instead of waiting forever."""
+        seconds (model stuck loading / machine out of memory) instead of waiting forever.
+        A real line (record=True) whose English lost a negation or a number is asked once more."""
         german = german.strip()
         if not german:
             return TranslationResult("", True)
+        model = model or self.model
+        gen = self._gen
+        res = self._request(german, on_delta, first_token_timeout, max_gen_s, model)
+        if res.ok and record and is_translategemma(model) and _untranslated(german, res.text):
+            # TranslateGemma sometimes echoes the German: once more, without context
+            again = self._request(german, on_delta, first_token_timeout, max_gen_s, model, history=[])
+            if again.ok and not _untranslated(german, again.text):
+                res = again
+            else:
+                log.warning("translate [%s]: the model repeated the German: %r", model, german)
+                return TranslationResult(res.text, False, res.first_token_s, res.total_s,
+                                         "the model repeated the German instead of translating")
+        if (res.ok and record and self.recheck and not is_translategemma(model)
+                and res.total_s < self.CHECK_WITHIN_S):
+            problems = check_translation(german, res.text)
+            if problems:
+                hint = "\n\n(Check your translation: keep " + " and ".join(problems) + ".)"
+                log.info("translation check: %s missing in %r -> asking again", " / ".join(problems), res.text)
+                again = self._request(german, on_delta, first_token_timeout, max_gen_s, model, hint)
+                if again.ok:
+                    again.text = re.sub(r"\s*\(?check your translation[^)]*\)?\s*$", "", again.text, flags=re.I).strip()
+                if (again.ok and again.text and "check your translation" not in again.text.lower()
+                        and len(check_translation(german, again.text)) < len(problems)):
+                    again.first_token_s = res.first_token_s
+                    again.total_s += res.total_s
+                    res = again
+        if record and res.ok and res.text and self.plausible(german, res.text):
+            with self._lock:
+                if self._gen == gen:     # a new meeting started meanwhile: not its context
+                    self.history.append((german, res.text))
+                    self._trim_history()
+        return res
+
+    def _request(self, german: str, on_delta, first_token_timeout: float, max_gen_s: float, model: str,
+                 hint: str = "", history: list | None = None) -> TranslationResult:
         with self._lock:
-            msgs = self._messages(german)
-            model = model or self.model
+            msgs = self._messages(german, model, hint, history)
         body = {
             "model": model,
             "messages": msgs,
             "stream": True,
             "keep_alive": KEEP_ALIVE,
-            "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": NUM_CTX,
+            # always off: a thinking model would write its reasoning first (seconds before any English);
+            # Ollama accepts "think": false for every model
+            "think": False,
+            "options": {"temperature": 0.0, "top_p": 0.9, "num_ctx": NUM_CTX,
                         "num_predict": max(64, min(600, len(german) * 2))},
         }
-        if _thinking_model(model):
-            body["think"] = False
         t0 = time.perf_counter()
         first = 0.0
         raw = ""
@@ -283,10 +420,6 @@ class OllamaTranslator:
         log.info("translate [%s]: first word %.2fs, done %.2fs (load %.2fs, read %s tok in %.2fs, wrote %s tok @ %.1f tok/s)",
                  model, first, total, stats.get("load_s", 0), stats.get("prompt_tokens", "?"), stats.get("prompt_s", 0),
                  stats.get("gen_tokens", "?"), stats.get("tok_s", 0))
-        if record and text and self.plausible(german, text):
-            with self._lock:
-                self.history.append((german, text))
-                self._trim_history()
         return TranslationResult(text, True, first, total, stats=stats)
 
     def loaded_models(self) -> list[dict]:
@@ -347,9 +480,7 @@ class OllamaTranslator:
     # the same context size as live translation: a different one makes Ollama reload the model
     def _chat_once(self, prompt: str, num_ctx: int = NUM_CTX, on_delta: Callable[[str], None] | None = None) -> str:
         body = {"model": self.model, "messages": [{"role": "user", "content": prompt}], "stream": True,
-                "keep_alive": KEEP_ALIVE, "options": {"temperature": 0.2, "num_ctx": num_ctx}}
-        if _thinking_model(self.model):
-            body["think"] = False
+                "keep_alive": KEEP_ALIVE, "think": False, "options": {"temperature": 0.2, "num_ctx": num_ctx}}
         out = ""
         with self._client.stream("POST", f"{self.base_url}/api/chat", json=body,
                                  timeout=httpx.Timeout(600.0, connect=3.0)) as r:

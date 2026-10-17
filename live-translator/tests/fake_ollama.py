@@ -24,11 +24,12 @@ DICT = {de: en for de, en in SENTENCES}
 
 
 class FakeOllama:
-    def __init__(self, models=("gemma3:12b",), token_delay=0.01, fail=False, behaviour=None):
+    def __init__(self, models=("gemma3:12b",), token_delay=0.01, fail=False, behaviour=None, answers=None):
         self.models = list(models)
         self.token_delay = token_delay
         self.fail = fail
         self.behaviour = dict(behaviour or {})   # model -> {load_s, first_s, token_s, hang, gpu_share}
+        self.answers = dict(answers or {})       # exact last user message -> reply (wins over the dictionary)
         self.loaded: dict[str, float] = {}       # model -> time it finished loading
         self.loaded_ctx: dict[str, int] = {}     # model -> context size it was loaded with
         self.requests: list[dict] = []
@@ -55,6 +56,13 @@ class FakeOllama:
         self.server.server_close()
 
     def translate(self, german: str) -> str:
+        if german in self.answers:
+            return self.answers[german]
+        marker = "Please translate the following German text into English:\n\n\n"
+        if marker in german:                     # TranslateGemma's prompt
+            german = german.split(marker, 1)[1]
+            if german in self.answers:
+                return self.answers[german]
         return DICT.get(german.strip(), f"[EN] {german.strip()}")
 
     def chats(self, model=None):

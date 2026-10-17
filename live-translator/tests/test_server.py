@@ -39,7 +39,9 @@ def app_server(tmp_path):
     texts = [de for de, _ in sim.SENTENCES] * 10
 
     def factory(st, store, publish):
-        return Pipeline(st, store, publish, asr_factory=lambda s: ScriptedASR(texts))
+        p = Pipeline(st, store, publish, asr_factory=lambda s: ScriptedASR(texts))
+        p.early_enabled = False       # (ScriptedASR plays its lines in call order: no extra passes)
+        return p
 
     app = create_app(pipeline_factory=factory, store=MeetingStore(tmp_path / "Meetings"), settings=settings,
                      start_ollama=False)

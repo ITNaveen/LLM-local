@@ -154,6 +154,20 @@ def cmd_doctor(_a) -> int:
             pass
     print(f"Data folder   : {home_dir()}")
     print(f"Speech model  : {s.resolved_asr_backend()} / {s.resolved_asr_model()}")
+    from .asr import parakeet_available
+    from .config import is_apple_silicon
+    from .macsignals import MacSignals
+
+    pv = ("Parakeet (fast)" if s.preview_engine == "auto" and is_apple_silicon() and parakeet_available()
+          else "Whisper")
+    print(f"Live preview  : {'on, ' + pv if s.live_preview else 'off'}")
+    sig = MacSignals()
+    src, pct = sig.power_source()
+    names = {0: "nominal", 1: "moderate", 2: "heavy", 3: "trapping", 4: "sleeping"}
+    print(f"Mac           : {sig.model_name() or '?'}{' (no fan)' if sig.is_fanless() else ''}, "
+          f"heat {names.get(sig.thermal_pressure(), '?')}, "
+          f"power {src or '?'}{f' {pct}%' if pct is not None else ''}, "
+          f"Low Power Mode {'on' if sig.low_power_mode() else 'off'}, performance setting '{s.performance}'")
     t = OllamaTranslator(s.ollama_url, s.llm_model, s.context_lines, s.topic, s.glossary_terms())
     h = t.health()
     print(f"Ollama        : {'running, version ' + t.version() if h['running'] else 'NOT RUNNING - ' + h.get('error', '')}")
@@ -206,22 +220,46 @@ def cmd_doctor(_a) -> int:
 
 # ---------------------------------------------------------------- download
 def cmd_download(a) -> int:
-    from .asr import resolve_hf_model
+    from .asr import resolve_mlx_model
     from .config import ASR_MODELS, SettingsStore
 
     s = SettingsStore().settings
     backend = s.resolved_asr_backend()
     keys = [s.asr_model] if not a.all else list(ASR_MODELS)
+    rc_asr = 0
     for key in keys:
-        model = ASR_MODELS.get(key, {}).get(backend, key)
-        print(f"Speech model: {model}")
-        if backend == "mlx":
-            print("  ->", resolve_hf_model(model))
-        else:
-            from faster_whisper import WhisperModel
+        entry = ASR_MODELS.get(key, {})
+        options = [entry.get(backend, key)] + (entry.get("mlx_alt", []) if backend == "mlx" else [])
+        for model in options:
+            print(f"Speech model: {model}")
+            try:
+                if backend == "mlx":
+                    print("  ->", resolve_mlx_model(model))
+                else:
+                    from faster_whisper import WhisperModel
 
-            WhisperModel(model, device="auto", compute_type="default")
+                    WhisperModel(model, device="auto", compute_type="default")
+                    print("  -> ok")
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  -> not available ({e})" + ("; trying the next option" if model != options[-1] else ""))
+        else:
+            fb = entry.get("fallback")
+            if fb and fb not in keys:
+                print(f"  -> the app will use '{ASR_MODELS[fb]['label']}' instead")
+                keys.append(fb)
+            elif not fb:
+                rc_asr = 1
+    from .asr import ParakeetMLX, parakeet_available
+    from .config import is_apple_silicon
+
+    if s.live_preview and s.preview_engine == "auto" and is_apple_silicon() and parakeet_available():
+        print(f"Live preview model: {ParakeetMLX.MODEL}")
+        try:
+            ParakeetMLX().prefetch()
             print("  -> ok")
+        except Exception as e:  # noqa: BLE001
+            print(f"  -> not available ({e}); Whisper does the live preview")
     if not a.skip_llm:
         from .server import ensure_ollama
         from .translate import OllamaTranslator
@@ -250,6 +288,53 @@ def cmd_download(a) -> int:
 
             t.pull(model, prog)
             print("  -> ok")
+    return rc_asr
+
+
+# ---------------------------------------------------------------- compare translation models
+def cmd_compare_llm(a) -> int:
+    from . import llmcheck
+    from .config import SettingsStore
+    from .server import ensure_ollama
+    from .storage import MeetingStore
+    from .translate import OllamaTranslator
+
+    s = SettingsStore().settings
+    store = MeetingStore()
+    items = store.list()
+    mid = a.meeting or next((m["id"] for m in items if m.get("line_count")), None)
+    meeting = store.load(mid) if mid else None
+    if meeting is None or not meeting.lines:
+        print("No saved meeting with lines yet - record one first.")
+        return 1
+    ensure_ollama(s.ollama_url)
+    t = OllamaTranslator(s.ollama_url, s.llm_model)
+    h = t.health()
+    if not h["running"]:
+        print("Ollama is not running - start the Ollama app and try again.")
+        return 1
+    models = [m.strip() for m in (a.models or ",".join(llmcheck.DEFAULT_MODELS)).split(",") if m.strip()]
+    ready = []
+    for m in models:
+        if m in h["models"] or m + ":latest" in h["models"]:
+            ready.append(m)
+        elif a.pull:
+            print(f"{m}: downloading (one time)…", flush=True)
+            try:
+                t.pull(m, lambda p: None)
+                ready.append(m)
+            except Exception as e:  # noqa: BLE001
+                print(f"{m}: could not download it ({e})")
+        else:
+            print(f"{m}: not installed - add --pull to download it")
+    if not ready:
+        return 1
+    print(f"Comparing on '{meeting.title}' ({min(len(meeting.lines), a.lines)} lines)…")
+    cmp = llmcheck.compare(meeting, ready, s.ollama_url, context_lines=s.context_lines, topic=s.topic,
+                           terms=s.glossary_terms(), max_lines=a.lines, progress=lambda m: print("  " + m, flush=True))
+    path = llmcheck.write_markdown(meeting, cmp, meeting.folder / "model-comparison.md")
+    print(f"\nSide by side: {path}")
+    print("Read it, then choose the model you like best in Settings → Translation.")
     return 0
 
 
@@ -312,6 +397,8 @@ def cmd_selftest(a) -> int:
     print(f"Translation model: {s.llm_model}  (Ollama {'running' if h['running'] else 'NOT RUNNING'}"
           f"{', model installed' if h['model_ready'] else ', MODEL NOT INSTALLED' if h['running'] else ''})")
     pipe = Pipeline(cfg, store, publish, asr_factory=asr_factory, translator=translator)
+    if a.fake_asr:
+        pipe.early_enabled = False    # (ScriptedASR plays its lines in call order: no extra passes)
     print("Loading models…", flush=True)
     t0 = time.monotonic()
     while pipe.asr_state["status"] == "loading" and time.monotonic() - t0 < 1800:
@@ -393,11 +480,11 @@ def cmd_selftest(a) -> int:
         tips.append(f"Recognition errors are high in '{worst[0]}' ({worst[1] * 100:.0f}%). In real meetings: keep the "
                     "speaker close to this laptop's microphone and add names/terms to the glossary.")
     if de_lat > 1.6:
-        tips.append("German lines are slow on this computer: use the 'turbo' speech model and close heavy apps.")
+        tips.append("German lines are slow on this computer: use the 'German turbo' speech model and close heavy apps.")
     if en_lat > 3.5:
         tips.append("English takes a while to complete: in Settings choose 'Gemma 3 4B' for ~3x faster translation.")
-    if not tips and de_lat and de_lat < 1.0 and en_lat and en_lat < 2.5 and s.asr_model == "turbo":
-        tips.append("This Mac has headroom: you can try 'Maximum accuracy (large-v3)' in Settings and run the "
+    if not tips and de_lat and de_lat < 1.0 and en_lat and en_lat < 2.5 and s.asr_model in ("turbo", "turbo-de"):
+        tips.append("This Mac has headroom: you can try 'Whisper large-v3' (strong dialects) in Settings and run the "
                     "self-test again to compare.")
     if not h["running"] or not h["model_ready"]:
         tips.append("Translation was not tested: start Ollama and install the model (./install.sh), then run again.")
@@ -428,6 +515,11 @@ def main(argv: list[str] | None = None) -> int:
     dp = sub.add_parser("download", help="download the models")
     dp.add_argument("--all", action="store_true", help="also the alternative speech model")
     dp.add_argument("--skip-llm", action="store_true")
+    cp = sub.add_parser("compare-llm", help="translate your last meeting again with other models, side by side")
+    cp.add_argument("--models", default="", help="comma separated (default: gemma3:4b,gemma4:e4b,translategemma:4b)")
+    cp.add_argument("--meeting", default="", help="meeting id (default: the last one)")
+    cp.add_argument("--lines", type=int, default=40)
+    cp.add_argument("--pull", action="store_true", help="download models that are missing")
     tp = sub.add_parser("selftest", help="measure accuracy and speed on this computer")
     tp.add_argument("--scenario", default="clean,desk,hard")
     tp.add_argument("--sentences", type=int, default=0)
@@ -447,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(a)
     if a.cmd == "download":
         return cmd_download(a)
+    if a.cmd == "compare-llm":
+        return cmd_compare_llm(a)
     if a.cmd == "selftest":
         return cmd_selftest(a)
     ap.print_help()

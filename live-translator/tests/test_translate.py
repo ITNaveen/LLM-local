@@ -101,3 +101,95 @@ def test_garbage_is_not_kept_as_context_and_history_is_size_capped():
     t._trim_history()
     assert sum(len(d) + len(e) for d, e in t.history) <= t.MAX_HISTORY_CHARS
     assert len(t.history) >= 1
+
+
+# ----------------------------------------------------------------- 1.4: accuracy checks, TranslateGemma
+def test_lost_negation_is_asked_again_once():
+    from fake_ollama import FakeOllama
+
+    from livetranslator.translate import OllamaTranslator
+
+    hint = "Das geht so nicht.\n\n(Check your translation: keep the negation.)"
+    with FakeOllama(models=["gemma3:4b"], answers={"Das geht so nicht.": "That works like this.",
+                                                    hint: "That does not work like this.",
+                                                    "Das Budget beträgt 25.000 Euro.": "The budget is 25,000 euros."}) as fo:
+        t = OllamaTranslator(fo.url, "gemma3:4b")
+        r = t.translate("Das geht so nicht.")
+        assert r.ok and r.text == "That does not work like this."
+        assert len(fo.chats()) == 2
+        assert t.history == [("Das geht so nicht.", "That does not work like this.")]   # without the hint
+        assert all(c["body"]["think"] is False and c["body"]["options"]["temperature"] == 0.0 for c in fo.chats())
+        # a correct line is not asked twice; a preview (record=False) is never checked
+        t.translate("Das Budget beträgt 25.000 Euro.")
+        assert len(fo.chats()) == 3
+        t.translate("Das geht so nicht.", record=False)
+        assert len(fo.chats()) == 4
+
+
+def test_a_worse_second_answer_is_not_taken():
+    from fake_ollama import FakeOllama
+
+    from livetranslator.translate import OllamaTranslator
+
+    g = "Wir brauchen 3 Leute bis 17. Oktober."
+    with FakeOllama(models=["gemma3:4b"], answers={g: "We need people by October 17.",
+                                                    g + "\n\n(Check your translation: keep the numbers 3.)": "Hi."}) as fo:
+        t = OllamaTranslator(fo.url, "gemma3:4b")
+        assert t.translate(g).text == "We need people by October 17."
+
+
+def test_translategemma_gets_its_own_prompt_and_echo_is_caught():
+    from fake_ollama import FakeOllama
+
+    from livetranslator.translate import TG_PREFIX, OllamaTranslator
+
+    with FakeOllama(models=["translategemma:4b"], answers={"Guten Morgen zusammen.": "Good morning, everyone.",
+                                                            "Das machen wir morgen.": "Das machen wir morgen."}) as fo:
+        t = OllamaTranslator(fo.url, "translategemma:4b", terms=["SAP"])
+        r = t.translate("Guten Morgen zusammen.")
+        assert r.ok and r.text == "Good morning, everyone."
+        msgs = fo.chats()[-1]["body"]["messages"]
+        assert [m["role"] for m in msgs] == ["user"] and msgs[0]["content"] == TG_PREFIX + "Guten Morgen zusammen."
+        r = t.translate("Das machen wir morgen.")              # echoes the German twice -> a failure, not saved
+        assert not r.ok and "repeated the German" in r.error
+        assert t.history == [("Guten Morgen zusammen.", "Good morning, everyone.")]
+        msgs = fo.chats()[-2]["body"]["messages"]
+        assert [m["role"] for m in msgs] == ["user", "assistant", "user"]       # previous line as context
+        assert [m["role"] for m in fo.chats()[-1]["body"]["messages"]] == ["user"]   # retry without context
+
+
+def test_checks_know_german_times_dates_dialect_and_tag_questions():
+    from livetranslator.translate import check_translation as c
+
+    fine = [("Treffen wir uns um 15 Uhr.", "Let's meet at 3 pm."), ("um 14 Uhr 30", "at 2:30 pm"),
+            ("Bis zum 15.3.", "by March 15"), ("der 3. Punkt", "the third point"), ("20 Optionen", "twenty options"),
+            ("Das sind 2,50 Euro.", "That is 2.5 euros."), ("Wir nutzen .NET 8.", "We use .NET 8."),
+            ("Net Zero ist das Ziel.", "Net zero is the goal."), ("Die Koalition steht.", "The coalition stands."),
+            ("Passt scho, oder net?", "That's fine, right?"), ("Das geht so nicht.", "That doesn’t work like this."),
+            ("I hob koa Zeit.", "I have no time."), ("Das passt, oder nicht", "That works, right?"),
+            ("Das passt doch, oder nicht, Thomas?", "That works, right, Thomas?"),
+            ("Das passt, nicht wahr.", "That works, doesn't it."), ("Passt scho, gell net", "It's fine, right"),
+            ("Das passt, oder nicht, Herr Müller?", "That works, right, Mr Müller?"),
+            ("Das passt, oder etwa nicht?", "That works, right?"), ("Das passt, gell, ned?", "Fine, right?")]
+    for de, en in fine:
+        assert c(de, en) == [], (de, en)
+    wrong = [("Wir brauchen 20 Leute.", "We need 2 people.", "the numbers 20"),
+             ("Das kostet 500 Euro.", "That costs 5 euros.", "the numbers 500"),
+             ("Das schaffen wir nicht bis Freitag, oder nicht?", "We'll make it by Friday, right?", "the negation"),
+             ("Des passt net.", "That is fine.", "the negation"), ("I hob koa Zeit.", "I have time.", "the negation"),
+             ("Treffen wir uns um 15 Uhr.", "Let's meet at 5 pm.", "the numbers 15 Uhr"),
+             ("Das ist nicht wahr.", "That is true.", "the negation"),
+             ("Ob wir das schaffen oder nicht", "Whether we can do it", "the negation")]
+    for de, en, problem in wrong:
+        assert problem in c(de, en), (de, en, c(de, en))
+
+
+def test_echo_guard_accepts_lines_that_are_the_same_in_english():
+    from livetranslator.translate import _untranslated
+
+    for same in ["Okay.", "Sorry.", "Super.", "Thomas?", "Status?", "Next Steps.", "Müller, Schäfer, Köhler?"]:
+        assert not _untranslated(same, same), same
+    assert _untranslated("Das machen wir morgen.", "Das machen wir morgen.")
+    assert _untranslated("Bis später alle zusammen.", "Bis später alle zusammen.")
+    assert not _untranslated("Wir nutzen die Mobiliar und das Örtliche.", "We use Die Mobiliar and Das Örtliche.")
+    assert _untranslated("Das machen wir morgen und dann ist es fertig.", "Das machen wir morgen und dann ist es fertig")

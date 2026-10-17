@@ -19,15 +19,18 @@
     </div>
   </div>
   <div class="bar-right">
-    <div class="health">
-      <span id="asrPill" class="pill" title="Speech recognition"><i></i><b>Speech</b></span>
-      <span id="llmPill" class="pill" title="Translation"><i></i><b>Translator</b></span>
+    <div class="status">
+      <div class="health">
+        <span id="asrPill" class="pill" title="Speech recognition"><i></i><b>Speech</b></span>
+        <span id="llmPill" class="pill" title="Translation"><i></i><b>Translator</b></span>
+        <span id="govPill" class="pill warn" hidden><i></i><b>Cool mode</b></span>
+      </div>
+      <div class="meter" id="meter" title="Microphone level">
+        <div class="meter-fill" id="meterFill"></div>
+        <span class="meter-voice" id="meterVoice" title="Voice detected"></span>
+      </div>
+      <span id="timer" class="timer">00:00</span>
     </div>
-    <div class="meter" id="meter" title="Microphone level">
-      <div class="meter-fill" id="meterFill"></div>
-      <span class="meter-voice" id="meterVoice" title="Voice detected"></span>
-    </div>
-    <span id="timer" class="timer">00:00</span>
     <div class="btn-group" role="group" aria-label="Text size">
       <button class="icon" id="smaller" title="Smaller text" aria-label="Smaller text">A−</button>
       <button class="icon" id="bigger" title="Bigger text" aria-label="Bigger text">A+</button>
@@ -64,9 +67,19 @@
 <main id="scroller" class="scroller">
   <div class="feed-wrap">
     <section id="summaryBox" class="summary" hidden></section>
-    <section id="liveFeed" class="feed" aria-live="polite"></section>
+    <section id="liveFeed" class="feed"></section>
+    <div id="srLive" class="sr-only" aria-live="polite"></div>
     <section id="viewFeed" class="feed" hidden></section>
-    <div id="partial" class="line partial" hidden><div class="t"><span class="dot"></span></div><div class="body"><div class="de"></div><div class="en-prev"></div><div class="src muted small" id="srcName"></div></div></div>
+    <div id="partial" class="line partial" hidden><div class="t"><span class="dot"></span></div><div class="body"><div class="de" lang="de"></div><div class="en-prev" lang="en"></div><div class="src muted small" id="srcName"></div></div></div>
+    <div id="doneCard" class="done-card" hidden role="status">
+      <div class="dc-text"><span class="dc-check" aria-hidden="true">✓</span><b>Saved</b>
+        <input id="dcName" class="dc-name" type="text" maxlength="80" placeholder="Name this meeting…" aria-label="Name of the saved meeting" autocomplete="off">
+        <span id="dcInfo" class="muted"></span></div>
+      <div class="dc-actions">
+        <button id="dcNew" class="primary" title="Clear the screen for the next meeting">New meeting</button>
+        <button id="dcOpen" class="ghost">Open</button>
+      </div>
+    </div>
     <div id="emptyState" class="empty">
       <h1>Ready when you are.</h1>
       <p>Put the meeting on the speaker next to this laptop and press <b>Start</b>.<br>
@@ -115,6 +128,21 @@
         <small>Shorter = faster lines; longer = fewer half sentences.</small>
       </label>
       <label class="check"><input type="checkbox" name="live_preview"> Show German live while someone is speaking (grey)</label>
+      <label>Live preview made by
+        <select name="preview_engine">
+          <option value="auto">Fast engine - Parakeet on Apple Silicon (recommended)</option>
+          <option value="whisper">Whisper - slower, warms the Mac</option>
+        </select>
+        <small>Only the grey preview; the saved lines always come from the speech model below.</small>
+      </label>
+      <label>Performance
+        <select name="performance">
+          <option value="auto">Auto - keeps the Mac cool in long meetings (recommended)</option>
+          <option value="max">Maximum speed - plugged in</option>
+          <option value="saver">Battery saver - lighter live preview</option>
+        </select>
+        <small>When the Mac gets warm, only the live preview is slowed down. Every line is still translated.</small>
+      </label>
     </fieldset>
     <fieldset>
       <legend>Speech recognition</legend>
@@ -165,7 +193,7 @@
   </form>
 </aside>
 <div id="scrim" class="scrim" hidden></div>
-<div id="toasts" class="toasts" aria-live="assertive"></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

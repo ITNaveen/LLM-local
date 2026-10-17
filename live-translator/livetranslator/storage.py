@@ -65,6 +65,8 @@ class Meeting:
     ended: datetime | None = None
     lines: list[Line] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
+    # transcript.md holds exactly the finished lines, in order (so the next one may simply be appended)
+    md_clean: bool = field(default=False, repr=False, compare=False)
 
     @property
     def title(self) -> str:
@@ -170,7 +172,7 @@ class MeetingStore:
             first = not ln.done
             self._append_jsonl(m, {"update": line_id, "en": en, "ok": ok})   # saved first: a failed write stays retryable
             ln.en, ln.ok, ln.done = en, ok, True
-            if first and all(x.done for x in m.lines if x.id < line_id):
+            if first and m.ended is None and m.md_clean and all(x.done for x in m.lines if x.id < line_id):
                 with open(m.folder / "transcript.md", "a", encoding="utf-8") as f:
                     f.write(f"**{ln.time}**  \nDE: {ln.de}  \nEN: {en if en else '(translation unavailable)'}\n\n")
                     f.flush()
@@ -310,6 +312,7 @@ class MeetingStore:
         tmp = m.folder / "transcript.md.tmp"
         tmp.write_text(m.markdown() + ("\n" if m.lines else ""), "utf-8")
         os.replace(tmp, m.folder / "transcript.md")
+        m.md_clean = all(x.done for x in m.lines)
 
     @staticmethod
     def _cleanup_day(day: Path) -> None:

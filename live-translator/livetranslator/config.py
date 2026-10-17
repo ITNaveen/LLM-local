@@ -40,26 +40,47 @@ def is_apple_silicon() -> bool:
 
 # Speech models. "mlx" runs on the Apple GPU (M-series); "faster" is the
 # CTranslate2 build used on Windows/Linux/Intel Macs.
+# "convert:<repo>" = a transformers checkpoint converted once on this Mac (mlx_convert.py);
+# "fallback" = the model used if this one cannot be downloaded / loaded.
 ASR_MODELS = {
+    "turbo-de": {
+        # Whisper turbo fine-tuned on German speech (primeLine, Apache-2.0): same size and speed as
+        # turbo, clearly fewer errors on German test sets (Tuda-De 6.4 vs 8.3 % WER, CV19 3.2 vs 3.8,
+        # MLS 2.1 vs 3.2).
+        "label": "German turbo - best for German, fast (recommended; Whisper turbo on non-Apple PCs)",
+        "mlx": "convert:primeline/whisper-large-v3-turbo-german",
+        "mlx_alt": ["mlx-community/whisper-large-v3-turbo-german-f16"],
+        "faster": "large-v3-turbo",
+        "fallback": "turbo",
+    },
     "turbo": {
-        "label": "Fast + accurate (Whisper large-v3-turbo)",
+        "label": "Whisper turbo - original, fast",
         "mlx": "mlx-community/whisper-large-v3-turbo",
         "faster": "large-v3-turbo",
     },
     "large-v3": {
-        "label": "Maximum accuracy, slower (Whisper large-v3)",
+        # the best measured on Bavarian / Franconian / Swabian dialects (Betthupferl, Interspeech 2025)
+        "label": "Whisper large-v3 - strong dialects, slower (Mac plugged in)",
         "mlx": "mlx-community/whisper-large-v3-mlx",
         "faster": "large-v3",
+        "fallback": "turbo-de",
+    },
+    "large-v3-de": {
+        "label": "German large-v3 - most accurate German, slower (Mac plugged in; Whisper large-v3 on PCs)",
+        "mlx": "convert:primeline/whisper-large-v3-german",
+        "faster": "large-v3",
+        "fallback": "large-v3",
     },
 }
 
 # Translation models offered in Settings (any installed Ollama model also works).
 RECOMMENDED_LLMS = [
     {"name": "gemma3:4b", "label": "Gemma 3 4B - fast and reliable (recommended)"},
-    {"name": "gemma3:12b", "label": "Gemma 3 12B - higher quality, needs ~10 GB free memory"},
-    {"name": "qwen2.5:14b", "label": "Qwen 2.5 14B - alternative, needs ~11 GB free memory"},
+    {"name": "gemma4:e4b", "label": "Gemma 4 E4B - newer, try it (~9 GB; compare on your last meeting first)"},
+    {"name": "translategemma:4b", "label": "TranslateGemma 4B - pure translator, ignores the glossary (experimental)"},
+    {"name": "gemma4:12b", "label": "Gemma 4 12B - higher quality, MacBook Pro / plugged in (~8 GB)"},
 ]
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 SENSITIVITY = {
     # speech-probability thresholds for the voice detector
@@ -81,7 +102,9 @@ class Settings:
     live_preview: bool = True            # grey German text while someone is speaking
     # speech recognition
     asr_backend: str = "auto"            # auto | mlx | faster
-    asr_model: str = "turbo"             # key of ASR_MODELS, or an HF repo / local path
+    asr_model: str = "turbo-de"          # key of ASR_MODELS, or an HF repo / local path
+    preview_engine: str = "auto"         # grey live preview: "auto" (Parakeet on Apple Silicon) | "whisper"
+    performance: str = "auto"            # "auto" (eases off when the Mac gets warm) | "max" | "saver"
     language: str = "de"
     # translation
     ollama_url: str = "http://127.0.0.1:11434"
@@ -110,6 +133,10 @@ class Settings:
     def validate(self) -> None:
         if self.input_source not in ("mic", "browser"):
             self.input_source = "mic"
+        if self.preview_engine not in ("auto", "whisper"):
+            self.preview_engine = "auto"
+        if self.performance not in ("auto", "max", "saver"):
+            self.performance = "auto"
         if self.sensitivity not in SENSITIVITY:
             self.sensitivity = "normal"
         self.pause_ms = int(min(max(int(self.pause_ms), 200), 2000))
@@ -157,6 +184,11 @@ def migrate(d: dict) -> dict:
         if int(d.get("context_lines") or 8) > 8:
             d["context_lines"] = 8
         d["settings_version"] = 2
+    if int(d.get("settings_version") or 2) < 3:
+        # 1.4: the German-tuned turbo is as fast as turbo and more accurate on German speech
+        if d.get("asr_model") in (None, "turbo"):
+            d["asr_model"] = "turbo-de"
+        d["settings_version"] = 3
     return d
 
 

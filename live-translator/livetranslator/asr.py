@@ -2,6 +2,7 @@
 
 * MLXWhisper    - Apple Silicon GPU via mlx-whisper (default on the M4 Mac)
 * FasterWhisper - CTranslate2; Windows / Linux / Intel Mac (CPU or CUDA)
+* ParakeetMLX   - Apple Silicon GPU, only for the grey live preview (cheap per pass)
 * ScriptedASR   - test double
 
 All backends must be created, loaded and used from the same thread (the ASR
@@ -10,6 +11,7 @@ worker thread) - MLX streams are per-thread.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -55,11 +57,18 @@ def build_prompt(terms: list[str], previous: str = "", max_chars: int = 360) -> 
 class BaseASR:
     name = "base"
 
+    def prefetch(self) -> None:
+        """Download what load() needs (any thread; may take minutes the first time)."""
+
     def load(self) -> None:
         ...
 
     def transcribe(self, audio: np.ndarray, prompt: str | None = None) -> ASRResult:
         raise NotImplementedError
+
+    def transcribe_preview(self, audio: np.ndarray, prompt: str | None = None) -> ASRResult:
+        """A grey live preview: may take shortcuts (it is replaced by the real line anyway)."""
+        return self.transcribe(audio, prompt)
 
     def warmup(self) -> float:
         t = time.perf_counter()
@@ -99,6 +108,15 @@ def resolve_hf_model(repo_or_path: str) -> str:
     return snapshot_download(repo_id=repo_or_path, allow_patterns=patterns)
 
 
+def resolve_mlx_model(ref: str) -> str:
+    """'convert:<repo>' -> converted on this Mac (once); otherwise an mlx-whisper repo / folder."""
+    from .mlx_convert import PREFIX, ensure_mlx_whisper
+
+    if ref.startswith(PREFIX):
+        return ensure_mlx_whisper(ref[len(PREFIX):])
+    return resolve_hf_model(ref)
+
+
 class MLXWhisper(BaseASR):
     name = "mlx"
 
@@ -111,7 +129,7 @@ class MLXWhisper(BaseASR):
         import mlx.core as mx
         from mlx_whisper.transcribe import ModelHolder
 
-        self.path = resolve_hf_model(self.model_ref)
+        self.path = resolve_mlx_model(self.model_ref)
         # MLX keeps freed GPU buffers cached for reuse; on a 24 GB Mac that memory is
         # needed by Ollama's translation model, so keep the cache small.
         for setter in (getattr(mx, "set_cache_limit", None), getattr(getattr(mx, "metal", None), "set_cache_limit", None)):
@@ -123,7 +141,7 @@ class MLXWhisper(BaseASR):
                     continue
         ModelHolder.get_model(self.path, mx.float16)
 
-    def transcribe(self, audio: np.ndarray, prompt: str | None = None) -> ASRResult:
+    def transcribe(self, audio: np.ndarray, prompt: str | None = None, temperatures=_TEMPERATURES) -> ASRResult:
         import mlx_whisper
 
         t = time.perf_counter()
@@ -132,7 +150,9 @@ class MLXWhisper(BaseASR):
             path_or_hf_repo=self.path or self.model_ref,
             language=self.language,
             task="transcribe",
-            temperature=_TEMPERATURES,
+            temperature=temperatures,
+            # German speech is ~4-5 tokens/s; this only stops runaway loops on noise (seconds of GPU)
+            sample_len=min(224, int(len(audio) / 16000 * 10) + 32),
             compression_ratio_threshold=2.4,
             logprob_threshold=-1.0,
             no_speech_threshold=0.6,
@@ -143,6 +163,10 @@ class MLXWhisper(BaseASR):
             verbose=None,
         )
         return _from_segments(r.get("segments") or [], r.get("text", ""), time.perf_counter() - t)
+
+    def transcribe_preview(self, audio: np.ndarray, prompt: str | None = None) -> ASRResult:
+        # each warmer retry re-runs the whole 30-s encoder: not worth it for a preview
+        return self.transcribe(audio, prompt, temperatures=(0.0,))
 
 
 class FasterWhisper(BaseASR):
@@ -235,6 +259,75 @@ def _from_segments(segs: list[dict], text: str | None, elapsed: float) -> ASRRes
         compression_ratio=float(max(s["compression_ratio"] for s in segs)),
         elapsed=elapsed,
     )
+
+
+class ParakeetMLX(BaseASR):
+    """NVIDIA Parakeet TDT 0.6B v3 on the Apple GPU - only for the grey live preview.
+
+    Whisper pads every pass to 30 s of audio, so each preview of a 2-s phrase costs as much as a
+    full line (~1 s of GPU on an M4) - previews kept the GPU ~45 % busy and the real line often
+    waited behind one. Parakeet's cost grows with the audio length (a few tens of ms per preview),
+    so previews refresh faster, the final pass never queues behind them and the Mac stays cooler.
+    Whisper still writes every saved line (German forced, glossary, dialect strength).
+    """
+
+    name = "parakeet"
+    MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+
+    def __init__(self, model: str = MODEL):
+        self.model_ref = model
+        self.local: str | None = None
+        self.model = None
+
+    def prefetch(self) -> None:
+        from pathlib import Path
+
+        if Path(self.model_ref).expanduser().is_dir():
+            self.local = str(Path(self.model_ref).expanduser())
+            return
+        from huggingface_hub import snapshot_download
+
+        self.local = snapshot_download(repo_id=self.model_ref, allow_patterns=["config.json", "model.safetensors"])
+
+    def load(self) -> None:
+        import mlx.core as mx
+        from parakeet_mlx import from_pretrained
+
+        self.model = from_pretrained(self.local or self.model_ref, dtype=mx.bfloat16)
+
+    def transcribe(self, audio: np.ndarray, prompt: str | None = None) -> ASRResult:
+        import mlx.core as mx
+        from parakeet_mlx.audio import get_logmel
+
+        t = time.perf_counter()
+        x = mx.array(np.ascontiguousarray(audio, dtype=np.float32))
+        if x.shape[0] < 16000 * 0.3:
+            return ASRResult("", elapsed=time.perf_counter() - t)
+        res = self.model.generate(get_logmel(x, self.model.preprocessor_config))[0]
+        conf = min((s.confidence for s in res.sentences), default=1.0)
+        return ASRResult(res.text.strip(), avg_logprob=float(np.log(max(conf, 1e-6))),
+                         elapsed=time.perf_counter() - t)
+
+
+def parakeet_available() -> bool:
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("parakeet_mlx") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_DE_WORDS = set("der die das und ist nicht ich wir sie es ein eine zu mit auf für dass den dem auch noch so ja "
+                "aber wie was haben sind wird kann oder schon mal jetzt dann im in von bei hier gut".split())
+
+
+def looks_german(text: str) -> bool:
+    """Parakeet detects the language by itself: a preview in another language is not shown."""
+    words = re.findall(r"[a-zäöüß]+", text.lower())
+    if len(words) < 4 or re.search(r"[äöüß]", text.lower()):
+        return True
+    return sum(w in _DE_WORDS for w in words) / len(words) >= 0.12
 
 
 def create_asr(backend: str, model: str, language: str = "de") -> BaseASR:

@@ -168,7 +168,7 @@ def test_old_settings_move_from_12b_to_4b(tmp_path):
     s = SettingsStore(p).settings
     assert s.llm_model == "gemma3:4b" and s.context_lines == 8
     assert s.pause_ms == 650 and s.input_device == "MacBook Pro Microphone"   # the rest is kept
-    assert json.loads(p.read_text())["settings_version"] == 2                  # persisted
+    assert json.loads(p.read_text())["settings_version"] == 3                  # persisted
     # a user who picks 12B again afterwards keeps it
     SettingsStore(p).update({"llm_model": "gemma3:12b"})
     assert SettingsStore(p).settings.llm_model == "gemma3:12b"

@@ -60,3 +60,21 @@ def test_filler_only_lines_are_dropped_real_words_kept():
         assert clean_transcript(t) == "", t
     for t in ["Um 10 Uhr.", "Uhr.", "Ah, okay.", "Aha.", "Ach so.", "Ja.", "Ähm, das Budget ist fertig."]:
         assert clean_transcript(t) == t, t
+
+
+def test_eszett_is_restored_but_names_are_left_alone():
+    from livetranslator.textclean import fix_eszett
+
+    assert fix_eszett("Die Strasse ist gross.") == "Die Straße ist groß."
+    assert fix_eszett("Die Massnahmen sind regelmässig nötig.") == "Die Maßnahmen sind regelmäßig nötig."
+    assert fix_eszett("Grüsse an Herrn Gross und Frau Weiss.") == "Grüße an Herrn Gross und Frau Weiss."
+    assert fix_eszett("Gross ist das nicht.") == "Groß ist das nicht."
+    assert fix_eszett("Das muss passen, dass wir das schaffen.") == "Das muss passen, dass wir das schaffen."
+    assert clean_transcript("Wir treffen uns draussen.") == "Wir treffen uns draußen."
+
+
+def test_polite_closing_from_noise_is_dropped():
+    # the German fine-tune "hears" a polite closing in noise; real ones are clear speech
+    assert clean_transcript("Vielen Dank.", avg_logprob=-0.3, no_speech_prob=0.4) == ""
+    assert clean_transcript("Vielen Dank.", avg_logprob=-0.7, no_speech_prob=0.05) == ""
+    assert clean_transcript("Vielen Dank.", avg_logprob=-0.3, no_speech_prob=0.1) == "Vielen Dank."

@@ -20,23 +20,25 @@ import queue
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Callable
 
 import numpy as np
 
-from .asr import BaseASR, build_prompt, create_asr
+from .asr import BaseASR, ParakeetMLX, build_prompt, create_asr, looks_german, parakeet_available
 from .audio_io import (FileSource, MicSource, PushSource, list_input_devices, mic_permission_status, preferred_order,
                        probe_device, request_mic_permission)
-from .config import ASR_MODELS, Settings, SettingsStore
+from .config import ASR_MODELS, Settings, SettingsStore, is_apple_silicon
 from .dsp import level_segment
 from .frontend import FrontEnd
+from .governor import Governor
+from .macsignals import MacSignals
 from .segmenter import Segment
 from .storage import Line, Meeting, MeetingStore
-from .textclean import clean_transcript, similarity
+from .textclean import clean_transcript, similarity, sounds_unfinished
 from .translate import OllamaTranslator
-from .vad import SileroVAD
+from .vad import FRAME, SileroVAD
 
 log = logging.getLogger("lt.pipeline")
 
@@ -53,7 +55,70 @@ class Session:
     offset_base: float = 0.0   # meeting time already recorded before this stream (when continuing)
     prev_text: str = ""
     stats: dict = field(default_factory=lambda: {"lines": 0, "asr_s": [], "tr_first_s": [], "tr_total_s": [],
-                                                 "close_lag_s": []})
+                                                 "close_lag_s": [], "early_hits": 0, "held": 0})
+
+
+class _EarlyFinal:
+    """Transcribes a line the moment the speaker pauses, while the pause is still running.
+
+    The segmenter asks advise() on every frame of an open line. When the pause has lasted
+    long enough for the line's trailing pad, the line's audio - exactly what the segment
+    will contain if it closes now - goes to the speech recogniser. If the pause then ends
+    the line, that result IS the line (no second pass): the German appears ~0.3-0.6 s
+    sooner. The text also helps decide where the line ends: words that clearly continue
+    ("..., dass", "und", "für") keep the line open a little longer, so sentences are cut
+    less often. If the speaker carries on, the result is simply not used.
+    """
+
+    UNFINISHED_EXTRA_S = 0.45
+
+    def __init__(self, pipe: "Pipeline", sess: Session):
+        self.pipe = pipe
+        self.sess = sess
+        self.key = None
+        self.extra_frames = round(self.UNFINISHED_EXTRA_S * 16000 / FRAME)
+
+    def advise(self, seg, c, required: int):
+        if c.last_strong == len(c.frames) - 1:
+            if self.key is not None:                  # clear speech again: the early text is not needed
+                self.key = None
+                self.pipe._early_want = None
+            return None
+        if c.silence_run < seg.post_pad or c.voiced < seg.min_voiced or not self.pipe._early_allowed():
+            return None
+        # identified by the last clear speech frame: a faint flicker of the voice detector after it
+        # changes the line's length by a few ms, but not its words
+        key = (round(c.start_frame * seg.frame_s, 3), c.last_strong)
+        if key != self.key:
+            self.key = key
+            upto = c.last_voiced + 1 + seg.post_pad
+            self.pipe._request_early(self.sess, key, np.concatenate(c.frames[:upto]))
+            return None
+        if required - seg.post_pad < 3:
+            return None     # a long line that should be cut at this short gap: no holding (the text is still re-used)
+        done = self.pipe._early_done
+        if done is None or done[0] != key:
+            # still transcribing: never wait blindly (a short pause between two sentences would join them) -
+            # but if this line's live preview already ends in words that clearly continue, hold it like
+            # the early text would (when the early text arrives and sounds finished, the line closes)
+            p = self.pipe.partial
+            text = p.get("text") if p.get("start") is not None and abs(p["start"] - key[0]) < 0.05 else ""
+            if text and sounds_unfinished(text) and c.silence_run < required + self.extra_frames:
+                if c.silence_run == required:
+                    self.sess.stats["held"] += 1
+                return "wait"
+            return None
+        if sounds_unfinished(done[2]) and c.silence_run < required + self.extra_frames:
+            if c.silence_run == required:
+                self.sess.stats["held"] += 1
+            return "wait"
+        return None
+
+
+def _default_preview_engine(s: Settings) -> BaseASR | None:
+    if s.preview_engine == "auto" and is_apple_silicon() and parakeet_available():
+        return ParakeetMLX()
+    return None
 
 
 class Pipeline:
@@ -65,6 +130,7 @@ class Pipeline:
         asr_factory: Callable[[Settings], BaseASR] | None = None,
         translator: OllamaTranslator | None = None,
         vad_factory: Callable[[], object] = SileroVAD,
+        preview_factory: Callable[[Settings], BaseASR | None] | None = None,
     ):
         self.cfg = settings
         self.store = store
@@ -75,6 +141,11 @@ class Pipeline:
         self.translator = translator or OllamaTranslator(s.ollama_url, s.llm_model, s.context_lines, s.topic,
                                                          s.glossary_terms())
         self.vad_factory = vad_factory
+        self.preview_factory = preview_factory or _default_preview_engine
+        self.preview_asr: BaseASR | None = None    # cheap engine for the grey live preview (None: Whisper)
+        self._preview_gen = 0
+        self._preview_whisper_line = None         # a line whose preview did not look German: Whisper for it
+        self._asr_failed: set = set()             # speech models that could not be prepared in this run
 
         self.state = "idle"                     # idle | listening | stopping
         self.asr: BaseASR | None = None
@@ -99,6 +170,15 @@ class Pipeline:
         self._partial_en_last = (None, 0.0, "")   # (line start, time, German) of the last preview
         self._partial_lock = threading.Lock()
         self._partial_ema = 0.5
+        self._early_want = None     # (line start, samples) the processor wants transcribed early
+        self._early_done = None     # (key, prompt, text, asr_s) of the last early transcription
+        self.early_enabled = True   # (the thermal governor's plan can also switch it off)
+        self.preview_slowdown = 1.0  # >1: fewer live previews (the thermal governor sets it)
+        self.gov = Governor(MacSignals(), s.performance)
+        self._asr_runs = 0           # Whisper passes: did one run during a translation? (the GPU was
+        self._asr_active = False     # shared, so that translation's speed says nothing about heat)
+        self._gov_noticed = False
+        self._gov_lock = threading.Lock()
         self._cur_seg_start = None
         self._seg_cfg_version = 0
         self._proc_thread: threading.Thread | None = None
@@ -121,12 +201,15 @@ class Pipeline:
         self._last_session: Session | None = None   # just stopped: its missing translations are still filled in
         self._last_session_end = 0.0
         self._pulling: set = set()
+        self._upgrade_to = ""       # the chosen model is still downloading: the fallback translates meanwhile
+        self._upgrading = False
         self.on_session_end: Callable[[Session], None] | None = None
 
         self._threads = [
             threading.Thread(target=self._asr_loop, name="asr", daemon=True),
             threading.Thread(target=self._tr_loop, name="translate", daemon=True),
             threading.Thread(target=self._health_loop, name="health", daemon=True),
+            threading.Thread(target=self._gov_loop, name="governor", daemon=True),
         ]
         for t in self._threads:
             t.start()
@@ -145,6 +228,7 @@ class Pipeline:
             "meeting": self.session.meeting.meta() if self.session else None,
             "source": self.source_name,
             "source_kind": self._source_kind(),
+            "governor": self.gov.status(),
         }
 
     def snapshot(self) -> dict:
@@ -176,7 +260,8 @@ class Pipeline:
                 self.translator.seed_history([(ln.de, ln.en) for ln in meeting.lines if ln.ok][-s.context_lines:])
             else:
                 meeting = self.store.create(name, now=now, extra={
-                    "asr_model": s.resolved_asr_model(), "llm_model": s.llm_model})
+                    "asr_model": self.asr_state.get("model") or s.resolved_asr_model(),
+                    "llm_model": self.translator.model})
                 offset_base = 0.0
                 self.translator.reset()
             self._token += 1
@@ -188,6 +273,11 @@ class Pipeline:
             self.partial = {"text": "", "start": None}
             if continue_id:
                 self._adopt_retries(sess)
+            with self._gov_lock:
+                self.gov.reset()
+            self._gov_noticed = False
+            self._apply_plan()
+            self._defer_old_lines(sess)
             # drop stale audio
             while not self._audio_q.empty():
                 try:
@@ -242,9 +332,11 @@ class Pipeline:
         def finish():
             if self._proc_thread:
                 self._proc_thread.join(timeout=10)
+            # wait for the last line's German only - its English (and any still queued) is written
+            # in the background and saved into this meeting; Start works again right away
             barrier = threading.Event()
-            self._asr_q.put(("barrier", barrier))
-            barrier.wait(timeout=120)
+            self._asr_q.put(("asr_barrier", barrier))
+            barrier.wait(timeout=60)
             with self._lock:
                 kept = self.store.finish(sess.meeting)
                 if kept:
@@ -284,16 +376,28 @@ class Pipeline:
 
     def apply_settings(self, old: Settings, new: Settings) -> None:
         if (old.asr_model, old.asr_backend, old.language) != (new.asr_model, new.asr_backend, new.language):
+            if old.asr_model != new.asr_model or old.asr_backend != new.asr_backend:
+                self._asr_failed.clear()             # the user's new choice: try everything again
             self._asr_q.put(("reload", None))
+        elif (old.preview_engine, old.live_preview) != (new.preview_engine, new.live_preview):
+            self._asr_q.put(("preview_reload", None))
         model_changed = old.llm_model != new.llm_model or old.ollama_url != new.ollama_url
         # only a real model change replaces the active model (keeps an automatic fallback otherwise)
         self.translator.configure(model=new.llm_model if model_changed else None, context_lines=new.context_lines,
                                   topic=new.topic, terms=new.glossary_terms(), base_url=new.ollama_url)
         if model_changed:
             self._slow_strikes = 0
+            self.gov.reset_baselines()
+            self._auto_pulled = False             # a new choice that is not downloaded: fallback + download again
+            self._upgrade_to = ""
             self.llm_state.update({"model": new.llm_model, "model_ready": False, "fallback_active": False,
                                    "speed": "unknown", "tok_s": None, "slow_noticed": False, "cpu_noticed": False})
             threading.Thread(target=self._refresh_llm, args=(True,), daemon=True).start()
+        if old.performance != new.performance:
+            with self._gov_lock:
+                self.gov.set_performance(new.performance)    # counts at once, not after a cool-down
+                self._apply_plan()
+            self.publish(self.status())
         if (old.sensitivity, old.pause_ms, old.max_line_s) != (new.sensitivity, new.pause_ms, new.max_line_s):
             self._seg_cfg_version += 1
         if old.input_device != new.input_device or old.input_source != new.input_source:
@@ -394,8 +498,24 @@ class Pipeline:
 
         threading.Thread(target=run, name="pull", daemon=True).start()
 
+    def pending_translations(self) -> int:
+        """Lines still waiting for their English (queued, being written, or deferred after Stop)."""
+        with self._retry_lock:
+            deferred = sum(1 for e in self._retry_pending.values() if e.get("deferred"))
+        return self._lines_waiting() + (1 if self._tr_busy else 0) + deferred
+
+    def drain(self, timeout: float = 15.0) -> bool:
+        """Wait (bounded) until the English of every line is written - e.g. before the app quits."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if not self.pending_translations() or not self.llm_state.get("running"):
+                return True
+            time.sleep(0.2)
+        return False
+
     def shutdown(self) -> None:
         self.stop(wait=True)
+        self.drain(15.0)                  # quitting right after Stop must not lose the last English
         self._shutdown.set()
         self._keep_awake(False)
         for m in {self.translator.model, self.settings.llm_model, self.settings.llm_fallback}:
@@ -451,6 +571,7 @@ class Pipeline:
     def _proc_loop(self, sess: Session) -> None:
         fe = FrontEnd(self.settings, self.vad_factory())
         seg = fe.seg
+        seg.advisor = _EarlyFinal(self, sess).advise
         cfg_version = self._seg_cfg_version
         last_lvl = 0.0
         last_partial_req = 0.0
@@ -510,10 +631,14 @@ class Pipeline:
             # live preview of the line being spoken
             # (only while words are coming: when a pause starts, the final pass is due soon
             # and must not wait behind a preview)
+            # A cheap preview engine (Parakeet) refreshes often and may run while English is written;
+            # Whisper previews cost a full pass each, so they are rarer and give way to the translator.
+            cheap = self.preview_asr is not None and self._preview_whisper_line != seg.current_start
+            every = max(0.6, 3.0 * self._partial_ema) if cheap else max(1.0, 2.2 * self._partial_ema)
             if (self.settings.live_preview and seg.in_speech and seg.current_voiced_s() >= 0.6
                     and seg.cur is not None and seg.cur.silence_run <= 2
-                    and now - last_partial_req >= max(1.0, 2.2 * self._partial_ema) and self._asr_q.empty()
-                    and not self._tr_busy and self._tr_q.empty()):   # English first: no preview while translating
+                    and now - last_partial_req >= every * self.preview_slowdown and self._asr_q.empty()
+                    and (cheap or (not self._tr_busy and self._tr_q.empty()))):
                 cur = seg.current_audio()
                 if cur is not None:
                     audio, start = cur
@@ -619,29 +744,125 @@ class Pipeline:
             self.publish(self.status())
 
     # ================================================================ ASR
+    def _asr_candidates(self, s: Settings) -> list[tuple[Settings, str]]:
+        """The chosen speech model, its ready-made alternatives, then its fallbacks - in that order."""
+        out, seen, key = [], set(), s.asr_model
+        backend = s.resolved_asr_backend()
+        while key and key not in seen:
+            seen.add(key)
+            entry = ASR_MODELS.get(key, {})
+            label = entry.get("label", key)
+            out.append((replace(s, asr_model=key), label))
+            if backend == "mlx":
+                out.extend((replace(s, asr_model=alt), label) for alt in entry.get("mlx_alt", []))
+            key = entry.get("fallback")
+        return out
+
     def _load_asr(self) -> None:
         s = self.settings
-        model = s.resolved_asr_model()
         backend = s.resolved_asr_backend()
-        label = ASR_MODELS.get(s.asr_model, {}).get("label", model)
-        self.asr_state = {"status": "loading", "detail": f"Loading speech model ({label})… first start downloads it once.",
-                          "model": model, "backend": backend}
-        self.publish(self.status())
-        t = time.perf_counter()
-        try:
-            asr = self.asr_factory(s)
-            asr.load()
-            warm = asr.warmup()
+        first_error = None
+        cands = self._asr_candidates(s)
+        for i, (cand, label) in enumerate(cands):
+            model = cand.resolved_asr_model()
+            if model in self._asr_failed and i < len(cands) - 1:
+                continue                             # failed earlier in this run: no second long download
+            if i and first_error is None:
+                first_error = "it failed earlier"
+            self.asr_state = {"status": "loading", "model": model, "backend": backend,
+                              "detail": f"Loading speech model ({label})… the first start downloads it once."}
+            self.publish(self.status())
+            t = time.perf_counter()
+            try:
+                asr = self.asr_factory(cand)
+                asr.load()
+                warm = asr.warmup()
+            except Exception as e:  # noqa: BLE001
+                log.exception("ASR load failed: %s", model)
+                first_error = first_error or e
+                self._asr_failed.add(model)
+                continue
             self.asr = asr
+            self.gov.reset_baselines()
             self.asr_state = {"status": "ready", "detail": f"{label} ready", "model": model, "backend": backend,
                               "load_s": round(time.perf_counter() - t, 1), "warm_s": round(warm, 2)}
             log.info("ASR ready: %s/%s in %.1fs (warm-up %.2fs)", backend, model, time.perf_counter() - t, warm)
-        except Exception as e:  # noqa: BLE001
-            log.exception("ASR load failed")
-            self.asr = None
-            self.asr_state = {"status": "error", "detail": f"Speech model failed to load: {e}", "model": model,
-                              "backend": backend}
-            self._notice("error", self.asr_state["detail"])
+            self._start_preview_engine(s)
+            if i:
+                chosen = ASR_MODELS.get(s.asr_model, {}).get("label", s.asr_model)
+                using = "a ready-made copy of it" if label == chosen else f"'{label}'"
+                self._notice("warn", f"The speech model '{chosen}' could not be prepared ({first_error}). "
+                                     f"Using {using} for now - it is tried again at the next start.")
+            self.publish(self.status())
+            return
+        self.asr = None
+        self.asr_state = {"status": "error", "detail": f"Speech model failed to load: {first_error}",
+                          "model": s.resolved_asr_model(), "backend": backend}
+        self._notice("error", self.asr_state["detail"])
+        self.publish(self.status())
+
+    # ---------------------------------------------------------- thermal governor
+    def _gov_loop(self) -> None:
+        while not self._shutdown.wait(self.gov.TICK_S):
+            if self.state != "listening":
+                continue
+            try:
+                with self._gov_lock:
+                    changed = self.gov.tick()
+                    if changed:
+                        self._apply_plan()
+            except Exception:  # noqa: BLE001
+                log.exception("governor tick failed")
+                continue
+            if changed:
+                log.info("governor: %s (x%.1f previews) - %s", self.gov.plan().name, self.preview_slowdown,
+                         self.gov.reason)
+                self.publish(self.status())
+                if self.gov.level >= 2 and not self._gov_noticed:
+                    self._gov_noticed = True
+                    what = "paused" if self.gov.level >= 3 else "slowed down"
+                    self._notice("info", f"Keeping the Mac cool ({self.gov.reason}): the live preview is {what}. "
+                                         "Every line is still translated as usual.")
+
+    def _apply_plan(self) -> None:
+        plan = self.gov.plan()
+        self.preview_slowdown = self.gov.preview_slowdown()
+        self.translator.recheck = plan.recheck
+
+    # ---------------------------------------------------------- live preview engine
+    def _start_preview_engine(self, s: Settings) -> None:
+        """Download the preview model in the background (never blocks the real lines), then
+        load it on this (the ASR) thread. Until then - or if it fails - Whisper does previews."""
+        self._preview_gen += 1
+        gen = self._preview_gen
+        self.preview_asr = None
+        engine = self.preview_factory(s) if s.live_preview else None
+        if engine is None:
+            return
+
+        def fetch():
+            try:
+                engine.prefetch()
+            except Exception as e:  # noqa: BLE001
+                log.warning("live preview engine not available (%s) - Whisper does the preview", e)
+                return
+            self._asr_q.put(("load_preview", gen, engine))
+
+        threading.Thread(target=fetch, name="preview-download", daemon=True).start()
+
+    def _load_preview(self, gen: int, engine: BaseASR) -> None:
+        if gen != self._preview_gen:
+            return                                   # settings changed meanwhile
+        try:
+            engine.load()
+            # a real pass (warmup() would hide an error): an engine that cannot transcribe is not used
+            engine.transcribe((np.random.default_rng(0).standard_normal(16000) * 0.01).astype(np.float32))
+        except Exception:  # noqa: BLE001
+            log.exception("live preview engine failed to load - Whisper does the preview")
+            return
+        self.preview_asr = engine
+        self.asr_state["preview"] = engine.name
+        log.info("live preview engine ready: %s", engine.name)
         self.publish(self.status())
 
     def _asr_loop(self) -> None:
@@ -655,30 +876,95 @@ class Pipeline:
                 with self._partial_lock:
                     pj, self._partial_slot = self._partial_slot, None
                 if pj is not None:
-                    self._run_partial(*pj)
+                    try:
+                        self._run_partial(*pj)
+                    except Exception:  # noqa: BLE001
+                        log.exception("live preview failed")
+                        if self.preview_asr is not None:
+                            self.preview_asr = None        # the preview engine misbehaves: Whisper takes over
+                            self.asr_state.pop("preview", None)
                 continue
             kind = job[0]
             try:
                 if kind == "final":
                     self._run_final(job[1], job[2])
+                elif kind == "early":
+                    self._run_early(job[1], job[2], job[3])
+                elif kind == "load_preview":
+                    self._load_preview(job[1], job[2])
+                elif kind == "preview_reload":
+                    self._start_preview_engine(self.settings)
                 elif kind == "reload":
                     self._load_asr()
                 elif kind == "barrier":
                     self._tr_q.put(("barrier", job[1]))
+                elif kind == "asr_barrier":
+                    job[1].set()
             except Exception:  # noqa: BLE001
                 log.exception("ASR job failed")
 
     def _terms(self) -> list[str]:
         return self.settings.glossary_terms()
 
+    # ---------------------------------------------------------- early transcription
+    def _early_allowed(self) -> bool:
+        # (independent of the grey live preview: switching that off must not make the lines slower)
+        return bool(self.early_enabled and self.gov.plan().early and self.asr is not None)
+
+    def _request_early(self, sess: Session, key, audio: np.ndarray) -> None:
+        self._early_want = key
+        self._asr_q.put(("early", sess, key, audio))
+
+    def _run_early(self, sess: Session, key, audio: np.ndarray) -> None:
+        if self.asr is None or sess is not self.session or self._early_want != key:
+            return          # the speaker went on (or the meeting ended): not needed any more
+        text, asr_s, prompt = self._transcribe_line(sess, audio)
+        self._early_done = (key, prompt, text, asr_s, len(audio))
+
+    def _transcribe_line(self, sess: Session, raw_audio: np.ndarray) -> tuple[str, float, str | None]:
+        """The final transcription of a line (also used for the early pass - they must match)."""
+        terms = self._terms()
+        audio = level_segment(raw_audio)
+        dur = len(audio) / 16000
+        prompt = build_prompt(terms, sess.prev_text)
+        self._asr_active, self._asr_runs = True, self._asr_runs + 1
+        try:
+            r = self.asr.transcribe(audio, prompt)
+        finally:
+            self._asr_active = False
+        text = clean_transcript(r.text, duration_s=dur, avg_logprob=r.avg_logprob,
+                                no_speech_prob=r.no_speech_prob, prompt_terms=", ".join(terms))
+        asr_s = r.elapsed
+        self.gov.note_work(r.elapsed)
+        if text and sess.prev_text and similarity(text, sess.prev_text) > 0.85:
+            # Whisper may echo its prompt (the previous line); check without it
+            r2 = self.asr.transcribe(audio, build_prompt(terms, ""))
+            asr_s += r2.elapsed
+            text = clean_transcript(r2.text, duration_s=dur, avg_logprob=r2.avg_logprob,
+                                    no_speech_prob=r2.no_speech_prob, prompt_terms=", ".join(terms))
+        return text, asr_s, prompt
+
     def _run_partial(self, sess: Session, start: float, audio: np.ndarray) -> None:
         if self.asr is None or sess is not self.session or self._cur_seg_start != start:
             return
         terms = self._terms()
-        r = self.asr.transcribe(level_segment(audio), build_prompt(terms, sess.prev_text))
+        engine = self.preview_asr if self._preview_whisper_line != start else None
+        heavy = engine is None       # a Parakeet pass is a few ms of GPU: it does not slow the translator
+        if heavy:
+            self._asr_active, self._asr_runs = True, self._asr_runs + 1
+        try:
+            r = (engine or self.asr).transcribe_preview(level_segment(audio), build_prompt(terms, sess.prev_text))
+        finally:
+            if heavy:
+                self._asr_active = False
         self._partial_ema = 0.7 * self._partial_ema + 0.3 * r.elapsed
+        self.gov.note_work(r.elapsed)
         text = clean_transcript(r.text, duration_s=len(audio) / 16000, avg_logprob=r.avg_logprob,
                                 no_speech_prob=r.no_speech_prob, prompt_terms=", ".join(terms))
+        if engine is not None and text and not looks_german(text):
+            # the preview engine picks the language itself; this line gets Whisper previews instead
+            self._preview_whisper_line = start
+            return
         if sess is self.session and self._cur_seg_start == start and text:
             self.partial = {"text": text, "start": start}
             self.publish({"type": "partial", "text": text, "start": start})
@@ -690,11 +976,14 @@ class Pipeline:
     PREVIEW_EN_EVERY_S = 2.5
 
     def _maybe_preview_english(self, sess: Session, start: float, text: str, seconds: float) -> None:
-        if seconds < self.PREVIEW_EN_MIN_S or not self.llm_state.get("loaded") or self.llm_state.get("stuck"):
+        plan = self.gov.plan()
+        min_s = None if plan.en_preview_min_s is None else max(self.PREVIEW_EN_MIN_S, plan.en_preview_min_s)
+        every = max(self.PREVIEW_EN_EVERY_S, plan.en_preview_every_s)
+        if min_s is None or seconds < min_s or not self.llm_state.get("loaded") or self.llm_state.get("stuck"):
             return
         last_start, last_t, last_text = self._partial_en_last
         now = time.monotonic()
-        if last_start == start and (now - last_t < self.PREVIEW_EN_EVERY_S or len(text) - len(last_text) < 12):
+        if last_start == start and (now - last_t < every or len(text) - len(last_text) < 12):
             return
         self._partial_en_last = (start, now, text)
         self._partial_tr_slot = (sess, start, text)
@@ -713,6 +1002,7 @@ class Pipeline:
             res = self.translator.translate(text, give_way, record=False, first_token_timeout=3.0, max_gen_s=6.0)
         except _GiveWay:
             return
+        self.gov.note_work(res.total_s)
         if res.ok and res.text and sess is self.session and self._cur_seg_start == start:
             self.publish({"type": "partial_en", "text": res.text, "start": start})
 
@@ -722,19 +1012,18 @@ class Pipeline:
                 return
             # model still loading: this line waits (the loader runs on this thread, so we only get here on error)
             return
-        terms = self._terms()
-        audio = level_segment(seg.audio)
-        dur = len(audio) / 16000
-        r = self.asr.transcribe(audio, build_prompt(terms, sess.prev_text))
-        text = clean_transcript(r.text, duration_s=dur, avg_logprob=r.avg_logprob,
-                                no_speech_prob=r.no_speech_prob, prompt_terms=", ".join(terms))
-        asr_s = r.elapsed
-        if text and sess.prev_text and similarity(text, sess.prev_text) > 0.85:
-            # Whisper may echo its prompt (the previous line); check without it
-            r2 = self.asr.transcribe(audio, build_prompt(terms, ""))
-            asr_s += r2.elapsed
-            text = clean_transcript(r2.text, duration_s=dur, avg_logprob=r2.avg_logprob,
-                                    no_speech_prob=r2.no_speech_prob, prompt_terms=", ".join(terms))
+        done, self._early_done = self._early_done, None
+        key = (round(seg.start, 3), seg.last_strong)
+        # same line, same clear speech, at most a few frames of trailing quiet more: same words
+        if (done is not None and done[0] == key and not seg.forced
+                and done[4] <= len(seg.audio) <= done[4] + int(0.2 * 16000)
+                and done[1] == build_prompt(self._terms(), sess.prev_text)):
+            text, asr_s = done[2], done[3]          # transcribed during the pause: same audio, same prompt
+            sess.stats["early_hits"] += 1
+        else:
+            if done is not None:
+                log.debug("early text not usable: %s vs %s (forced=%s)", done[0], key, seg.forced)
+            text, asr_s, _ = self._transcribe_line(sess, seg.audio)
         if self.partial.get("start") is not None and self.partial["start"] <= seg.start + 0.05:
             self.partial = {"text": "", "start": None}
             self.publish({"type": "partial", "text": "", "start": None})
@@ -750,7 +1039,7 @@ class Pipeline:
         sess.stats["asr_s"].append(asr_s)
         ln_meta = {"asr_s": round(asr_s, 3), "speech_end": seg.end, "closed": seg.detected_at,
                    "t_line": time.monotonic()}
-        self.publish({"type": "line", "line": self._line_dict(ln), "lat": {"asr_s": round(asr_s, 2)}})
+        self.publish({"type": "line", "line": self._line_dict(ln), "meeting": m.id, "lat": {"asr_s": round(asr_s, 2)}})
         self._tr_q.put(("line", sess, ln, True, ln_meta))
 
     # ================================================================ translation
@@ -834,10 +1123,18 @@ class Pipeline:
                               "ok": ln.ok})
                 return
         else:
+            asr_before, asr_was_active = self._asr_runs, self._asr_active
             res = self._translate_with_watchdog(ln.de, on_delta, record)
-        if not res.ok and ln.done and ln.ok and origin != "live":
+            if res.ok and record and not asr_was_active and not self._asr_active and self._asr_runs == asr_before:
+                self.gov.note_llm(res.tok_s)          # a clean sample: no speech pass ran meanwhile
+        # the meeting may have been continued from disk meanwhile: write into the copy the app uses now
+        m = self.meeting_object(sess.meeting.id) or sess.meeting
+        cur = ln if m is sess.meeting else next((x for x in m.lines if x.id == ln.id), ln)
+        if not res.ok and cur.done and cur.ok and origin != "live":
             return      # keep the good translation a line already has
         self._note_retry(sess, ln, res.ok)
+        st = res.stats or {}
+        self.gov.note_work((st.get("prompt_s") or 0) + (st.get("gen_s") or 0) if st else res.total_s)
         if res.ok:
             if self._llm_fail_noticed:
                 self._llm_fail_noticed = False
@@ -852,8 +1149,8 @@ class Pipeline:
                                       "these lines automatically (or click a line's ↻).")
         # only a complete translation is saved; a failed / cut-off one is retried
         en = res.text if res.ok else ""
-        if res.ok or not ln.done:          # a line that failed before and failed again: nothing new to save
-            self.store.set_translation(sess.meeting, ln.id, en, res.ok)
+        if res.ok or not cur.done:         # a line that failed before and failed again: nothing new to save
+            self.store.set_translation(m, ln.id, en, res.ok)
         lat = {"tr_first_s": round(res.first_token_s, 2), "tr_total_s": round(res.total_s, 2)}
         if res.stats:
             lat["tok_s"] = res.stats.get("tok_s")
@@ -882,6 +1179,7 @@ class Pipeline:
                 e = self._retry_pending[key] = {"sess": sess, "ln": ln, "attempts": 0}
             else:
                 e["attempts"] += 1
+                e.pop("deferred", None)           # tried now: the normal retry rules apply
             # back off: 10 s, 20 s, 40 s ... up to 5 min; give up after RETRY_MAX_ATTEMPTS (↻ still works)
             if e["attempts"] >= self.RETRY_MAX_ATTEMPTS:
                 del self._retry_pending[key]
@@ -911,19 +1209,44 @@ class Pipeline:
             if e is not None:
                 e["next_at"] = time.monotonic() + 1.0
 
+    def _defer_old_lines(self, sess: Session) -> None:
+        """Lines of the previous meeting still waiting for English: the new meeting's lines go
+        first; the old ones are translated in the background when the translator is free."""
+        with self._tr_q.mutex:
+            # (a ↻ the user asked for stays in the queue)
+            old = [j for j in self._tr_q.queue if j[0] == "line" and j[1] is not sess
+                   and (len(j) < 6 or j[5] == "live")]
+            for j in old:
+                self._tr_q.queue.remove(j)
+        now = time.monotonic()
+        with self._retry_lock:
+            for j in old:
+                s0, ln0 = j[1], j[2]
+                if s0.meeting is sess.meeting:
+                    s0 = sess                     # the same meeting, continued
+                key = (s0.meeting.id, ln0.id)
+                if key not in self._retry_pending and not (ln0.done and ln0.ok):
+                    # never tried yet: kept until translated, also after the next meeting has stopped
+                    self._retry_pending[key] = {"sess": s0, "ln": ln0, "attempts": 0, "next_at": now,
+                                                "deferred": True}
+
     def _adopt_retries(self, sess: Session) -> None:
-        """A continued meeting: its untranslated lines are retried as part of the new session."""
+        """A continued meeting: its untranslated lines are retried as part of the new session - the
+        failed ones, and the ones that never got their English (the app was quit before)."""
         now = time.monotonic()
         with self._retry_lock:
             for ln in sess.meeting.lines:
-                if ln.done and not ln.ok:
-                    key = (sess.meeting.id, ln.id)
-                    e = self._retry_pending.get(key)
-                    if e is None:
-                        self._retry_pending[key] = {"sess": sess, "ln": ln, "attempts": 0,
-                                                    "next_at": now + self.RETRY_FIRST_S}
-                    else:
-                        e["sess"], e["ln"] = sess, ln
+                if ln.done and ln.ok:
+                    continue
+                key = (sess.meeting.id, ln.id)
+                e = self._retry_pending.get(key)
+                if e is None:
+                    e = self._retry_pending[key] = {"sess": sess, "ln": ln, "attempts": 0,
+                                                    "next_at": now + (self.RETRY_FIRST_S if ln.done else 0.0)}
+                else:
+                    e["sess"], e["ln"] = sess, ln      # (a copy loaded from disk: write to this one)
+                if not ln.done and e["attempts"] == 0:
+                    e["deferred"] = True               # never tried: kept until translated, like a backlog line
 
     def _retry_soon(self) -> None:
         """Something changed for the better (Ollama back, faster model): retry waiting lines now."""
@@ -944,7 +1267,8 @@ class Pipeline:
             return None     # the model is (re)loading: the next live line does that, retries wait
         live = set(id(x) for x in self._sessions_for_retry())
         with self._retry_lock:
-            for key in [k for k, e in self._retry_pending.items() if id(e["sess"]) not in live]:
+            for key in [k for k, e in self._retry_pending.items()
+                        if id(e["sess"]) not in live and not e.get("deferred")]:
                 del self._retry_pending[key]      # meeting no longer active (stopped > 10 min ago, deleted)
             due = [e for e in self._retry_pending.values() if e["next_at"] <= now]
             if not due:
@@ -1031,17 +1355,39 @@ class Pipeline:
             self._switch_model(fb, cur, reason)
             return True
 
-    def _switch_model(self, new: str, old: str, reason: str) -> None:
+    def _switch_model(self, new: str, old: str, reason: str, note: str = "") -> None:
         log.warning("switching translation model %s -> %s: %s", old, new, reason)
         self.translator.configure(model=new)
+        self.gov.reset_baselines()
         self._slow_strikes = 0
         self._replaced_model = old
         self._safe_set_llm(model=new, fallback_active=True, loaded=False, speed="unknown", tok_s=None)
-        self._notice("warn", f"{reason}. Switched to the faster model {new} for this session - lines keep coming. "
-                             "(Settings → Translation to change the default.)")
+        self._notice("warn", note or f"{reason}. Switched to the faster model {new} for this session - lines keep "
+                                     "coming. (Settings → Translation to change the default.)")
         # free the memory the slow model was using (repeated by the health check if it is still loading now)
         threading.Thread(target=self.translator.unload, args=(old,), daemon=True).start()
         self._retry_soon()
+
+    def _try_upgrade(self) -> None:
+        """The chosen model finished downloading: use it from now on (between meetings, so a
+        meeting never changes translator half-way). If it turns out too slow, the usual
+        watchdog switches back to the fast model during the next meeting."""
+        model, self._upgrade_to = self._upgrade_to, ""
+        fb = self.translator.model
+        try:
+            if self.state != "idle" or self.settings.llm_model != model or fb == model:
+                return
+            self.translator.configure(model=model)
+            self.gov.reset_baselines()
+            self._replaced_model = fb
+            self._safe_set_llm(model=model, fallback_active=False, loaded=False, speed="unknown", tok_s=None)
+            self._notice("info", f"{model} is downloaded - translating with it from now on.")
+            threading.Thread(target=self.translator.unload, args=(fb,), daemon=True).start()
+        except Exception:  # noqa: BLE001
+            log.exception("translation model switch failed")
+        finally:
+            self._upgrading = False
+        self._refresh_llm(True)
 
     def _pull_then_switch(self, fb: str, cur: str) -> None:
         try:
@@ -1171,10 +1517,23 @@ class Pipeline:
                 log.exception("Ollama health check failed")
             if (self.llm_state["running"] and not self.llm_state["model_ready"]
                     and self.translator.model not in self._pulling and not self._auto_pulled):
-                # the translation model is missing (setup interrupted?): fetch it once, automatically
+                # the translation model is missing (setup interrupted / new default): fetch it once,
+                # automatically - and translate with the fallback meanwhile instead of failing lines
                 self._auto_pulled = True
-                self._notice("warn", f"Downloading the translation model {self.translator.model} (one time, ~3 GB)…")
-                self.pull_model(self.translator.model)
+                missing = self.translator.model
+                fb = (self.settings.llm_fallback or "").strip()
+                if fb and fb != missing and self._installed(fb):
+                    self._upgrade_to = missing
+                    self._switch_model(fb, missing, f"{missing} is not downloaded yet",
+                                       note=f"Translating with {fb} while {missing} downloads in the background "
+                                            "(one time). The app switches to it after the meeting.")
+                else:
+                    self._notice("warn", f"Downloading the translation model {missing} (one time, ~3 GB)…")
+                self.pull_model(missing)
+            if (self._upgrade_to and self.state == "idle" and not self._upgrading
+                    and self._upgrade_to not in self._pulling and self._installed(self._upgrade_to)):
+                self._upgrading = True
+                threading.Thread(target=self._try_upgrade, name="llm-upgrade", daemon=True).start()
             if self.llm_state["running"] and self.llm_state["model_ready"] and not warmed:
                 warmed = True
                 threading.Thread(target=self._warm_llm, daemon=True).start()
